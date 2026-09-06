@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+
+# Secret Keys
+keys/private.pem
+
+# Logs & build
+*.log
+dist/
+.system_generated/
