@@ -80,6 +80,10 @@ describe('ship components over HTTP', () => {
     });
     assert.equal(up.statusCode, 200);
     assert.equal(JSON.parse(up.body).ship_attributes.max_hull_hp, 500);
+    const reissued = app.jwt.verify(JSON.parse(up.body).token);
+    assert.equal(reissued.sub, app.jwt.verify(token).sub);
+    assert.equal(reissued.mock, true);
+    assert.equal(reissued.ship_attributes.max_hull_hp, 500);
 
     for (const payload of [
       { componentType: 'HULL', targetTier: 6 },
