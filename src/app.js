@@ -5,6 +5,7 @@ import prismaPlugin from './plugins/prisma.js';
 import securityPlugin from './plugins/security.js';
 import authRoutes from './routes/auth/index.js';
 import gameRoutes from './routes/game/index.js';
+import tradeRoutes from './routes/game/trade.js';
 import shipRoutes from './routes/ship/index.js';
 
 const fastify = Fastify({
@@ -24,6 +25,7 @@ await fastify.register(securityPlugin);
 // Register Routes
 await fastify.register(authRoutes, { prefix: '/auth' });
 await fastify.register(gameRoutes, { prefix: '/game' });
+await fastify.register(tradeRoutes, { prefix: '/game' });
 await fastify.register(shipRoutes, { prefix: '/ship' });
 
 // Health check endpoint

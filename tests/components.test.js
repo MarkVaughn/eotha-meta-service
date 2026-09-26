@@ -12,7 +12,7 @@ describe('computeShipAttributes', () => {
     assert.equal(a.shield_regen_rate, 5);
     assert.equal(a.radar_range_m, 500);
     assert.equal(a.identification_range_m, 150);
-    assert.equal(a.cargo_capacity_m3, 10);
+    assert.equal(a.cargo_capacity_m3, 20);
     assert.equal(a.stealth_rating, 0.0);
     assert.equal(a.signature_dissipation_rate, 1.0);
     assert.equal(a.weapon_dps, 10);
@@ -29,7 +29,7 @@ describe('computeShipAttributes', () => {
     assert.deepEqual(a, {
       max_hull_hp: 2000, dry_mass_kg: 4000,
       max_shield_hp: 1000, shield_regen_rate: 50,
-      radar_range_m: 4000, identification_range_m: 2000, cargo_capacity_m3: 200, stealth_rating: 0.8,
+      radar_range_m: 4000, identification_range_m: 2000, cargo_capacity_m3: 320, stealth_rating: 0.8,
       signature_dissipation_rate: 2.2,
       weapon_dps: 200, weapon_range_m: 1000,
       energy_capacity: 1500, energy_regen_rate: 75,
@@ -148,5 +148,13 @@ describe('ship components over HTTP', () => {
       const bad = await app.inject({ method: 'POST', url: '/ship/upgrade', headers, payload });
       assert.equal(bad.statusCode, 400);
     }
+  });
+});
+
+describe('cargo capacity matrix', () => {
+  test('maps every cargo tier to its capacity', () => {
+    [20.0, 40.0, 80.0, 160.0, 320.0].forEach((cap, i) => {
+      assert.equal(computeShipAttributes([{ type: 'CARGO', tier: i + 1 }]).cargo_capacity_m3, cap);
+    });
   });
 });

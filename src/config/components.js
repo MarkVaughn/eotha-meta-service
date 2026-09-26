@@ -19,7 +19,7 @@ const TIER_TABLE = {
     radar_range_m: [500, 1000, 1800, 2500, 4000],
     identification_range_m: [150, 350, 700, 1100, 2000]
   },
-  CARGO: { cargo_capacity_m3: [10, 25, 50, 100, 200] },
+  CARGO: { cargo_capacity_m3: [20.0, 40.0, 80.0, 160.0, 320.0] },
   STEALTH: {
     stealth_rating: [0.0, 0.2, 0.4, 0.6, 0.8],
     signature_dissipation_rate: [1.0, 1.25, 1.5, 1.8, 2.2]
