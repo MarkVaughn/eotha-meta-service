@@ -70,6 +70,23 @@ export const devLoginSchema = {
             id: { type: 'string' },
             callsign: { type: 'string' },
             dev: { type: 'boolean' },
+            ship: {
+              type: 'object',
+              properties: {
+                components: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      type: { type: 'string' },
+                      tier: { type: 'integer' },
+                      healthPct: { type: 'integer' }
+                    }
+                  }
+                },
+                ship_attributes: { type: 'object', additionalProperties: { type: 'number' } }
+              }
+            },
             spawn_point: {
               type: 'object',
               properties: {

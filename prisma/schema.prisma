@@ -17,6 +17,7 @@ model Player {
   updatedAt    DateTime      @updatedAt
   harbor       SpaceHarbor?
   session      GameSession?
+  spaceships   Spaceship[]
 }
 
 model SpaceHarbor {
@@ -42,4 +43,27 @@ model GameSession {
   rtseHost   String   // Internal domain/service of the allocated RTSE instance [3]
   connected  Boolean  @default(false)
   updatedAt  DateTime @updatedAt
+}
+
+model Spaceship {
+  id         String                @id @default(uuid()) @db.Uuid
+  playerId   String                @db.Uuid
+  player     Player                @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  callsign   String
+  active     Boolean               @default(true)
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
+  components ShipComponentRecord[]
+}
+
+model ShipComponentRecord {
+  id          String    @id @default(uuid()) @db.Uuid
+  spaceshipId String    @db.Uuid
+  spaceship   Spaceship @relation(fields: [spaceshipId], references: [id], onDelete: Cascade)
+  type        String    // HULL, RADAR, CARGO, STEALTH, SHIELDS, WEAPONS, ENERGY, COMMS, ENGINES
+  tier        Int       @default(1)
+  healthPct   Int       @default(100)
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([spaceshipId, type])
 }

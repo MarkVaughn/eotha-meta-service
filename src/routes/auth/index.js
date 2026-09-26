@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { computeShipAttributes, defaultComponents } from '../../config/components.js';
 import { registerSchema, loginSchema, devLoginSchema } from './schema.js';
 
 export default async function authRoutes(fastify, opts) {
@@ -65,12 +66,16 @@ export default async function authRoutes(fastify, opts) {
     // Simulate an instant development ID
     const mockId = crypto.randomUUID();
 
+    const components = defaultComponents();
+    const shipAttributes = computeShipAttributes(components);
+
     // Sign complete production claims. The Rust RTSE verifies this token as if it were production [3].
     const token = fastify.jwt.sign({
       sub: mockId,
       callsign,
       home_h3: h3,
-      mock: true
+      mock: true,
+      ship_attributes: shipAttributes
     });
 
     fastify.log.info(`🎯 Dev token minted for pilot ${callsign} located at H3: ${h3}`);
@@ -82,6 +87,10 @@ export default async function authRoutes(fastify, opts) {
         id: mockId,
         callsign,
         dev: true,
+        ship: {
+          components,
+          ship_attributes: shipAttributes
+        },
         spawn_point: {
           latitude: parseFloat(latitude),
           longitude: parseFloat(longitude),
