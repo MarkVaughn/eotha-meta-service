@@ -20,7 +20,10 @@ const TIER_TABLE = {
     identification_range_m: [150, 350, 700, 1100, 2000]
   },
   CARGO: { cargo_capacity_m3: [10, 25, 50, 100, 200] },
-  STEALTH: { stealth_rating: [0.0, 0.2, 0.4, 0.6, 0.8] },
+  STEALTH: {
+    stealth_rating: [0.0, 0.2, 0.4, 0.6, 0.8],
+    signature_dissipation_rate: [1.0, 1.25, 1.5, 1.8, 2.2]
+  },
   WEAPONS: {
     weapon_dps: [10, 25, 50, 100, 200],
     weapon_range_m: [300, 450, 600, 800, 1000]
