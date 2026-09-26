@@ -14,6 +14,7 @@ describe('computeShipAttributes', () => {
     assert.equal(a.identification_range_m, 150);
     assert.equal(a.cargo_capacity_m3, 10);
     assert.equal(a.stealth_rating, 0.0);
+    assert.equal(a.signature_dissipation_rate, 1.0);
     assert.equal(a.weapon_dps, 10);
     assert.equal(a.weapon_range_m, 300);
     assert.equal(a.energy_capacity, 100);
@@ -29,6 +30,7 @@ describe('computeShipAttributes', () => {
       max_hull_hp: 2000, dry_mass_kg: 4000,
       max_shield_hp: 1000, shield_regen_rate: 50,
       radar_range_m: 4000, identification_range_m: 2000, cargo_capacity_m3: 200, stealth_rating: 0.8,
+      signature_dissipation_rate: 2.2,
       weapon_dps: 200, weapon_range_m: 1000,
       energy_capacity: 1500, energy_regen_rate: 75,
       comms_range_m: 25000, max_speed_mps: 100
@@ -52,6 +54,21 @@ describe('computeShipAttributes', () => {
       const a = computeShipAttributes([{ type: 'RADAR', tier: i + 1 }]);
       assert.equal(a.identification_range_m, range);
     });
+  });
+
+  test('maps every stealth tier to its signature dissipation rate', () => {
+    const expected = [1.0, 1.25, 1.5, 1.8, 2.2];
+    expected.forEach((rate, i) => {
+      const a = computeShipAttributes([{ type: 'STEALTH', tier: i + 1 }]);
+      assert.equal(a.signature_dissipation_rate, rate);
+    });
+  });
+
+  test('falls back to Tier 1 signature dissipation rate for invalid tiers', () => {
+    for (const tier of [0, 6, 2.5, null, undefined, 'x']) {
+      const a = computeShipAttributes([{ type: 'STEALTH', tier }]);
+      assert.equal(a.signature_dissipation_rate, 1.0);
+    }
   });
 
   test('falls back to Tier 1 identification range for invalid tiers', () => {
@@ -78,6 +95,7 @@ describe('ship components over HTTP', () => {
     assert.deepEqual(json.player.ship.ship_attributes, computeShipAttributes(defaultComponents()));
     const decoded = app.jwt.verify(json.token);
     assert.equal(decoded.ship_attributes.identification_range_m, 150);
+    assert.equal(decoded.ship_attributes.signature_dissipation_rate, 1.0);
     assert.deepEqual(decoded.ship_attributes, json.player.ship.ship_attributes);
   });
 
@@ -111,6 +129,15 @@ describe('ship components over HTTP', () => {
     const radarBody = JSON.parse(radarUp.body);
     assert.equal(radarBody.ship_attributes.identification_range_m, 700);
     assert.equal(app.jwt.verify(radarBody.token).ship_attributes.identification_range_m, 700);
+
+    const stealthUp = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'STEALTH', targetTier: 4 }
+    });
+    assert.equal(stealthUp.statusCode, 200);
+    const stealthBody = JSON.parse(stealthUp.body);
+    assert.equal(stealthBody.ship_attributes.signature_dissipation_rate, 1.8);
+    assert.equal(app.jwt.verify(stealthBody.token).ship_attributes.signature_dissipation_rate, 1.8);
 
     for (const payload of [
       { componentType: 'HULL', targetTier: 6 },
