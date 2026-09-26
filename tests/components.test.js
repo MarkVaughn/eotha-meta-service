@@ -11,6 +11,7 @@ describe('computeShipAttributes', () => {
     assert.equal(a.max_shield_hp, 50);
     assert.equal(a.shield_regen_rate, 5);
     assert.equal(a.radar_range_m, 500);
+    assert.equal(a.identification_range_m, 150);
     assert.equal(a.cargo_capacity_m3, 10);
     assert.equal(a.stealth_rating, 0.0);
     assert.equal(a.weapon_dps, 10);
@@ -27,7 +28,7 @@ describe('computeShipAttributes', () => {
     assert.deepEqual(a, {
       max_hull_hp: 2000, dry_mass_kg: 4000,
       max_shield_hp: 1000, shield_regen_rate: 50,
-      radar_range_m: 4000, cargo_capacity_m3: 200, stealth_rating: 0.8,
+      radar_range_m: 4000, identification_range_m: 2000, cargo_capacity_m3: 200, stealth_rating: 0.8,
       weapon_dps: 200, weapon_range_m: 1000,
       energy_capacity: 1500, energy_regen_rate: 75,
       comms_range_m: 25000, max_speed_mps: 100
@@ -41,7 +42,23 @@ describe('computeShipAttributes', () => {
     assert.equal(a.dry_mass_kg, 2200);
     assert.equal(a.max_speed_mps, 35);
     assert.equal(a.radar_range_m, 500);
+    assert.equal(a.identification_range_m, 150);
     assert.deepEqual(computeShipAttributes(comps), a);
+  });
+
+  test('maps every radar tier to its identification range', () => {
+    const expected = [150, 350, 700, 1100, 2000];
+    expected.forEach((range, i) => {
+      const a = computeShipAttributes([{ type: 'RADAR', tier: i + 1 }]);
+      assert.equal(a.identification_range_m, range);
+    });
+  });
+
+  test('falls back to Tier 1 identification range for invalid tiers', () => {
+    for (const tier of [0, 6, 2.5, null, undefined, 'x']) {
+      const a = computeShipAttributes([{ type: 'RADAR', tier }]);
+      assert.equal(a.identification_range_m, 150);
+    }
   });
 });
 
@@ -60,6 +77,7 @@ describe('ship components over HTTP', () => {
     assert.ok(json.player.ship.components.every((c) => c.tier === 1));
     assert.deepEqual(json.player.ship.ship_attributes, computeShipAttributes(defaultComponents()));
     const decoded = app.jwt.verify(json.token);
+    assert.equal(decoded.ship_attributes.identification_range_m, 150);
     assert.deepEqual(decoded.ship_attributes, json.player.ship.ship_attributes);
   });
 
@@ -84,6 +102,15 @@ describe('ship components over HTTP', () => {
     assert.equal(reissued.sub, app.jwt.verify(token).sub);
     assert.equal(reissued.mock, true);
     assert.equal(reissued.ship_attributes.max_hull_hp, 500);
+
+    const radarUp = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'RADAR', targetTier: 3 }
+    });
+    assert.equal(radarUp.statusCode, 200);
+    const radarBody = JSON.parse(radarUp.body);
+    assert.equal(radarBody.ship_attributes.identification_range_m, 700);
+    assert.equal(app.jwt.verify(radarBody.token).ship_attributes.identification_range_m, 700);
 
     for (const payload of [
       { componentType: 'HULL', targetTier: 6 },

@@ -15,7 +15,10 @@ const TIER_TABLE = {
     max_shield_hp: [50, 120, 250, 500, 1000],
     shield_regen_rate: [5, 10, 20, 35, 50]
   },
-  RADAR: { radar_range_m: [500, 1000, 1800, 2500, 4000] },
+  RADAR: {
+    radar_range_m: [500, 1000, 1800, 2500, 4000],
+    identification_range_m: [150, 350, 700, 1100, 2000]
+  },
   CARGO: { cargo_capacity_m3: [10, 25, 50, 100, 200] },
   STEALTH: { stealth_rating: [0.0, 0.2, 0.4, 0.6, 0.8] },
   WEAPONS: {
