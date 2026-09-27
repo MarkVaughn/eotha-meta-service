@@ -18,6 +18,8 @@ model Player {
   harbor       SpaceHarbor?
   session      GameSession?
   spaceships   Spaceship[]
+  credits      Int           @default(0)
+  trades       TradeTransaction[]
 }
 
 model SpaceHarbor {
@@ -66,4 +68,17 @@ model ShipComponentRecord {
   updatedAt   DateTime  @updatedAt
 
   @@unique([spaceshipId, type])
+}
+
+model TradeTransaction {
+  id         String   @id @default(uuid()) @db.Uuid
+  playerId   String   @db.Uuid
+  player     Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  resource   String   // METAL, GAS
+  quantity   Int
+  unitPrice  Int
+  total      Int
+  createdAt  DateTime @default(now())
+
+  @@index([playerId, createdAt])
 }

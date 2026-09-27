@@ -50,10 +50,18 @@ export default async function authRoutes(fastify, opts) {
       return reply.code(401).send({ error: 'Invalid user credentials.' });
     }
 
+    // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet).
+    const ship = await prisma.spaceship.findFirst({
+      where: { playerId: player.id, active: true },
+      orderBy: { createdAt: 'asc' },
+      include: { components: true }
+    });
+
     const token = fastify.jwt.sign({
       sub: player.id,
       callsign: player.callsign,
-      home_h3: player.harbor?.h3Index || "881f1d4887fffff"
+      home_h3: player.harbor?.h3Index || "881f1d4887fffff",
+      ship_attributes: computeShipAttributes(ship?.components ?? [])
     });
 
     return { token, player: { id: player.id, callsign: player.callsign } };
