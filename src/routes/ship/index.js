@@ -1,9 +1,12 @@
 import {
   COMPONENT_TYPES,
+  ESSENTIAL_COMPONENTS,
   MIN_TIER,
   MAX_TIER,
   computeShipAttributes,
-  defaultComponents
+  defaultComponents,
+  hullBudget,
+  totalSubsystemPoints
 } from '../../config/components.js';
 
 const upgradeSchema = {
@@ -12,7 +15,7 @@ const upgradeSchema = {
     required: ['componentType', 'targetTier'],
     properties: {
       componentType: { type: 'string', enum: COMPONENT_TYPES },
-      targetTier: { type: 'integer', minimum: MIN_TIER, maximum: MAX_TIER }
+      targetTier: { type: 'integer', minimum: 0, maximum: MAX_TIER }
     }
   }
 };
@@ -20,7 +23,8 @@ const upgradeSchema = {
 function toLoadout(shipId, components) {
   const list = COMPONENT_TYPES.map((type) => {
     const found = components.find((c) => c.type === type);
-    return { type, tier: found?.tier ?? MIN_TIER, healthPct: found?.healthPct ?? 100 };
+    const fallbackTier = ESSENTIAL_COMPONENTS.includes(type) ? MIN_TIER : 0;
+    return { type, tier: found?.tier ?? fallbackTier, healthPct: found?.healthPct ?? 100 };
   });
   return { ship_id: shipId, components: list, ship_attributes: computeShipAttributes(list) };
 }
@@ -77,7 +81,35 @@ export default async function shipRoutes(fastify, opts) {
 
   fastify.post('/upgrade', { schema: upgradeSchema }, async (request, reply) => {
     const { componentType, targetTier } = request.body;
+
+    if (ESSENTIAL_COMPONENTS.includes(componentType) && targetTier === 0) {
+      return reply.code(400).send({
+        error: `${componentType} is an essential component and cannot be unequipped (minimum tier is 1).`
+      });
+    }
+
     const ship = await getActiveShip(request);
+
+    const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
+    const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
+    const currentPoints = totalSubsystemPoints(ship.components);
+
+    if (componentType === 'HULL') {
+      const budget = hullBudget(targetTier);
+      if (currentPoints > budget) {
+        return reply.code(400).send({
+          error: `Upgrade exceeds Hull Tier ${targetTier} budget of ${budget} points (requested: ${currentPoints}).`
+        });
+      }
+    } else {
+      const projectedPoints = currentPoints - currentComponentTier + targetTier;
+      const budget = hullBudget(currentHullTier);
+      if (projectedPoints > budget) {
+        return reply.code(400).send({
+          error: `Upgrade exceeds Hull Tier ${currentHullTier} budget of ${budget} points (requested: ${projectedPoints}).`
+        });
+      }
+    }
 
     if (ship.mock) {
       const current = ship.components.find((c) => c.type === componentType);

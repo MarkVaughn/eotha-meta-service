@@ -1,7 +1,14 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import app from '../src/app.js';
-import { computeShipAttributes, defaultComponents, COMPONENT_TYPES } from '../src/config/components.js';
+import {
+  computeShipAttributes,
+  defaultComponents,
+  COMPONENT_TYPES,
+  OPTIONAL_COMPONENTS,
+  hullBudget,
+  totalSubsystemPoints
+} from '../src/config/components.js';
 
 describe('computeShipAttributes', () => {
   test('defaults missing components to Tier 1', () => {
@@ -21,6 +28,7 @@ describe('computeShipAttributes', () => {
     assert.equal(a.energy_regen_rate, 10);
     assert.equal(a.comms_range_m, 1000);
     assert.equal(a.max_speed_mps, 20);
+    assert.equal(a.passenger_capacity, 2);
     assert.deepEqual(computeShipAttributes(), a);
   });
 
@@ -33,8 +41,37 @@ describe('computeShipAttributes', () => {
       signature_dissipation_rate: 2.2,
       weapon_dps: 200, weapon_range_m: 1000,
       energy_capacity: 1500, energy_regen_rate: 75,
-      comms_range_m: 25000, max_speed_mps: 100
+      comms_range_m: 25000, max_speed_mps: 100,
+      passenger_capacity: 50
     });
+  });
+
+  test('maps every life support tier to its passenger capacity', () => {
+    const expected = [2, 5, 10, 20, 50];
+    expected.forEach((capacity, i) => {
+      const a = computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: i + 1 }]);
+      assert.equal(a.passenger_capacity, capacity);
+    });
+  });
+
+  test('Tier 0 optional components yield 0 stats (baseline nominal for rate multipliers)', () => {
+    const zeroedAttrsByType = {
+      SHIELDS: ['max_shield_hp', 'shield_regen_rate'],
+      WEAPONS: ['weapon_dps', 'weapon_range_m'],
+      CARGO: ['cargo_capacity_m3'],
+      STEALTH: ['stealth_rating'],
+      COMMS: ['comms_range_m']
+    };
+    assert.deepEqual(Object.keys(zeroedAttrsByType).sort(), [...OPTIONAL_COMPONENTS].sort());
+
+    for (const [type, attrs] of Object.entries(zeroedAttrsByType)) {
+      const a = computeShipAttributes([{ type, tier: 0 }]);
+      for (const attr of attrs) assert.equal(a[attr], 0, `${type} tier 0 expected ${attr} to be 0`);
+    }
+
+    const stealthOff = computeShipAttributes([{ type: 'STEALTH', tier: 0 }]);
+    assert.equal(stealthOff.stealth_rating, 0);
+    assert.equal(stealthOff.signature_dissipation_rate, 1.0);
   });
 
   test('mixes tiers and is deterministic', () => {
@@ -79,6 +116,21 @@ describe('computeShipAttributes', () => {
   });
 });
 
+describe('hullBudget', () => {
+  test('maps hull tiers 1-5 to their subsystem point budgets', () => {
+    assert.equal(hullBudget(1), 5);
+    assert.equal(hullBudget(2), 10);
+    assert.equal(hullBudget(3), 18);
+    assert.equal(hullBudget(4), 27);
+    assert.equal(hullBudget(5), 36);
+  });
+
+  test('sums non-hull component tiers for totalSubsystemPoints', () => {
+    assert.equal(totalSubsystemPoints(defaultComponents()), 5);
+    assert.equal(totalSubsystemPoints([{ type: 'HULL', tier: 5 }, { type: 'RADAR', tier: 3 }]), 3);
+  });
+});
+
 describe('ship components over HTTP', () => {
   before(async () => { await app.ready(); });
   after(async () => { await app.close(); });
@@ -90,8 +142,11 @@ describe('ship components over HTTP', () => {
 
   test('GET /auth/dev-login includes ship and JWT ship_attributes', async () => {
     const json = await login();
-    assert.equal(json.player.ship.components.length, 9);
-    assert.ok(json.player.ship.components.every((c) => c.tier === 1));
+    assert.equal(json.player.ship.components.length, 10);
+    const tierOneTypes = ['HULL', 'RADAR', 'ENGINES', 'ENERGY', 'LIFE_SUPPORT', 'CARGO'];
+    for (const c of json.player.ship.components) {
+      assert.equal(c.tier, tierOneTypes.includes(c.type) ? 1 : 0, `${c.type} default tier`);
+    }
     assert.deepEqual(json.player.ship.ship_attributes, computeShipAttributes(defaultComponents()));
     const decoded = app.jwt.verify(json.token);
     assert.equal(decoded.ship_attributes.identification_range_m, 150);
@@ -148,6 +203,57 @@ describe('ship components over HTTP', () => {
       const bad = await app.inject({ method: 'POST', url: '/ship/upgrade', headers, payload });
       assert.equal(bad.statusCode, 400);
     }
+  });
+
+  test('POST /ship/upgrade enforces hull budget and essential/optional tier 0 rules', async () => {
+    const { token } = await login();
+    const headers = { authorization: `Bearer ${token}` };
+
+    // Default loadout uses exactly the Hull Tier 1 budget (5 points); any further
+    // subsystem upgrade without first raising the hull tier must be rejected.
+    const overBudget = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'RADAR', targetTier: 2 }
+    });
+    assert.equal(overBudget.statusCode, 400);
+    assert.match(JSON.parse(overBudget.body).error, /Hull Tier 1 budget of 5 points/);
+
+    // Essential components cannot be unequipped.
+    const essentialToZero = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'LIFE_SUPPORT', targetTier: 0 }
+    });
+    assert.equal(essentialToZero.statusCode, 400);
+    assert.match(JSON.parse(essentialToZero.body).error, /essential component and cannot be unequipped/);
+
+    // Optional components may be explicitly set to Tier 0 (they already default there).
+    const shieldsAlreadyZero = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'SHIELDS', targetTier: 0 }
+    });
+    assert.equal(shieldsAlreadyZero.statusCode, 400);
+    assert.match(JSON.parse(shieldsAlreadyZero.body).error, /already at tier 0/);
+
+    // Raising the hull tier first grows the budget so the same subsystem upgrade now fits.
+    const hullUp = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'HULL', targetTier: 2 }
+    });
+    assert.equal(hullUp.statusCode, 200);
+
+    const radarUp = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'RADAR', targetTier: 2 }
+    });
+    assert.equal(radarUp.statusCode, 200);
+
+    // Equipping an optional component to a non-zero tier now consumes budget, and is permitted.
+    const shieldsUp = await app.inject({
+      method: 'POST', url: '/ship/upgrade', headers,
+      payload: { componentType: 'SHIELDS', targetTier: 1 }
+    });
+    assert.equal(shieldsUp.statusCode, 200);
+    assert.equal(JSON.parse(shieldsUp.body).ship_attributes.max_shield_hp, 50);
   });
 });
 
