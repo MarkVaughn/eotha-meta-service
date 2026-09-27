@@ -23,6 +23,10 @@ export const EXPEDITED_BONUS_RATE = 0.5;
 // Pacing assumption (seconds/hex) used to grade how "expedited" a completion was.
 // Research expeditions cover the distance twice (there and back).
 export const SECONDS_PER_HEX = 90;
+// A research expedition can't be completed before this fraction of its expected
+// duration has elapsed (server-side, since accept), so a pilot can't accept at
+// the origin and instantly "return" to it.
+export const RESEARCH_EXPEDITION_MIN_ELAPSED_FRACTION = 0.5;
 
 const RESEARCH_SITE_KINDS = ['NEBULA_SURVEY', 'MINING_SITE', 'ANOMALY'];
 const RESEARCH_SITE_LABELS = {
@@ -104,14 +108,18 @@ function buildMissionId(stationId, stationNode, epochHour, index) {
   return `${stationId}::${stationNode}::${epochHour}::${index}`;
 }
 
+// Station ids/nodes are embedded in delimiter-joined mission ids and cooldown
+// keys, so they must not contain the delimiter character themselves.
+export const STATION_TOKEN_PATTERN = '^[^:]+$';
+const STATION_TOKEN_RE = new RegExp(STATION_TOKEN_PATTERN);
+
 export function parseMissionId(missionId) {
   const parts = typeof missionId === 'string' ? missionId.split('::') : [];
   if (parts.length !== 4) return null;
   const [stationId, stationNode, epochHourStr, indexStr] = parts;
-  const epochHour = Number(epochHourStr);
-  const index = Number(indexStr);
-  if (!Number.isInteger(epochHour) || !Number.isInteger(index)) return null;
-  return { stationId, stationNode, epochHour, index };
+  if (!STATION_TOKEN_RE.test(stationId) || !STATION_TOKEN_RE.test(stationNode)) return null;
+  if (!/^\d+$/.test(epochHourStr) || !/^\d+$/.test(indexStr)) return null;
+  return { stationId, stationNode, epochHour: Number(epochHourStr), index: Number(indexStr) };
 }
 
 /**
@@ -159,11 +167,15 @@ export function generateMissions({ stationId, stationNode, passengerCapacity, no
 }
 
 // Re-derive a single offer by missionId (used at accept-time), regenerating
-// the board with the requesting pilot's current passenger capacity.
-export function findMissionOffer(missionId, passengerCapacity) {
+// the board with the requesting pilot's current passenger capacity. Only the
+// current and immediately previous hour's boards are acceptable; arbitrary
+// past/future epoch hours are rejected.
+export function findMissionOffer(missionId, passengerCapacity, now = new Date()) {
   const parsed = parseMissionId(missionId);
   if (!parsed) return null;
   const { stationId, stationNode, epochHour, index } = parsed;
+  const currentEpochHour = epochHourFor(now);
+  if (epochHour !== currentEpochHour && epochHour !== currentEpochHour - 1) return null;
   const missions = generateMissions({
     stationId,
     stationNode,

@@ -1,7 +1,7 @@
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before, after, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import app from '../src/app.js';
-import { generateMissions, findMissionOffer, computePayout } from '../src/config/missions.js';
+import { generateMissions, findMissionOffer, computePayout, parseMissionId } from '../src/config/missions.js';
 
 const FIXED_NOW = new Date('2026-01-01T12:00:00Z');
 
@@ -39,10 +39,31 @@ describe('procedural mission generation', () => {
     }
   });
 
+  test('findMissionOffer rejects arbitrary, future and stale epoch hours', () => {
+    const current = generateMissions({ stationId: 'station-a', stationNode: 'node-1', passengerCapacity: 3, now: FIXED_NOW })[0];
+    const previous = generateMissions({ stationId: 'station-a', stationNode: 'node-1', passengerCapacity: 3, now: new Date(FIXED_NOW.getTime() - 3_600_000) })[0];
+    const future = generateMissions({ stationId: 'station-a', stationNode: 'node-1', passengerCapacity: 3, now: new Date(FIXED_NOW.getTime() + 3_600_000) })[0];
+    const stale = generateMissions({ stationId: 'station-a', stationNode: 'node-1', passengerCapacity: 3, now: new Date(FIXED_NOW.getTime() - 5 * 3_600_000) })[0];
+
+    assert.ok(findMissionOffer(current.missionId, 3, FIXED_NOW));
+    assert.ok(findMissionOffer(previous.missionId, 3, FIXED_NOW));
+    assert.equal(findMissionOffer(future.missionId, 3, FIXED_NOW), null);
+    assert.equal(findMissionOffer(stale.missionId, 3, FIXED_NOW), null);
+  });
+
+  test('parseMissionId rejects malformed ids and delimiter-bearing station tokens', () => {
+    assert.equal(parseMissionId('a::b::1::0')?.stationId, 'a');
+    assert.equal(parseMissionId('a::b::::0'), null);
+    assert.equal(parseMissionId('a::b::1.5::0'), null);
+    assert.equal(parseMissionId('a:::b::1::0'), null);
+    assert.equal(parseMissionId('a::b::1::0::x'), null);
+    assert.equal(parseMissionId(undefined), null);
+  });
+
   test('findMissionOffer re-derives the same mission by id', () => {
     const missions = generateMissions({ stationId: 'station-a', stationNode: 'node-1', passengerCapacity: 3, now: FIXED_NOW });
     const target = missions[0];
-    const offer = findMissionOffer(target.missionId, 3);
+    const offer = findMissionOffer(target.missionId, 3, FIXED_NOW);
     assert.deepEqual(offer, target);
   });
 });
@@ -60,6 +81,20 @@ describe('computePayout', () => {
   });
 });
 
+// Shifts Date.now() forward so tests can simulate time passing without waiting.
+let clockOffsetMs = 0;
+function advanceClock(ms) {
+  if (!Date.now.mock) {
+    const realNow = Date.now.bind(Date);
+    mock.method(Date, 'now', () => realNow() + clockOffsetMs);
+  }
+  clockOffsetMs += ms;
+}
+function resetClock() {
+  clockOffsetMs = 0;
+  mock.restoreAll();
+}
+
 describe('missions API', () => {
   let token;
   let headers;
@@ -71,6 +106,7 @@ describe('missions API', () => {
     headers = { authorization: `Bearer ${token}` };
   });
   after(async () => { await app.close(); });
+  afterEach(resetClock);
 
   test('requires auth', async () => {
     const res = await app.inject({ method: 'GET', url: '/game/missions/available?stationId=s1&stationNode=n1' });
@@ -121,6 +157,9 @@ describe('missions API', () => {
     const destinationStationNode = accepted.roundTrip ? accepted.originStationNode : accepted.destination.node;
 
     const creditsBefore = JSON.parse((await app.inject({ method: 'GET', url: '/game/credits', headers })).body).credits;
+
+    // Round-trip expeditions need real time underway before they can complete.
+    if (accepted.roundTrip) advanceClock(accepted.expectedSeconds * 1000);
 
     const completeRes = await app.inject({
       method: 'POST',
@@ -181,5 +220,145 @@ describe('missions API', () => {
   test('rejects accepting an unknown mission id', async () => {
     const res = await app.inject({ method: 'POST', url: '/game/missions/accept', headers, payload: { missionId: 'not-a-real-id' } });
     assert.equal(res.statusCode, 404);
+  });
+
+  // --- Remediation coverage (PR #6 review) ---
+
+  const post = (url, payload) => app.inject({ method: 'POST', url: `/game/missions/${url}`, headers, payload });
+  const json = (res) => JSON.parse(res.body);
+
+  async function boardAt(stationId, stationNode) {
+    const res = await app.inject({ method: 'GET', url: `/game/missions/available?stationId=${stationId}&stationNode=${stationNode}`, headers });
+    return json(res);
+  }
+
+  // Scans distinct stations until an offer of the requested type turns up.
+  async function acceptOfferOfType(type, prefix) {
+    for (let i = 0; i < 200; i++) {
+      const stationId = `${prefix}-${i}`;
+      const board = await boardAt(stationId, `${prefix}-node-${i}`);
+      const offer = board.missions.find((m) => m.type === type);
+      if (offer) {
+        const res = await post('accept', { missionId: offer.missionId });
+        assert.equal(res.statusCode, 200);
+        return json(res);
+      }
+    }
+    throw new Error(`no ${type} offer found`);
+  }
+
+  const destinationOf = (m) => (m.roundTrip
+    ? { currentStationId: m.originStationId, currentStationNode: m.originStationNode }
+    : { currentStationId: m.destination.stationId, currentStationNode: m.destination.node });
+
+  test('cannot complete a mission without accepting it first', async () => {
+    const board = await boardAt('unaccepted-1', 'unaccepted-node-1');
+    const offer = board.missions[0];
+    const res = await post('complete', {
+      missionId: offer.missionId,
+      currentStationId: offer.originStationId,
+      currentStationNode: offer.originStationNode,
+      elapsedSeconds: 9999
+    });
+    assert.equal(res.statusCode, 404);
+  });
+
+  test('cannot complete with a missionId that differs from the active mission', async () => {
+    const accepted = await acceptOfferOfType('ONE_WAY_PASSAGE', 'mismatch');
+    const res = await post('complete', { missionId: `${accepted.missionId}x`, ...destinationOf(accepted), elapsedSeconds: 9999 });
+    assert.equal(res.statusCode, 404);
+    await post('abandon');
+  });
+
+  test('cannot complete a one-way passage at the wrong destination', async () => {
+    const accepted = await acceptOfferOfType('ONE_WAY_PASSAGE', 'wrongdest');
+    const creditsBefore = json(await app.inject({ method: 'GET', url: '/game/credits', headers })).credits;
+
+    // Right node, wrong station; and right station, wrong node.
+    for (const wrong of [
+      { currentStationId: accepted.originStationId, currentStationNode: accepted.destination.node },
+      { currentStationId: accepted.destination.stationId, currentStationNode: accepted.originStationNode }
+    ]) {
+      const res = await post('complete', { missionId: accepted.missionId, ...wrong, elapsedSeconds: 9999 });
+      assert.equal(res.statusCode, 400);
+    }
+
+    const creditsAfter = json(await app.inject({ method: 'GET', url: '/game/credits', headers })).credits;
+    assert.equal(creditsAfter, creditsBefore);
+    assert.equal(json(await app.inject({ method: 'GET', url: '/game/missions/active', headers })).mission.missionId, accepted.missionId);
+    await post('abandon');
+  });
+
+  test('a round-trip expedition cannot complete immediately without time underway', async () => {
+    const accepted = await acceptOfferOfType('RESEARCH_EXPEDITION', 'roundtrip');
+    const payload = { missionId: accepted.missionId, ...destinationOf(accepted), elapsedSeconds: 9999 };
+
+    // Spawn-and-return: at the origin the instant it was accepted.
+    const instant = await post('complete', payload);
+    assert.equal(instant.statusCode, 400);
+
+    // Still too early: under the minimum fraction of the expected duration.
+    advanceClock(accepted.expectedSeconds * 0.25 * 1000);
+    assert.equal((await post('complete', payload)).statusCode, 400);
+
+    // After enough time underway it completes.
+    advanceClock(accepted.expectedSeconds * 0.5 * 1000);
+    const done = await post('complete', payload);
+    assert.equal(done.statusCode, 200);
+  });
+
+  test('client-claimed elapsedSeconds cannot fake an expedited bonus', async () => {
+    const accepted = await acceptOfferOfType('ONE_WAY_PASSAGE', 'fastclaim');
+    advanceClock(accepted.expectedSeconds * 1000); // took exactly the expected time
+    const res = await post('complete', { missionId: accepted.missionId, ...destinationOf(accepted), elapsedSeconds: 0 });
+    assert.equal(res.statusCode, 200);
+    assert.equal(json(res).bonus, 0);
+    assert.equal(json(res).payout, accepted.basePayout);
+  });
+
+  test('completion is atomic: concurrent and repeated completions credit exactly once', async () => {
+    const accepted = await acceptOfferOfType('ONE_WAY_PASSAGE', 'atomic');
+    const creditsBefore = json(await app.inject({ method: 'GET', url: '/game/credits', headers })).credits;
+    advanceClock(accepted.expectedSeconds * 1000);
+    const payload = { missionId: accepted.missionId, ...destinationOf(accepted), elapsedSeconds: 9999 };
+
+    const results = await Promise.all([post('complete', payload), post('complete', payload), post('complete', payload)]);
+    // Losers see either no active mission (404) or lose the claim race (409).
+    const statuses = results.map((r) => r.statusCode);
+    assert.equal(statuses.filter((c) => c === 200).length, 1);
+    assert.ok(statuses.filter((c) => c !== 200).every((c) => c === 404 || c === 409));
+
+    const creditsAfter = json(await app.inject({ method: 'GET', url: '/game/credits', headers })).credits;
+    assert.equal(creditsAfter, creditsBefore + accepted.basePayout);
+
+    // Replaying after completion is rejected and pays nothing more.
+    assert.equal((await post('complete', payload)).statusCode, 404);
+    assert.equal(json(await app.inject({ method: 'GET', url: '/game/credits', headers })).credits, creditsAfter);
+  });
+
+  test('concurrent accepts for the same pilot yield one mission and a 409', async () => {
+    const board = await boardAt('race-1', 'race-node-1');
+    const [a, b] = [board.missions[0], board.missions[board.missions.length - 1]];
+    const results = await Promise.all([post('accept', { missionId: a.missionId }), post('accept', { missionId: b.missionId })]);
+    assert.deepEqual(results.map((r) => r.statusCode).sort(), [200, 409]);
+    await post('abandon');
+  });
+
+  test('rejects accepting offers from future or long-past epoch hours', async () => {
+    const board = await boardAt('epoch-1', 'epoch-node-1');
+    const { missionId } = board.missions[0];
+    const [stationId, stationNode, epochHour, index] = missionId.split('::');
+
+    for (const shifted of [Number(epochHour) + 1, Number(epochHour) + 1000, Number(epochHour) - 2, 0]) {
+      const res = await post('accept', { missionId: [stationId, stationNode, shifted, index].join('::') });
+      assert.equal(res.statusCode, 404);
+    }
+  });
+
+  test('rejects station ids/nodes containing the id delimiter', async () => {
+    for (const query of ['stationId=a::b&stationNode=n1', 'stationId=a&stationNode=n:1']) {
+      const res = await app.inject({ method: 'GET', url: `/game/missions/available?${query}`, headers });
+      assert.equal(res.statusCode, 400);
+    }
   });
 });

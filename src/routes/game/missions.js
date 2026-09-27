@@ -4,7 +4,9 @@ import {
   missionCooldownMs,
   generateMissions,
   findMissionOffer,
-  computePayout
+  computePayout,
+  STATION_TOKEN_PATTERN,
+  RESEARCH_EXPEDITION_MIN_ELAPSED_FRACTION
 } from '../../config/missions.js';
 import { mockAccount } from '../../lib/mock-accounts.js';
 
@@ -13,8 +15,8 @@ const availableSchema = {
     type: 'object',
     required: ['stationId', 'stationNode'],
     properties: {
-      stationId: { type: 'string', minLength: 1 },
-      stationNode: { type: 'string', minLength: 1 }
+      stationId: { type: 'string', minLength: 1, maxLength: 128, pattern: STATION_TOKEN_PATTERN },
+      stationNode: { type: 'string', minLength: 1, maxLength: 128, pattern: STATION_TOKEN_PATTERN }
     }
   }
 };
@@ -82,18 +84,6 @@ export default async function missionsRoutes(fastify, opts) {
     return Math.max(0, completedAt + cooldownMs - Date.now());
   }
 
-  async function activateCooldown(request, stationId, stationNode) {
-    if (request.user.mock) {
-      mockCooldowns.set(`${request.user.sub}::${stationId}::${stationNode}`, Date.now());
-      return;
-    }
-    await prisma.missionCooldown.upsert({
-      where: { playerId_stationId_stationNode: { playerId: request.user.sub, stationId, stationNode } },
-      update: { completedAt: new Date() },
-      create: { playerId: request.user.sub, stationId, stationNode }
-    });
-  }
-
   async function getActiveMission(request) {
     if (request.user.mock) return mockActiveMissions.get(request.user.sub) ?? null;
     const row = await prisma.playerMission.findUnique({ where: { playerId: request.user.sub } });
@@ -104,7 +94,11 @@ export default async function missionsRoutes(fastify, opts) {
 
   async function setActiveMission(request, mission) {
     if (request.user.mock) {
-      const record = { ...mission, acceptedAt: new Date().toISOString() };
+      // Mirrors the unique(playerId) constraint on PlayerMission.
+      if (mockActiveMissions.has(request.user.sub)) {
+        throw Object.assign(new Error('Active mission already exists'), { code: 'P2002' });
+      }
+      const record = { ...mission, acceptedAt: new Date(Date.now()).toISOString() };
       mockActiveMissions.set(request.user.sub, record);
       return record;
     }
@@ -123,18 +117,49 @@ export default async function missionsRoutes(fastify, opts) {
     await prisma.playerMission.deleteMany({ where: { playerId: request.user.sub } });
   }
 
-  async function creditPlayer(request, amount) {
+  // Atomically claims (removes) the active mission, crediting the payout and
+  // starting the station cooldown only if this call actually removed it.
+  // Returns the player's new credit balance, or null if the mission was
+  // already claimed by a concurrent completion (so it can't be paid out twice).
+  async function completeActiveMission(request, mission, payout) {
+    const { sub: playerId } = request.user;
+
     if (request.user.mock) {
-      const account = mockAccount(request.user.sub);
-      account.credits += amount;
+      const active = mockActiveMissions.get(playerId);
+      if (!active || active.missionId !== mission.missionId) return null;
+      // No awaits between the check above and the delete/credit below, so
+      // concurrent requests can't both claim the mission.
+      mockActiveMissions.delete(playerId);
+      const account = mockAccount(playerId);
+      account.credits += payout;
+      mockCooldowns.set(`${playerId}::${mission.originStationId}::${mission.originStationNode}`, Date.now());
       return account.credits;
     }
-    const player = await prisma.player.update({
-      where: { id: request.user.sub },
-      data: { credits: { increment: amount } },
-      select: { credits: true }
+
+    return prisma.$transaction(async (tx) => {
+      const { count } = await tx.playerMission.deleteMany({
+        where: { playerId, missionId: mission.missionId }
+      });
+      if (count !== 1) return null;
+
+      const player = await tx.player.update({
+        where: { id: playerId },
+        data: { credits: { increment: payout } },
+        select: { credits: true }
+      });
+      await tx.missionCooldown.upsert({
+        where: {
+          playerId_stationId_stationNode: {
+            playerId,
+            stationId: mission.originStationId,
+            stationNode: mission.originStationNode
+          }
+        },
+        update: { completedAt: new Date() },
+        create: { playerId, stationId: mission.originStationId, stationNode: mission.originStationNode }
+      });
+      return player.credits;
     });
-    return player.credits;
   }
 
   fastify.get('/missions/available', { schema: availableSchema }, async (request) => {
@@ -164,7 +189,7 @@ export default async function missionsRoutes(fastify, opts) {
       return reply.code(400).send({ error: 'Ship has no passenger capacity available.' });
     }
 
-    const offer = findMissionOffer(missionId, passengerCapacity);
+    const offer = findMissionOffer(missionId, passengerCapacity, new Date(Date.now()));
     if (!offer) {
       return reply.code(404).send({ error: 'Mission offer not found or expired.' });
     }
@@ -174,8 +199,15 @@ export default async function missionsRoutes(fastify, opts) {
       return reply.code(409).send({ error: 'Station is on cooldown; no passengers currently seeking passage.' });
     }
 
-    const mission = await setActiveMission(request, offer);
-    return mission;
+    try {
+      return await setActiveMission(request, offer);
+    } catch (err) {
+      // Lost a race with a concurrent accept for the same pilot.
+      if (err?.code === 'P2002') {
+        return reply.code(409).send({ error: 'A mission is already active. Complete or abandon it first.' });
+      }
+      throw err;
+    }
   });
 
   fastify.get('/missions/active', async (request) => {
@@ -202,15 +234,24 @@ export default async function missionsRoutes(fastify, opts) {
       });
     }
 
+    // Trust the server's clock, not the client's claim: elapsed time is measured
+    // from acceptance, and a pilot may only ever claim to be slower than that.
+    const serverElapsedSeconds = Math.max(0, (Date.now() - Date.parse(mission.acceptedAt)) / 1000);
+
+    if (mission.roundTrip && serverElapsedSeconds < mission.expectedSeconds * RESEARCH_EXPEDITION_MIN_ELAPSED_FRACTION) {
+      return reply.code(400).send({ error: 'Expedition has not been underway long enough to be complete.' });
+    }
+
     const { payout, bonus } = computePayout({
       basePayout: mission.basePayout,
       expectedSeconds: mission.expectedSeconds,
-      elapsedSeconds
+      elapsedSeconds: Math.max(elapsedSeconds, serverElapsedSeconds)
     });
 
-    const credits = await creditPlayer(request, payout);
-    await clearActiveMission(request);
-    await activateCooldown(request, mission.originStationId, mission.originStationNode);
+    const credits = await completeActiveMission(request, mission, payout);
+    if (credits === null) {
+      return reply.code(409).send({ error: 'Mission has already been completed.' });
+    }
 
     return { mission, payout, bonus, credits };
   });
