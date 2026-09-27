@@ -20,6 +20,8 @@ model Player {
   spaceships   Spaceship[]
   credits      Int           @default(0)
   trades       TradeTransaction[]
+  activeMission    PlayerMission?
+  missionCooldowns MissionCooldown[]
 }
 
 model SpaceHarbor {
@@ -81,4 +83,37 @@ model TradeTransaction {
   createdAt  DateTime @default(now())
 
   @@index([playerId, createdAt])
+}
+
+// A pilot's single active passenger/research charter, procedurally generated
+// (never persisted as an "offer") and only stored here once accepted.
+model PlayerMission {
+  id                 String   @id @default(uuid()) @db.Uuid
+  playerId           String   @unique @db.Uuid
+  player             Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId          String   // encodes originStationId/originStationNode/epochHour/index
+  type               String   // ONE_WAY_PASSAGE, RESEARCH_EXPEDITION
+  passengers         Int
+  distanceHexes      Int
+  roundTrip          Boolean
+  originStationId    String
+  originStationNode  String
+  destination        Json     // { node, name, kind, stationId? } (stationId present for ONE_WAY_PASSAGE)
+  basePayout         Int
+  expectedSeconds    Int
+  generatedEpochHour Int
+  acceptedAt         DateTime @default(now())
+}
+
+// Per-player, per-station cooldown after completing a passenger/research
+// mission there, so the same outpost doesn't immediately offer another.
+model MissionCooldown {
+  id          String   @id @default(uuid()) @db.Uuid
+  playerId    String   @db.Uuid
+  player      Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  stationId   String
+  stationNode String
+  completedAt DateTime @default(now())
+
+  @@unique([playerId, stationId, stationNode])
 }
