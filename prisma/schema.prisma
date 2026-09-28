@@ -20,6 +20,9 @@ model Player {
   spaceships   Spaceship[]
   credits      Int           @default(0)
   trades       TradeTransaction[]
+  activeMission    PlayerMission?
+  missionCooldowns MissionCooldown[]
+  completedMissions CompletedMission[]
 }
 
 model SpaceHarbor {
@@ -81,4 +84,39 @@ model TradeTransaction {
   createdAt  DateTime @default(now())
 
   @@index([playerId, createdAt])
+}
+
+// A pilot's single active mission. `offer` holds the server-verified
+// MissionOffer (proto JSON, snake_case) that was accepted.
+model PlayerMission {
+  id               String   @id @default(uuid()) @db.Uuid
+  playerId         String   @unique @db.Uuid
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId        String
+  originStationId  String
+  offer            Json
+  acceptedAt       DateTime @default(now())
+}
+
+// Per-player, per-station cooldown started when a mission from that station completes.
+model MissionCooldown {
+  id               String   @id @default(uuid()) @db.Uuid
+  playerId         String   @db.Uuid
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  originStationId  String
+  completedAt      DateTime @default(now())
+
+  @@unique([playerId, originStationId])
+}
+
+// Payout ledger; the unique key enforces a single payout per (player, mission).
+model CompletedMission {
+  id            String   @id @default(uuid()) @db.Uuid
+  playerId      String   @db.Uuid
+  player        Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId     String
+  rewardCredits Int
+  completedAt   DateTime @default(now())
+
+  @@unique([playerId, missionId])
 }

@@ -1,4 +1,5 @@
 import { TRADE_RESOURCES, UNIT_PRICES, MAX_TRADE_QUANTITY } from '../../config/trade.js';
+import { mockAccount } from '../../lib/mock-accounts.js';
 
 const sellSchema = {
   body: {
@@ -14,27 +15,20 @@ const sellSchema = {
 export default async function tradeRoutes(fastify, opts) {
   const prisma = fastify.prisma;
 
-  // Dev-login pilots have no database row, so their ledgers live in memory.
-  const mockLedgers = new Map();
-  const mockLedger = (playerId) => {
-    if (!mockLedgers.has(playerId)) mockLedgers.set(playerId, { credits: 0, trades: [] });
-    return mockLedgers.get(playerId);
-  };
-
   fastify.addHook('onRequest', fastify.authenticate);
 
   fastify.get('/prices', async () => ({ prices: UNIT_PRICES }));
 
   fastify.get('/credits', async (request) => {
     const playerId = request.user.sub;
-    if (request.user.mock) return { credits: mockLedger(playerId).credits };
+    if (request.user.mock) return { credits: mockAccount(playerId).credits };
     const player = await prisma.player.findUnique({ where: { id: playerId }, select: { credits: true } });
     return { credits: player?.credits ?? 0 };
   });
 
   fastify.get('/trades', async (request) => {
     const playerId = request.user.sub;
-    if (request.user.mock) return { trades: [...mockLedger(playerId).trades].reverse() };
+    if (request.user.mock) return { trades: [...mockAccount(playerId).trades].reverse() };
     const trades = await prisma.tradeTransaction.findMany({
       where: { playerId },
       orderBy: { createdAt: 'desc' },
@@ -51,7 +45,7 @@ export default async function tradeRoutes(fastify, opts) {
     const total = unitPrice * quantity;
 
     if (request.user.mock) {
-      const ledger = mockLedger(playerId);
+      const ledger = mockAccount(playerId);
       ledger.credits += total;
       const trade = { id: crypto.randomUUID(), playerId, resource, quantity, unitPrice, total, createdAt: new Date().toISOString() };
       ledger.trades.push(trade);
