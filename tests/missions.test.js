@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { createPrivateKey, sign } from 'node:crypto';
 import app from '../src/app.js';
 import { buildOffer, currentEpoch, parseMissionId } from '../src/config/missions.js';
+import { mockAccount } from '../src/lib/mock-accounts.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 
 const SYSTEM = '8828308281fffff';
@@ -36,7 +37,7 @@ function signedClaim(pilot, active, overrides = {}) {
     destinationStationId: active.offer.destination_station_id,
     acceptedAtMs: active.accepted_at_ms,
     completedAtMs: active.accepted_at_ms + 60_000,
-    rewardCredits: active.offer.reward_credits + 40,
+    rewardCredits: active.offer.reward_credits + 10,
     reputationChange: active.offer.reputation_change,
     ...overrides
   };
@@ -165,7 +166,7 @@ describe('authoritative missions', () => {
       const active = json(await accept(pilot, await firstOffer(pilot)));
       const claim = signedClaim(pilot, active);
 
-      const tampered = { ...claim, rewardCredits: claim.rewardCredits + 1000 }; // signature no longer covers this
+      const tampered = { ...claim, rewardCredits: claim.rewardCredits + 1 }; // signature no longer covers this
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: tampered })).statusCode, 403);
       const garbage = { ...claim, signature: Buffer.alloc(64, 7).toString('base64') };
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: garbage })).statusCode, 403);
@@ -186,6 +187,52 @@ describe('authoritative missions', () => {
       assert.equal(res.statusCode, 400);
       assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+    });
+
+    test('reward above the 125% bonus cap is rejected; the cap itself is paid', async () => {
+      const pilot = await newPilot();
+      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const cap = Math.floor(active.offer.reward_credits * 1.25);
+
+      const over = signedClaim(pilot, active, { rewardCredits: cap + 1 });
+      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: over })).statusCode, 400);
+      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+
+      const atCap = signedClaim(pilot, active, { rewardCredits: cap });
+      const res = await call(pilot, 'POST', '/game/missions/complete', { claim: atCap });
+      assert.equal(res.statusCode, 200);
+      assert.equal(json(res).payout, cap);
+    });
+
+    test('future completedAtMs is rejected; small clock skew is tolerated', async () => {
+      const pilot = await newPilot();
+      const active = json(await accept(pilot, await firstOffer(pilot)));
+
+      const future = signedClaim(pilot, active, { completedAtMs: Date.now() + 120_000 });
+      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: future })).statusCode, 400);
+      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+
+      const skewed = signedClaim(pilot, active, { completedAtMs: Date.now() + 30_000 });
+      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: skewed })).statusCode, 200);
+    });
+
+    test('payout that would overflow the credit balance is rejected and the mission stays active', async () => {
+      const pilot = await newPilot();
+      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const claim = signedClaim(pilot, active);
+
+      mockAccount(pilot.id).credits = 2_147_483_647 - claim.rewardCredits + 1;
+      const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
+      assert.equal(res.statusCode, 409);
+      assert.equal(mockAccount(pilot.id).credits, 2_147_483_647 - claim.rewardCredits + 1);
+      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+
+      // Exactly reaching the maximum is allowed.
+      mockAccount(pilot.id).credits = 2_147_483_647 - claim.rewardCredits;
+      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
+      assert.equal(mockAccount(pilot.id).credits, 2_147_483_647);
     });
 
     test('a claim for another pilot is rejected', async () => {

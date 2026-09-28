@@ -36,6 +36,12 @@ const acceptSchema = {
   }
 };
 
+// Speed bonuses may raise a payout to at most 125% of the offered reward.
+const MAX_BONUS_MULTIPLIER = 1.25;
+// Tolerated RTSE/meta clock skew for completion timestamps.
+const MAX_FUTURE_SKEW_MS = 60_000;
+const OVERFLOW = Symbol('credit-overflow');
+
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 
 const completeSchema = {
@@ -223,7 +229,8 @@ export default async function missionsRoutes(fastify, opts) {
     return { abandoned: true, mission_id: active.mission_id };
   });
 
-  // Returns the new credit balance, or null if the mission was already settled.
+  // Returns the new credit balance, null if the mission was already settled, or
+  // OVERFLOW (mission left active, nothing changed) if the payout would overflow credits.
   async function settle(request, active, claim) {
     const playerId = request.user.sub;
     const stationId = active.offer.origin_station_id;
@@ -234,9 +241,10 @@ export default async function missionsRoutes(fastify, opts) {
       const rec = mockActiveMissions.get(playerId);
       if (!rec || rec.offer.mission_id !== missionId || mockCompleted.has(key)) return null;
       // Synchronous from here on, so concurrent requests cannot both settle.
+      const account = mockAccount(playerId);
+      if (account.credits + claim.rewardCredits > MAX_REWARD_CREDITS) return OVERFLOW;
       mockActiveMissions.delete(playerId);
       mockCompleted.add(key);
-      const account = mockAccount(playerId);
       account.credits += claim.rewardCredits;
       mockCooldowns.set(`${playerId}::${stationId}`, Date.now());
       return account.credits;
@@ -247,11 +255,13 @@ export default async function missionsRoutes(fastify, opts) {
         const { count } = await tx.playerMission.deleteMany({ where: { playerId, missionId } });
         if (count !== 1) return null;
         await tx.completedMission.create({ data: { playerId, missionId, rewardCredits: claim.rewardCredits } });
-        const player = await tx.player.update({
-          where: { id: playerId },
-          data: { credits: { increment: claim.rewardCredits } },
-          select: { credits: true }
+        // Guarded increment; throwing rolls back the mission delete and payout record.
+        const { count: credited } = await tx.player.updateMany({
+          where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - claim.rewardCredits } },
+          data: { credits: { increment: claim.rewardCredits } }
         });
+        if (credited !== 1) throw OVERFLOW;
+        const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         await tx.missionCooldown.upsert({
           where: { playerId_originStationId: { playerId, originStationId: stationId } },
           update: { completedAt: new Date() },
@@ -260,6 +270,7 @@ export default async function missionsRoutes(fastify, opts) {
         return player.credits;
       });
     } catch (err) {
+      if (err === OVERFLOW) return OVERFLOW;
       if (err?.code === 'P2002') return null; // payout for this (player, mission) already recorded
       throw err;
     }
@@ -289,6 +300,13 @@ export default async function missionsRoutes(fastify, opts) {
       return reply.code(400).send({ error: 'Claim completed outside the mission window.' });
     }
 
+    if (claim.completedAtMs > Date.now() + MAX_FUTURE_SKEW_MS) {
+      return reply.code(400).send({ error: 'Claim completion time is in the future.' });
+    }
+    if (claim.rewardCredits > Math.floor(active.offer.reward_credits * MAX_BONUS_MULTIPLIER)) {
+      return reply.code(400).send({ error: 'Claim reward exceeds the maximum speed bonus.' });
+    }
+
     // 4. Canonical Ed25519 signature by the RTSE.
     if (!verifyClaimSignature(claim, rtsePublicKey)) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
@@ -296,6 +314,7 @@ export default async function missionsRoutes(fastify, opts) {
 
     // 5. Atomic settlement.
     const credits = await settle(request, active, claim);
+    if (credits === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (credits === null) return conflict(reply, 'Mission has already been completed.');
     return { success: true, credits, payout: claim.rewardCredits };
   });
