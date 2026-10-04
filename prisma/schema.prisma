@@ -23,6 +23,8 @@ model Player {
   activeMission    PlayerMission?
   missionCooldowns MissionCooldown[]
   completedMissions CompletedMission[]
+  planetCharts PlanetChart[]
+  systemCharts SystemChart[]
 }
 
 model SpaceHarbor {
@@ -119,4 +121,35 @@ model CompletedMission {
   completedAt   DateTime @default(now())
 
   @@unique([playerId, missionId])
+}
+
+model PlanetChart {
+  id            String    @id @default(uuid()) @db.Uuid
+  playerId      String    @db.Uuid
+  player        Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  planetId      String
+  systemH3      String    @db.VarChar(15)
+  completedAtMs BigInt
+  signature     String    // base64-encoded 64-byte Ed25519 signature
+  surveyJson    Json      // full survey revealed at 100%
+  soldAt        DateTime?
+  discoveredAt  DateTime  @default(now())
+
+  @@unique([playerId, planetId])
+  @@index([playerId, systemH3])
+}
+
+model SystemChart {
+  id                 String    @id @default(uuid()) @db.Uuid
+  playerId           String    @db.Uuid
+  player             Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  systemH3           String    @db.VarChar(15)
+  totalBodiesCharted Int
+  chartedAtMs        BigInt
+  signature          String    // base64-encoded 64-byte Ed25519 signature
+  soldAt             DateTime?
+  discoveredAt       DateTime  @default(now())
+
+  @@unique([playerId, systemH3])
+  @@index([playerId])
 }

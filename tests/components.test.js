@@ -42,7 +42,8 @@ describe('computeShipAttributes', () => {
       weapon_dps: 200, weapon_range_m: 1000,
       energy_capacity: 1500, energy_regen_rate: 75,
       comms_range_m: 25000, max_speed_mps: 100,
-      passenger_capacity: 50
+      passenger_capacity: 50,
+      sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5
     });
   });
 
@@ -118,7 +119,7 @@ describe('computeShipAttributes', () => {
 
 describe('hullBudget', () => {
   test('maps hull tiers 1-5 to their subsystem point budgets', () => {
-    assert.equal(hullBudget(1), 5);
+    assert.equal(hullBudget(1), 6);
     assert.equal(hullBudget(2), 10);
     assert.equal(hullBudget(3), 18);
     assert.equal(hullBudget(4), 27);
@@ -126,7 +127,7 @@ describe('hullBudget', () => {
   });
 
   test('sums non-hull component tiers for totalSubsystemPoints', () => {
-    assert.equal(totalSubsystemPoints(defaultComponents()), 5);
+    assert.equal(totalSubsystemPoints(defaultComponents()), 6);
     assert.equal(totalSubsystemPoints([{ type: 'HULL', tier: 5 }, { type: 'RADAR', tier: 3 }]), 3);
   });
 });
@@ -142,8 +143,8 @@ describe('ship components over HTTP', () => {
 
   test('GET /auth/dev-login includes ship and JWT ship_attributes', async () => {
     const json = await login();
-    assert.equal(json.player.ship.components.length, 10);
-    const tierOneTypes = ['HULL', 'RADAR', 'ENGINES', 'ENERGY', 'LIFE_SUPPORT', 'CARGO'];
+    assert.equal(json.player.ship.components.length, 11);
+    const tierOneTypes = ['HULL', 'RADAR', 'ENGINES', 'ENERGY', 'LIFE_SUPPORT', 'SENSORS', 'CARGO'];
     for (const c of json.player.ship.components) {
       assert.equal(c.tier, tierOneTypes.includes(c.type) ? 1 : 0, `${c.type} default tier`);
     }
@@ -209,14 +210,14 @@ describe('ship components over HTTP', () => {
     const { token } = await login();
     const headers = { authorization: `Bearer ${token}` };
 
-    // Default loadout uses exactly the Hull Tier 1 budget (5 points); any further
+    // Default loadout uses exactly the Hull Tier 1 budget (6 points); any further
     // subsystem upgrade without first raising the hull tier must be rejected.
     const overBudget = await app.inject({
       method: 'POST', url: '/ship/upgrade', headers,
       payload: { componentType: 'RADAR', targetTier: 2 }
     });
     assert.equal(overBudget.statusCode, 400);
-    assert.match(JSON.parse(overBudget.body).error, /Hull Tier 1 budget of 5 points/);
+    assert.match(JSON.parse(overBudget.body).error, /Hull Tier 1 budget of 6 points/);
 
     // Essential components cannot be unequipped.
     const essentialToZero = await app.inject({
