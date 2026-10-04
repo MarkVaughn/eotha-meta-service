@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
+import { PlanetarySurvey } from '../../lib/contracts/exploration.js';
 import { H3_PATTERN, STATION_PATTERN } from '../../config/missions.js';
 import { mockAccount } from '../../lib/mock-accounts.js';
 import {
-  canonicalJson,
   loadRtsePublicKey,
-  verifyPlanetChartSignature,
+  verifyPlanetChartKey,
   verifySystemChartSignature
 } from '../../lib/chart-claim.js';
 
@@ -18,7 +18,7 @@ const signature = { type: 'string', minLength: 1, maxLength: 512 };
 const registerPlanetSchema = {
   body: {
     type: 'object',
-    required: ['chartKey', 'survey'],
+    required: ['chartKey', 'surveyBytesBase64'],
     properties: {
       chartKey: {
         type: 'object',
@@ -31,8 +31,8 @@ const registerPlanetSchema = {
           signature
         }
       },
-      survey: { type: 'object' },
-      surveyBytesBase64: { type: 'string', maxLength: 1_000_000 }
+      // Exact PlanetarySurvey protobuf bytes the RTSE signed; the survey JSON is derived from these.
+      surveyBytesBase64: { type: 'string', minLength: 1, maxLength: 1_000_000 }
     }
   }
 };
@@ -74,17 +74,11 @@ const sellSchema = {
     properties: {
       planetId: id,
       systemH3: { type: 'string', pattern: H3_PATTERN },
+      // Charts sell at any station; the id is only format-checked (there is no station registry).
       stationId: { type: 'string', pattern: STATION_PATTERN }
     }
   }
 };
-
-function surveyHash(survey, surveyBytesBase64) {
-  const bytes = surveyBytesBase64 !== undefined
-    ? Buffer.from(surveyBytesBase64, 'base64')
-    : Buffer.from(canonicalJson(survey), 'utf8');
-  return createHash('sha256').update(bytes).digest();
-}
 
 const iso = (d) => (d ? d.toISOString() : null);
 
@@ -129,35 +123,69 @@ export default async function chartsRoutes(fastify, opts) {
   const mockRows = (map, playerId) => [...map.entries()]
     .filter(([k]) => k.startsWith(`${playerId}::`)).map(([, v]) => v);
 
+  const staleKey = (reply) => reply.code(409).send({
+    error: 'STALE_CHART_KEY',
+    message: 'Existing chart has newer or identical timestamp'
+  });
+  const alreadySold = (reply) => reply.code(409).send({
+    error: 'CHART_ALREADY_SOLD',
+    message: 'Sold charts cannot be overwritten'
+  });
+
   fastify.post('/charts/register-planet', { schema: registerPlanetSchema }, async (request, reply) => {
-    const { chartKey, survey, surveyBytesBase64 } = request.body;
+    const { chartKey, surveyBytesBase64 } = request.body;
     const playerId = request.user.sub;
     if (chartKey.pilotId !== playerId) {
       return reply.code(403).send({ error: 'Chart does not belong to the authenticated pilot.' });
     }
-    if (!verifyPlanetChartSignature(chartKey, surveyHash(survey, surveyBytesBase64), rtsePublicKey)) {
+
+    // The signature binds the exact survey bytes; the survey JSON is only ever derived from them.
+    const surveyBytes = Buffer.from(surveyBytesBase64, 'base64');
+    const surveyHash = createHash('sha256').update(surveyBytes).digest();
+    if (!verifyPlanetChartKey(chartKey, chartKey.signature, surveyHash, rtsePublicKey)) {
       return reply.code(403).send({ error: 'Invalid chart signature.' });
     }
+    let surveyJson;
+    try {
+      surveyJson = PlanetarySurvey.toJSON(PlanetarySurvey.decode(surveyBytes));
+    } catch {
+      return reply.code(400).send({ error: 'surveyBytesBase64 is not a valid PlanetarySurvey.' });
+    }
 
-    const data = {
-      systemH3: chartKey.systemH3,
-      completedAtMs: BigInt(chartKey.completedAtMs),
-      signature: chartKey.signature,
-      surveyJson: survey
+    const completedAtMs = BigInt(chartKey.completedAtMs);
+    const data = { systemH3: chartKey.systemH3, completedAtMs, signature: chartKey.signature, surveyJson };
+    const reject = (existing, reply) => {
+      if (completedAtMs <= BigInt(existing.completedAtMs)) return staleKey(reply);
+      return alreadySold(reply); // newer key, but the existing chart was already sold
     };
+
     if (request.user.mock) {
       const key = `${playerId}::${chartKey.planetId}`;
       const prev = mockPlanets.get(key);
-      mockPlanets.set(key, {
-        ...prev, ...data, planetId: chartKey.planetId, soldAt: prev?.soldAt ?? null,
-        discoveredAt: prev?.discoveredAt ?? new Date()
-      });
-    } else {
-      await prisma.planetChart.upsert({
-        where: { playerId_planetId: { playerId, planetId: chartKey.planetId } },
-        update: data,
-        create: { playerId, planetId: chartKey.planetId, ...data }
-      });
+      if (prev && (completedAtMs <= prev.completedAtMs || prev.soldAt)) return reject(prev, reply);
+      mockPlanets.set(key, { ...data, planetId: chartKey.planetId, soldAt: null, discoveredAt: prev?.discoveredAt ?? new Date() });
+      return { registered: true, planetId: chartKey.planetId };
+    }
+
+    const where = { playerId_planetId: { playerId, planetId: chartKey.planetId } };
+    const existing = await prisma.planetChart.findUnique({ where });
+    if (!existing) {
+      try {
+        await prisma.planetChart.create({ data: { playerId, planetId: chartKey.planetId, ...data } });
+        return { registered: true, planetId: chartKey.planetId };
+      } catch (err) {
+        if (err?.code !== 'P2002') throw err;
+        // Lost a creation race: fall through to the update path.
+      }
+    }
+    // Guarded update so concurrent submissions can neither roll back a newer key nor touch a sold chart.
+    const { count } = await prisma.planetChart.updateMany({
+      where: { playerId, planetId: chartKey.planetId, soldAt: null, completedAtMs: { lt: completedAtMs } },
+      data
+    });
+    if (count !== 1) {
+      const current = await prisma.planetChart.findUnique({ where });
+      return reject(current ?? existing ?? { completedAtMs }, reply);
     }
     return { registered: true, planetId: chartKey.planetId };
   });
@@ -168,6 +196,10 @@ export default async function chartsRoutes(fastify, opts) {
     if (systemKey.pilotId !== playerId) {
       return reply.code(403).send({ error: 'Chart does not belong to the authenticated pilot.' });
     }
+    // totalBodiesCharted is not validated against any local body count: the meta-service has no
+    // system catalog. It is authoritative because the RTSE's Ed25519 signature covers it in the
+    // canonical EOTHA_SYSTEM_CHART_V1 payload (pilot, systemH3, totalBodiesCharted, chartedAtMs), so
+    // a client cannot alter the count without invalidating the signature.
     if (!verifySystemChartSignature(systemKey, rtsePublicKey)) {
       return reply.code(403).send({ error: 'Invalid chart signature.' });
     }
@@ -177,19 +209,18 @@ export default async function chartsRoutes(fastify, opts) {
       chartedAtMs: BigInt(systemKey.chartedAtMs),
       signature: systemKey.signature
     };
+    const duplicate = () => reply.code(409).send({ error: 'SYSTEM_ALREADY_CLAIMED' });
     if (request.user.mock) {
       const key = `${playerId}::${systemKey.systemH3}`;
-      const prev = mockSystems.get(key);
-      mockSystems.set(key, {
-        ...prev, ...data, systemH3: systemKey.systemH3, soldAt: prev?.soldAt ?? null,
-        discoveredAt: prev?.discoveredAt ?? new Date()
-      });
+      if (mockSystems.has(key)) return duplicate();
+      mockSystems.set(key, { ...data, systemH3: systemKey.systemH3, soldAt: null, discoveredAt: new Date() });
     } else {
-      await prisma.systemChart.upsert({
-        where: { playerId_systemH3: { playerId, systemH3: systemKey.systemH3 } },
-        update: data,
-        create: { playerId, systemH3: systemKey.systemH3, ...data }
-      });
+      try {
+        await prisma.systemChart.create({ data: { playerId, systemH3: systemKey.systemH3, ...data } });
+      } catch (err) {
+        if (err?.code === 'P2002') return duplicate();
+        throw err;
+      }
     }
     return { claimed: true, systemH3: systemKey.systemH3 };
   });

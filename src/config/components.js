@@ -67,19 +67,13 @@ export function defaultComponents() {
 }
 
 // Hull tier caps the combined tier points of all other installed subsystems.
+// Explicit table (not derived from the component count) so adding a component cannot
+// silently change balance; Tier 1 fits the default loadout (6 Tier 1 subsystems).
+const HULL_BUDGETS = [6, 10, 18, 27, 36];
+
 export function hullBudget(hullTier) {
-  // Fixed at the pre-SENSORS subsystem count so adding SENSORS (Tier 1 baseline) does not
-  // inflate higher-tier budgets; only Tier 1 grows by the one baseline SENSORS point.
-  const subCount = 9;
   const tier = Math.min(5, Math.max(1, Math.round(hullTier || 1)));
-  switch (tier) {
-    case 1: return 6;
-    case 2: return 10;
-    case 3: return 2 * subCount; // 18
-    case 4: return 3 * subCount; // 27
-    case 5: return 4 * subCount; // 36
-    default: return 6;
-  }
+  return HULL_BUDGETS[tier - 1];
 }
 
 export function totalSubsystemPoints(components = []) {
