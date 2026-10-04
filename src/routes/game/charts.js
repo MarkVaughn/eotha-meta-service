@@ -196,6 +196,10 @@ export default async function chartsRoutes(fastify, opts) {
     if (systemKey.pilotId !== playerId) {
       return reply.code(403).send({ error: 'Chart does not belong to the authenticated pilot.' });
     }
+    // totalBodiesCharted is not validated against any local body count: the meta-service has no
+    // system catalog. It is authoritative because the RTSE's Ed25519 signature covers it in the
+    // canonical EOTHA_SYSTEM_CHART_V1 payload (pilot, systemH3, totalBodiesCharted, chartedAtMs), so
+    // a client cannot alter the count without invalidating the signature.
     if (!verifySystemChartSignature(systemKey, rtsePublicKey)) {
       return reply.code(403).send({ error: 'Invalid chart signature.' });
     }
