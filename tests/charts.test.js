@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { createPrivateKey, createHash, sign } from 'node:crypto';
-import { PlanetarySurvey } from '@eotha/contracts/dist/eotha/rtse/v1/exploration.js';
+import { PlanetarySurvey } from '../src/lib/contracts/exploration.js';
 import app from '../src/app.js';
 import { computeShipAttributes } from '../src/config/components.js';
 import {

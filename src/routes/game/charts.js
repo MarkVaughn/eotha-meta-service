@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { PlanetarySurvey } from '@eotha/contracts/dist/eotha/rtse/v1/exploration.js';
+import { PlanetarySurvey } from '../../lib/contracts/exploration.js';
 import { H3_PATTERN, STATION_PATTERN } from '../../config/missions.js';
 import { mockAccount } from '../../lib/mock-accounts.js';
 import {
