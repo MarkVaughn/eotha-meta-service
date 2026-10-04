@@ -2,12 +2,12 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { createPrivateKey, createHash, sign } from 'node:crypto';
+import { PlanetarySurvey } from '@eotha/contracts/dist/eotha/rtse/v1/exploration.js';
 import app from '../src/app.js';
 import { computeShipAttributes } from '../src/config/components.js';
 import {
   PLANET_CHART_DOMAIN,
   SYSTEM_CHART_DOMAIN,
-  canonicalJson,
   canonicalPlanetChartPayload,
   canonicalSystemChartPayload
 } from '../src/lib/chart-claim.js';
@@ -26,14 +26,24 @@ async function newPilot(callsign) {
 
 const call = (pilot, method, url, payload) => app.inject({ method, url, headers: pilot.headers, payload });
 
-const survey = { planetId: 'planet-1', biome: 'ICE', resources: [{ kind: 'IRON', pct: 12 }, { kind: 'HELIUM', pct: 3 }] };
+const surveyMsg = {
+  scanProgressPct: 100,
+  metals: ['IRON', 'NICKEL'],
+  gases: ['HELIUM'],
+  isFullyCharted: true
+};
+const surveyBytes = (msg = surveyMsg) => Buffer.from(PlanetarySurvey.encode(PlanetarySurvey.fromPartial(msg)).finish());
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest();
 
-function planetKey(pilot, planetId = 'planet-1', s = survey) {
-  const key = { planetId, pilotId: pilot.id, systemH3: SYSTEM, completedAtMs: Date.now() };
-  const hash = createHash('sha256').update(Buffer.from(canonicalJson(s), 'utf8')).digest();
-  key.signature = sign(null, canonicalPlanetChartPayload(key, hash), rtseKey).toString('base64');
+function planetKey(pilot, planetId = 'planet-1', bytes = surveyBytes(), completedAtMs = Date.now()) {
+  const key = { planetId, pilotId: pilot.id, systemH3: SYSTEM, completedAtMs };
+  key.signature = sign(null, canonicalPlanetChartPayload(key, sha256(bytes)), rtseKey).toString('base64');
   return key;
 }
+
+// Request body for register-planet.
+const register = (pilot, key, bytes = surveyBytes()) =>
+  call(pilot, 'POST', '/game/charts/register-planet', { chartKey: key, surveyBytesBase64: bytes.toString('base64') });
 
 function systemKey(pilot) {
   const key = { systemH3: SYSTEM, pilotId: pilot.id, totalBodiesCharted: 7, chartedAtMs: Date.now() };
@@ -72,9 +82,9 @@ describe('cartography', () => {
     }
   });
 
-  test('registers a signed planet chart and lists it', { skip }, async () => {
+  test('registers a signed planet chart, deriving the survey from the signed bytes', { skip }, async () => {
     const pilot = await newPilot('Cartographer');
-    const res = await call(pilot, 'POST', '/game/charts/register-planet', { chartKey: planetKey(pilot), survey });
+    const res = await register(pilot, planetKey(pilot));
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json(res), { registered: true, planetId: 'planet-1' });
 
@@ -85,56 +95,78 @@ describe('cartography', () => {
     assert.deepEqual(inv.systemCharts, []);
 
     const q = json(await call(pilot, 'GET', '/game/charts/query?planetId=planet-1'));
-    assert.deepEqual(q.survey, survey);
+    assert.deepEqual(q.survey, { scanProgressPct: 100, metals: ['IRON', 'NICKEL'], gases: ['HELIUM'], isFullyCharted: true });
     assert.equal((await call(pilot, 'GET', '/game/charts/query?planetId=nope')).statusCode, 404);
     assert.equal((await call(pilot, 'GET', '/game/charts/query')).statusCode, 400);
   });
 
-  test('hashes surveyBytesBase64 when supplied', { skip }, async () => {
-    const pilot = await newPilot('ByteHasher');
-    const bytes = Buffer.from('raw-proto-bytes');
-    const key = { planetId: 'p-bytes', pilotId: pilot.id, systemH3: SYSTEM, completedAtMs: Date.now() };
-    key.signature = sign(null, canonicalPlanetChartPayload(key, createHash('sha256').update(bytes).digest()), rtseKey).toString('base64');
-    const res = await call(pilot, 'POST', '/game/charts/register-planet', {
-      chartKey: key, survey, surveyBytesBase64: bytes.toString('base64')
+  test('requires surveyBytesBase64 and ignores a client-supplied survey object', { skip }, async () => {
+    const pilot = await newPilot('NoBytes');
+    const key = planetKey(pilot);
+    let res = await call(pilot, 'POST', '/game/charts/register-planet', { chartKey: key, survey: { forged: true } });
+    assert.equal(res.statusCode, 400);
+    res = await call(pilot, 'POST', '/game/charts/register-planet', {
+      chartKey: key, surveyBytesBase64: surveyBytes().toString('base64'), survey: { forged: true }
     });
     assert.equal(res.statusCode, 200);
+    const q = json(await call(pilot, 'GET', '/game/charts/query?planetId=planet-1'));
+    assert.equal(q.survey.forged, undefined);
   });
 
-  test('rejects tampered signatures, surveys and foreign pilots', { skip }, async () => {
+  test('rejects tampered signatures, forged surveys and foreign pilots', { skip }, async () => {
     const pilot = await newPilot('Forger');
     const other = await newPilot('Victim');
     const key = planetKey(pilot);
 
     const badSig = Buffer.from(key.signature, 'base64');
     badSig[0] ^= 0xff;
-    let res = await call(pilot, 'POST', '/game/charts/register-planet', {
-      chartKey: { ...key, signature: badSig.toString('base64') }, survey
-    });
-    assert.equal(res.statusCode, 403);
+    assert.equal((await register(pilot, { ...key, signature: badSig.toString('base64') })).statusCode, 403);
 
-    // Survey altered after signing.
-    res = await call(pilot, 'POST', '/game/charts/register-planet', {
-      chartKey: key, survey: { ...survey, biome: 'LAVA' }
-    });
-    assert.equal(res.statusCode, 403);
+    // Survey bytes swapped after signing (e.g. richer resources).
+    const forged = surveyBytes({ ...surveyMsg, metals: ['IRON', 'NICKEL', 'PLATINUM', 'GOLD'] });
+    assert.equal((await register(pilot, key, forged)).statusCode, 403);
 
-    // Altered key field.
-    res = await call(pilot, 'POST', '/game/charts/register-planet', {
-      chartKey: { ...key, planetId: 'other-planet' }, survey
-    });
-    assert.equal(res.statusCode, 403);
+    // Altered key fields.
+    assert.equal((await register(pilot, { ...key, planetId: 'other-planet' })).statusCode, 403);
+    assert.equal((await register(pilot, { ...key, completedAtMs: key.completedAtMs + 1 })).statusCode, 403);
 
     // Another pilot's chart.
-    res = await call(other, 'POST', '/game/charts/register-planet', { chartKey: key, survey });
-    assert.equal(res.statusCode, 403);
+    assert.equal((await register(other, key)).statusCode, 403);
 
     // Malformed signature.
-    res = await call(pilot, 'POST', '/game/charts/register-planet', { chartKey: { ...key, signature: 'AAAA' }, survey });
-    assert.equal(res.statusCode, 403);
+    assert.equal((await register(pilot, { ...key, signature: 'AAAA' })).statusCode, 403);
 
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.planetCharts.length, 0);
+  });
+
+  test('rejects signed bytes that are not a valid PlanetarySurvey', { skip }, async () => {
+    const pilot = await newPilot('Garbage');
+    const garbage = Buffer.from([0xff, 0xff, 0xff, 0xff]);
+    assert.equal((await register(pilot, planetKey(pilot, 'planet-g', garbage), garbage)).statusCode, 400);
+  });
+
+  test('prevents stale-key replay and overwriting sold charts', { skip }, async () => {
+    const pilot = await newPilot('Replayer');
+    const t0 = Date.now() - 10_000;
+    const first = planetKey(pilot, 'planet-r', surveyBytes(), t0);
+    assert.equal((await register(pilot, first)).statusCode, 200);
+
+    // Identical and older timestamps are stale.
+    let res = await register(pilot, first);
+    assert.equal(res.statusCode, 409);
+    assert.deepEqual(json(res), { error: 'STALE_CHART_KEY', message: 'Existing chart has newer or identical timestamp' });
+    assert.equal((await register(pilot, planetKey(pilot, 'planet-r', surveyBytes(), t0 - 1))).statusCode, 409);
+
+    // A newer key supersedes.
+    const richer = surveyBytes({ ...surveyMsg, metals: ['IRON'] });
+    assert.equal((await register(pilot, planetKey(pilot, 'planet-r', richer, t0 + 1), richer)).statusCode, 200);
+
+    // Once sold, even a newer key cannot overwrite it.
+    assert.equal((await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-r', stationId: 'station-alpha' })).statusCode, 200);
+    res = await register(pilot, planetKey(pilot, 'planet-r', surveyBytes(), t0 + 2));
+    assert.equal(res.statusCode, 409);
+    assert.equal(json(res).error, 'CHART_ALREADY_SOLD');
   });
 
   test('claims a system chart and rejects tampering', { skip }, async () => {
@@ -147,11 +179,16 @@ describe('cartography', () => {
     assert.deepEqual(json(res), { claimed: true, systemH3: SYSTEM });
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.systemCharts[0].totalBodiesCharted, 7);
+
+    // Duplicate claims (even with a fresh valid signature) are rejected.
+    res = await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) });
+    assert.equal(res.statusCode, 409);
+    assert.deepEqual(json(res), { error: 'SYSTEM_ALREADY_CLAIMED' });
   });
 
   test('sells charts once for credits', { skip }, async () => {
     const pilot = await newPilot('Merchant');
-    await call(pilot, 'POST', '/game/charts/register-planet', { chartKey: planetKey(pilot), survey });
+    await register(pilot, planetKey(pilot));
     await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) });
 
     let res = await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', stationId: 'station-alpha' });

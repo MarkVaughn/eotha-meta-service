@@ -4,16 +4,6 @@ export { loadRtsePublicKey } from './mission-claim.js';
 export const PLANET_CHART_DOMAIN = Buffer.from('EOTHA_PLANET_CHART_V1', 'utf8'); // 21 bytes
 export const SYSTEM_CHART_DOMAIN = Buffer.from('EOTHA_SYSTEM_CHART_V1', 'utf8'); // 21 bytes
 
-// Deterministic JSON (sorted object keys) used when the RTSE's raw survey bytes are not supplied.
-export function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort()
-      .map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(value) ?? 'null';
-}
-
 function lenPrefixed(value) {
   const bytes = Buffer.from(value, 'utf8');
   const len = Buffer.alloc(4);
@@ -66,10 +56,12 @@ function verifyPayload(payload, signature, publicKey) {
   }
 }
 
-export function verifyPlanetChartSignature(key, surveyHashBuffer, publicKey) {
-  if (!Buffer.isBuffer(surveyHashBuffer) || surveyHashBuffer.length !== 32) return false;
+// `chartKey` carries { planetId, pilotId, systemH3, completedAtMs }; `signature` is base64;
+// `surveyHash` must be the 32-byte SHA-256 of the exact survey protobuf bytes the RTSE signed.
+export function verifyPlanetChartKey(chartKey, signature, surveyHash, publicKey) {
+  if (!Buffer.isBuffer(surveyHash) || surveyHash.length !== 32) return false;
   try {
-    return verifyPayload(canonicalPlanetChartPayload(key, surveyHashBuffer), key.signature, publicKey);
+    return verifyPayload(canonicalPlanetChartPayload(chartKey, surveyHash), signature, publicKey);
   } catch {
     return false;
   }
