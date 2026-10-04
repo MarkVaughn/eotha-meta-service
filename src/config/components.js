@@ -1,10 +1,10 @@
 export const COMPONENT_TYPES = [
-  'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT'
+  'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
 ];
 
 // Essential components have a minimum tier of 1 (cannot be unequipped); optional
 // components may be set to Tier 0 (unequipped, costing 0 hull budget points).
-export const ESSENTIAL_COMPONENTS = ['HULL', 'ENGINES', 'ENERGY', 'RADAR', 'LIFE_SUPPORT'];
+export const ESSENTIAL_COMPONENTS = ['HULL', 'ENGINES', 'ENERGY', 'RADAR', 'LIFE_SUPPORT', 'SENSORS'];
 export const OPTIONAL_COMPONENTS = ['SHIELDS', 'WEAPONS', 'CARGO', 'STEALTH', 'COMMS'];
 
 export const MIN_TIER = 1;
@@ -13,7 +13,8 @@ export const MAX_TIER = 5;
 // Nominal/baseline values used for optional components at Tier 0 (unequipped);
 // any attribute not listed here defaults to 0 when its component is Tier 0.
 const ZERO_TIER_OVERRIDES = {
-  signature_dissipation_rate: 1.0
+  signature_dissipation_rate: 1.0,
+  sensor_cooldown_mult: 1.0
 };
 
 // Attribute values indexed by tier (index 0 = Tier 1)
@@ -45,7 +46,12 @@ const TIER_TABLE = {
   },
   COMMS: { comms_range_m: [1000, 2500, 5000, 10000, 25000] },
   ENGINES: { max_speed_mps: [20, 35, 50, 75, 100] },
-  LIFE_SUPPORT: { passenger_capacity: [2, 5, 10, 20, 50] }
+  LIFE_SUPPORT: { passenger_capacity: [2, 5, 10, 20, 50] },
+  SENSORS: {
+    sensor_range_m: [1500, 3000, 4500, 6000, 7500],
+    sensor_cooldown_mult: [1.0, 0.85, 0.7, 0.55, 0.4],
+    sensor_tier: [1, 2, 3, 4, 5]
+  }
 };
 
 export function isValidTier(tier) {
@@ -54,7 +60,7 @@ export function isValidTier(tier) {
 
 export function defaultComponents() {
   const defaultTiers = {
-    HULL: 1, ENGINES: 1, ENERGY: 1, RADAR: 1, LIFE_SUPPORT: 1, CARGO: 1,
+    HULL: 1, ENGINES: 1, ENERGY: 1, RADAR: 1, LIFE_SUPPORT: 1, SENSORS: 1, CARGO: 1,
     SHIELDS: 0, WEAPONS: 0, STEALTH: 0, COMMS: 0
   };
   return COMPONENT_TYPES.map((type) => ({ type, tier: defaultTiers[type], healthPct: 100 }));
@@ -62,15 +68,17 @@ export function defaultComponents() {
 
 // Hull tier caps the combined tier points of all other installed subsystems.
 export function hullBudget(hullTier) {
-  const subCount = COMPONENT_TYPES.length - 1; // 9
+  // Fixed at the pre-SENSORS subsystem count so adding SENSORS (Tier 1 baseline) does not
+  // inflate higher-tier budgets; only Tier 1 grows by the one baseline SENSORS point.
+  const subCount = 9;
   const tier = Math.min(5, Math.max(1, Math.round(hullTier || 1)));
   switch (tier) {
-    case 1: return 5;
+    case 1: return 6;
     case 2: return 10;
     case 3: return 2 * subCount; // 18
     case 4: return 3 * subCount; // 27
     case 5: return 4 * subCount; // 36
-    default: return 5;
+    default: return 6;
   }
 }
 
