@@ -3,7 +3,10 @@ import cors from '@fastify/cors';
 import env from './config/env.js';
 import prismaPlugin from './plugins/prisma.js';
 import securityPlugin from './plugins/security.js';
+import attestationPlugin from './plugins/attestation.js';
+import identityPlugin from './plugins/identity.js';
 import authRoutes from './routes/auth/index.js';
+import jwksRoutes from './routes/jwks.js';
 import gameRoutes from './routes/game/index.js';
 import tradeRoutes from './routes/game/trade.js';
 import missionsRoutes from './routes/game/missions.js';
@@ -23,9 +26,12 @@ const fastify = Fastify({
 await fastify.register(cors, { origin: '*' });
 await fastify.register(prismaPlugin);
 await fastify.register(securityPlugin);
+await fastify.register(attestationPlugin);
+await fastify.register(identityPlugin);
 
 // Register Routes
 await fastify.register(authRoutes, { prefix: '/auth' });
+await fastify.register(jwksRoutes);
 await fastify.register(gameRoutes, { prefix: '/game' });
 await fastify.register(tradeRoutes, { prefix: '/game' });
 await fastify.register(missionsRoutes, { prefix: '/game' });

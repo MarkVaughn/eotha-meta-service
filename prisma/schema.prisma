@@ -8,11 +8,19 @@ generator client {
   previewFeatures = ["postgresqlExtensions"]
 }
 
+// The Better Auth `user` model (see src/lib/auth.js): the player id is the single stable identity,
+// and `callsign` doubles as Better Auth's `name`.
 model Player {
   id           String        @id @default(uuid()) @db.Uuid
   email        String        @unique
-  passwordHash String
+  // Argon2id (or a legacy SHA-256 digest awaiting upgrade). "!" matches no hash format, so guests
+  // and dev-login pilots cannot sign in with a password.
+  passwordHash String        @default("!")
   callsign     String        @unique
+  emailVerified Boolean      @default(false)
+  image        String?
+  // True until the guest links a real account; email is then a placeholder.
+  isAnonymous  Boolean       @default(false)
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   harbor       SpaceHarbor?
@@ -25,6 +33,10 @@ model Player {
   completedMissions CompletedMission[]
   planetCharts PlanetChart[]
   systemCharts SystemChart[]
+  authSessions AuthSession[]
+  accounts     Account[]
+  refreshTokens RefreshToken[]
+  guestDevice  GuestDevice?
 }
 
 model SpaceHarbor {
@@ -152,4 +164,83 @@ model SystemChart {
 
   @@unique([playerId, systemH3])
   @@index([playerId])
+}
+
+// Better Auth session: the long-lived login that refresh-token families hang off.
+model AuthSession {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @db.Uuid
+  user          Player         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token         String         @unique
+  expiresAt     DateTime
+  ipAddress     String?
+  userAgent     String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@map("auth_session")
+}
+
+// Better Auth account: one row per linked external identity (apple, google, play-games, ...).
+model Account {
+  id                    String    @id @default(uuid()) @db.Uuid
+  userId                String    @db.Uuid
+  user                  Player    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  // One provider identity can belong to only one player.
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("auth_account")
+}
+
+// Better Auth verification records (OAuth state, one-time codes) for the social providers added later.
+model Verification {
+  id         String   @id @default(uuid()) @db.Uuid
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("auth_verification")
+}
+
+// Binds an anonymous guest to the install that created it. Only a SHA-256 of the client-supplied
+// device id is stored; the id itself is the guest's credential.
+model GuestDevice {
+  deviceHash String   @id
+  playerId   String   @unique @db.Uuid
+  player     Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+}
+
+// Rotating refresh tokens. A token is single-use: presenting one that was already rotated means
+// the family was copied, so the whole family (and its session) is revoked.
+model RefreshToken {
+  id        String      @id @default(uuid()) @db.Uuid
+  playerId  String      @db.Uuid
+  player    Player      @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  sessionId String      @db.Uuid
+  session   AuthSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tokenHash String      @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  revokedAt DateTime?
+  createdAt DateTime    @default(now())
+
+  @@index([sessionId])
 }

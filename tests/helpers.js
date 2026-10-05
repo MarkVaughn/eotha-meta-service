@@ -28,10 +28,26 @@ export const app = (await import('../src/app.js')).default;
 
 export const json = (res) => JSON.parse(res.body);
 
+// Verifier double: stands in for Play Integrity / App Attest, whose real credentials are not
+// available to tests. It accepts exactly one token.
+export const GOOD_ATTESTATION = 'attested-device';
+export const attestationDouble = {
+  platform: 'play-integrity',
+  verify: async ({ token }) => (token === GOOD_ATTESTATION ? { ok: true } : { ok: false, reason: 'double refused' })
+};
+app.attestation.register(attestationDouble);
+export const attestationHeaders = {
+  'x-attestation-platform': 'play-integrity',
+  'x-attestation-token': GOOD_ATTESTATION
+};
+
 // Built from parts so the literal never looks like a committed credential.
 export const PASSWORD = ['correct', 'horse', 'battery', 'staple'].join('-');
 
 const created = [];
+
+/** Registers a player id created outside newPilot (e.g. a guest) for cleanup by closeApp. */
+export const track = (id) => created.push(id);
 
 /** Registers and logs in a fresh pilot through the public auth endpoints. */
 export async function newPilot(prefix = 'Pilot') {
@@ -46,7 +62,12 @@ export async function newPilot(prefix = 'Pilot') {
   if (reg.statusCode !== 201) throw new Error(`register failed: ${reg.statusCode} ${reg.body}`);
   const { id } = json(reg);
   created.push(id);
-  const login = await app.inject({ method: 'POST', url: '/auth/login', payload: { email, password: PASSWORD } });
+  const login = await app.inject({
+    method: 'POST',
+    url: '/auth/login',
+    headers: attestationHeaders,
+    payload: { email, password: PASSWORD, deviceId: 'login-test-device-id' }
+  });
   if (login.statusCode !== 200) throw new Error(`login failed: ${login.statusCode} ${login.body}`);
   const { token } = json(login);
   return { id, email, callsign, token, headers: { authorization: `Bearer ${token}` } };
