@@ -31,12 +31,12 @@ eotha-meta-service/
 │   └── generate-keys.js        # Ed25519 keypair generation utility
 ├── src/
 │   ├── config/
-│   │   ├── auth.js             # Link reward and device-id constants
+│   │   ├── auth.js             # Device-id length constants
 │   │   └── env.js              # Environment validation via Zod
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
-│   │   ├── identity.js         # Guest -> linked player conversion, idempotent link reward
+│   │   ├── identity.js         # Guest -> linked player conversion
 │   │   └── refresh-tokens.js   # Refresh rotation with reuse detection
 │   ├── plugins/
 │   │   ├── attestation.js      # requireAttestation preHandler
@@ -142,7 +142,7 @@ npm test
 - `POST /auth/logout`
   - Body `{ refreshToken }`. Ends that login.
 - `POST /auth/link/email` (Protected, guests only)
-  - Body `{ email, password, callsign? }`. Links an email and password to the calling guest, keeping the player id, and grants the one-time reward (`LINK_REWARD_CREDITS`, in the same transaction as the link). Returns a fresh access token and `reward: { granted, credits }`.
+  - Body `{ email, password, callsign? }`. Links an email and password to the calling guest, keeping the player id, so nothing is lost and guest-only restrictions lift (see [Guest hull lock](#guest-hull-lock)). Returns a fresh access token.
 - `GET /.well-known/jwks.json`
   - The Ed25519 public key as a JWK Set (`kid` is the RFC 7638 thumbprint, also set in every token header).
 
@@ -173,7 +173,11 @@ npm test
 - *Refresh token*: opaque, single-use, stored hashed. Every login creates a Better Auth session; that session's refresh tokens form the token family. Each refresh consumes the presented token and issues its successor. Presenting a consumed token means a copy exists, so the family is revoked and the Better Auth session deleted. A refresh also fails once the session expires (`SESSION_TTL_DAYS`, default 90) or is logged out. Better Auth has no built-in rotation or reuse detection, so this is implemented in `src/lib/refresh-tokens.js`.
 - `/auth/dev-login` keeps minting its 24-hour token, because the dev client has no refresh flow.
 
-**Linking.** `POST /auth/link/email` converts a guest in place (same id) and `grantLinkReward` pays `LINK_REWARD_CREDITS` once per player: the `AccountLinkReward` row is keyed by player id and inserted with `ON CONFLICT DO NOTHING`, and the credit increment runs in the same transaction only when that insert happened, so retries, races and later provider links cannot pay twice.
+**Linking.** `POST /auth/link/email` converts a guest in place (same id, `isAnonymous` becomes false). The conversion is a single guarded update, so concurrent link attempts cannot both win.
+
+### Guest hull lock
+
+Guests cannot upgrade the `HULL` component: `POST /ship/upgrade` refuses it with `403` and `{ "code": "guest_hull_locked" }`; nothing is charged or changed. Other components upgrade as usual. Whether a player is a guest is read server-side from the identity record (`Player.isAnonymous`) on every request, never from the token or the request body, and the access-token claims are unchanged, so the RTSE sees exactly what it did before. Linking an account (email today, Apple/Google later) keeps the same player id and lifts the lock immediately, even for tokens issued while the player was still a guest.
 
 ### Device attestation
 
@@ -191,7 +195,7 @@ Nothing for Apple or Google is configured or registered today. The wiring is in 
 2. **Google**: the same with `socialProviders.google` and the Android ID token.
 3. **Play Games**: Google's general ID token does not carry the Play Games `playerId`, so it needs a small Better Auth plugin that exchanges the `serverAuthCode`, reads `playerId` from `games/v1/players/me` and records an `account` with `providerId: 'play-games'` for the calling guest (rejecting an identity already linked to another player; the `(providerId, accountId)` unique key backs this up).
 
-Whichever way the account row is created, the `databaseHooks.account.create.after` hook in `src/lib/auth.js` calls `linkExternalAccount`, which promotes the guest and grants the same once-only reward. A returning player on a new device signs in with the provider identity instead of linking.
+Whichever way the account row is created, the `databaseHooks.account.create.after` hook in `src/lib/auth.js` calls `linkExternalAccount`, which promotes the guest, lifting the hull lock. A returning player on a new device signs in with the provider identity instead of linking.
 
 ---
 

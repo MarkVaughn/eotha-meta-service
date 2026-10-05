@@ -108,13 +108,6 @@ export const linkEmailSchema = {
             callsign: { type: 'string' },
             anonymous: { type: 'boolean' }
           }
-        },
-        reward: {
-          type: 'object',
-          properties: {
-            granted: { type: 'boolean' },
-            credits: { type: 'integer' }
-          }
         }
       }
     }

@@ -6,11 +6,9 @@ import { join } from 'node:path';
 import Fastify from 'fastify';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import {
-  app, attestationDouble, attestationHeaders, call, closeApp, credits, GOOD_ATTESTATION, json, keysDir, newPilot,
+  app, attestationDouble, attestationHeaders, call, closeApp, GOOD_ATTESTATION, json, keysDir, newPilot,
   PASSWORD, setCredits, track
 } from './helpers.js';
-import { LINK_REWARD_CREDITS } from '../src/config/auth.js';
-import { grantLinkReward } from '../src/lib/identity.js';
 import { createPlayIntegrityVerifier } from '../src/lib/attestation/play-integrity.js';
 import attestationPlugin from '../src/plugins/attestation.js';
 
@@ -116,7 +114,7 @@ describe('guest login', () => {
 });
 
 describe('linking an email account', () => {
-  test('keeps the player id, enables password login and pays the reward once', async () => {
+  test('keeps the player id and enables password login', async () => {
     const guest = await newGuest();
     const email = uniqueEmail('link');
     const res = await linkEmail(guest, { email, password: PASSWORD });
@@ -124,15 +122,12 @@ describe('linking an email account', () => {
     const body = json(res);
     assert.equal(body.player.id, guest.player.id);
     assert.equal(body.player.anonymous, false);
-    assert.deepEqual(body.reward, { granted: true, credits: LINK_REWARD_CREDITS });
     assert.equal(app.jwt.verify(body.token).sub, guest.player.id);
 
     const row = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
     assert.equal(row.isAnonymous, false);
     assert.equal(row.email, email);
     assert.match(row.passwordHash, /^\$argon2id\$/);
-    assert.equal(row.credits, LINK_REWARD_CREDITS);
-    assert.equal(await credits({ headers: { authorization: `Bearer ${body.token}` } }), LINK_REWARD_CREDITS);
 
     // Password login now yields the same player id.
     const login = await app.inject({
@@ -143,47 +138,25 @@ describe('linking an email account', () => {
     assert.equal(json(login).player.anonymous, false);
   });
 
-  test('the reward is granted only once per player', async () => {
+  test('a second link is refused', async () => {
     const guest = await newGuest();
     assert.equal((await linkEmail(guest, { email: uniqueEmail('once'), password: PASSWORD })).statusCode, 200);
 
     const second = await linkEmail(guest, { email: uniqueEmail('twice'), password: PASSWORD });
     assert.equal(second.statusCode, 409);
     assert.equal(json(second).error, 'already_linked');
-    assert.equal((await app.prisma.player.findUnique({ where: { id: guest.player.id } })).credits, LINK_REWARD_CREDITS);
-    assert.equal(await app.prisma.accountLinkReward.count({ where: { playerId: guest.player.id } }), 1);
   });
 
-  test('concurrent link requests pay out exactly once', async () => {
+  test('concurrent link requests let exactly one through', async () => {
     const guest = await newGuest();
     const results = await Promise.all(
       Array.from({ length: 4 }, () => linkEmail(guest, { email: uniqueEmail('race'), password: PASSWORD }))
     );
     assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
     assert.ok(results.every((r) => [200, 409].includes(r.statusCode)));
-    assert.equal((await app.prisma.player.findUnique({ where: { id: guest.player.id } })).credits, LINK_REWARD_CREDITS);
   });
 
-  test('grantLinkReward is idempotent and rolls back with its transaction', async () => {
-    const guest = await newGuest();
-    const grant = () => app.prisma.$transaction((tx) => grantLinkReward(tx, guest.player.id, 'test'));
-    assert.deepEqual(await grant(), { granted: true, credits: LINK_REWARD_CREDITS });
-    assert.deepEqual(await grant(), { granted: false, credits: 0 });
-    assert.equal((await app.prisma.player.findUnique({ where: { id: guest.player.id } })).credits, LINK_REWARD_CREDITS);
-
-    const other = await newGuest();
-    await assert.rejects(
-      app.prisma.$transaction(async (tx) => {
-        await grantLinkReward(tx, other.player.id, 'test');
-        throw new Error('link failed after the reward');
-      }),
-      /link failed/
-    );
-    assert.equal((await app.prisma.player.findUnique({ where: { id: other.player.id } })).credits, 0);
-    assert.equal(await app.prisma.accountLinkReward.count({ where: { playerId: other.player.id } }), 0);
-  });
-
-  test('a taken email is refused without promoting the guest or paying the reward', async () => {
+  test('a taken email is refused without promoting the guest', async () => {
     const taken = await newPilot('Taken');
     const guest = await newGuest();
     const res = await linkEmail(guest, { email: taken.email, password: PASSWORD });
@@ -191,15 +164,12 @@ describe('linking an email account', () => {
     assert.equal(json(res).error, 'email_or_callsign_taken');
     const row = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
     assert.equal(row.isAnonymous, true);
-    assert.equal(row.credits, 0);
-    assert.equal(await app.prisma.accountLinkReward.count({ where: { playerId: guest.player.id } }), 0);
   });
 
-  test('an already-registered pilot cannot claim the reward', async () => {
+  test('an already-registered pilot cannot be linked again', async () => {
     const pilot = await newPilot('Registered');
     const res = await linkEmail(pilot, { email: uniqueEmail('reg'), password: PASSWORD });
     assert.equal(res.statusCode, 409);
-    assert.equal(await credits(pilot), 0);
   });
 
   test('requires a valid access token', async () => {
@@ -225,18 +195,90 @@ describe('linking an email account', () => {
     assert.equal(json(res).error, 'device_account_linked');
   });
 
-  test('an external provider account linked through Better Auth promotes the guest and pays the reward once', async () => {
+  test('an external provider account linked through Better Auth promotes the guest', async () => {
     const guest = await newGuest();
     const { internalAdapter } = await app.betterAuth.$context;
     // 'test-provider' stands in for Apple / Google / Play Games, none of which is enabled.
     await internalAdapter.linkAccount({ userId: guest.player.id, providerId: 'test-provider', accountId: randomUUID() });
-    let row = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
+    const row = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
     assert.equal(row.isAnonymous, false);
-    assert.equal(row.credits, LINK_REWARD_CREDITS);
+    assert.equal(row.id, guest.player.id);
+  });
+});
 
-    await internalAdapter.linkAccount({ userId: guest.player.id, providerId: 'another-provider', accountId: randomUUID() });
-    row = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
-    assert.equal(row.credits, LINK_REWARD_CREDITS);
+describe('guest hull lock', () => {
+  const upgrade = (session, componentType, targetTier) => app.inject({
+    method: 'POST', url: '/ship/upgrade', headers: { authorization: `Bearer ${session.token}` }, payload: { componentType, targetTier }
+  });
+  const fundedGuest = async () => {
+    const guest = await newGuest();
+    await setCredits({ id: guest.player.id }, 100_000);
+    return guest;
+  };
+
+  test('a guest cannot upgrade the hull, and nothing is charged or changed', async () => {
+    const guest = await fundedGuest();
+    const res = await upgrade(guest, 'HULL', 2);
+    assert.equal(res.statusCode, 403);
+    assert.equal(json(res).code, 'guest_hull_locked');
+    assert.equal((await app.prisma.player.findUnique({ where: { id: guest.player.id } })).credits, 100_000);
+    const hull = await app.prisma.shipComponentRecord.findFirst({
+      where: { type: 'HULL', spaceship: { playerId: guest.player.id } }
+    });
+    assert.ok(!hull || hull.tier === 1);
+  });
+
+  test('a guest can still upgrade other components', async () => {
+    const guest = await fundedGuest();
+    // Subsystem upgrades are bounded by the hull tier, and a guest's hull cannot be raised, so give
+    // the guest a roomier hull directly in the database to show the lock is specific to HULL.
+    const loadout = json(await call({ headers: { authorization: `Bearer ${guest.token}` } }, 'GET', '/ship/loadout'));
+    await app.prisma.shipComponentRecord.upsert({
+      where: { spaceshipId_type: { spaceshipId: loadout.ship_id, type: 'HULL' } },
+      update: { tier: 3 },
+      create: { spaceshipId: loadout.ship_id, type: 'HULL', tier: 3 }
+    });
+    const res = await upgrade(guest, 'RADAR', 3);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).components.find((c) => c.type === 'RADAR').tier, 3);
+  });
+
+  test('a registered (non-guest) player can upgrade the hull', async () => {
+    const pilot = await newPilot('Hulled');
+    await setCredits(pilot, 100_000);
+    const res = await upgrade(pilot, 'HULL', 2);
+    assert.equal(res.statusCode, 200, res.body);
+  });
+
+  test('linking an account unlocks the hull for the same player', async () => {
+    const guest = await fundedGuest();
+    assert.equal((await upgrade(guest, 'HULL', 2)).statusCode, 403);
+
+    const linked = json(await linkEmail(guest, { email: uniqueEmail('unlock'), password: PASSWORD }));
+    assert.equal(linked.player.id, guest.player.id);
+    // The old guest token still works: the lock follows the identity record, not the token.
+    const res = await upgrade(guest, 'HULL', 2);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).components.find((c) => c.type === 'HULL').tier, 2);
+  });
+
+  test('guest status comes from the identity record, not from anything the client sends', async () => {
+    const guest = await fundedGuest();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ship/upgrade',
+      headers: { authorization: `Bearer ${guest.token}`, 'x-guest': 'false' },
+      payload: { componentType: 'HULL', targetTier: 2, isAnonymous: false, anonymous: false }
+    });
+    assert.ok([400, 403].includes(res.statusCode));
+    assert.notEqual(res.statusCode, 200);
+    assert.equal((await app.prisma.player.findUnique({ where: { id: guest.player.id } })).credits, 100_000);
+  });
+
+  test('guests and linked players carry the same claims in their access tokens', async () => {
+    const guest = await newGuest();
+    const linked = json(await linkEmail(guest, { email: uniqueEmail('claims'), password: PASSWORD }));
+    assert.deepEqual(Object.keys(app.jwt.verify(guest.token)).sort(), Object.keys(app.jwt.verify(linked.token)).sort());
   });
 });
 
@@ -338,8 +380,8 @@ describe('refresh tokens', () => {
 
 describe('token lifetime', () => {
   test('a ship upgrade reissue keeps the original expiry instead of extending the login', async () => {
-    const guest = await newGuest();
-    await setCredits({ id: guest.player.id }, 100_000);
+    const guest = await newPilot('Reissue'); // a guest could not upgrade the hull
+    await setCredits(guest, 100_000);
     // A token with a distinctive expiry, well short of a freshly minted one.
     const { iat, exp, ...claims } = app.jwt.verify(guest.token);
     const exp5min = Math.floor(Date.now() / 1000) + 300;
@@ -351,7 +393,7 @@ describe('token lifetime', () => {
     assert.equal(res.statusCode, 200, res.body);
     const reissued = app.jwt.verify(json(res).token);
     assert.equal(reissued.exp, exp5min);
-    assert.equal(reissued.sub, guest.player.id);
+    assert.equal(reissued.sub, guest.id);
     assert.equal(decodeHeader(json(res).token).kid, app.jwks.keys[0].kid);
   });
 });

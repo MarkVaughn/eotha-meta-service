@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import env from '../../config/env.js';
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
-import { convertGuest, grantLinkReward } from '../../lib/identity.js';
+import { convertGuest } from '../../lib/identity.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
 import {
@@ -166,8 +166,8 @@ export default async function authRoutes(fastify, opts) {
     return { success: true };
   });
 
-  // Endpoint 2e: Link an email and password to the calling guest. The player id is unchanged, and
-  // the first link of a player pays out the linking reward (once, atomically with the link).
+  // Endpoint 2e: Link an email and password to the calling guest. The player id is unchanged, so
+  // nothing is lost, and guest-only restrictions (such as locked hull upgrades) lift.
   fastify.post('/link/email', {
     schema: linkEmailSchema,
     onRequest: fastify.authenticate
@@ -176,25 +176,21 @@ export default async function authRoutes(fastify, opts) {
     const playerId = request.user.sub;
     const passwordHash = await hashPassword(password);
 
-    let reward;
+    let linked;
     try {
-      reward = await prisma.$transaction(async (tx) => {
-        const linked = await convertGuest(tx, playerId, { email, passwordHash, ...(callsign && { callsign }) });
-        return linked ? grantLinkReward(tx, playerId, 'credential') : null;
-      });
+      linked = await convertGuest(prisma, playerId, { email, passwordHash, ...(callsign && { callsign }) });
     } catch (err) {
       if (err.code === 'P2002') return reply.code(409).send({ error: 'email_or_callsign_taken' });
       throw err;
     }
-    if (!reward) return reply.code(409).send({ error: 'already_linked' });
+    if (!linked) return reply.code(409).send({ error: 'already_linked' });
 
     const player = await prisma.player.findUnique({ where: { id: playerId }, include: { harbor: true } });
     const { token } = await signSession(player);
     return {
       token,
       expiresIn: env.ACCESS_TOKEN_TTL_SECONDS,
-      player: { id: player.id, callsign: player.callsign, anonymous: false },
-      reward
+      player: { id: player.id, callsign: player.callsign, anonymous: false }
     };
   });
 

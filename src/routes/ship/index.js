@@ -84,6 +84,15 @@ export default async function shipRoutes(fastify, opts) {
 
     // Every check, the credit deduction and the tier change commit or roll back together.
     const outcome = await withActiveShip(request, async (tx, ship) => {
+      // Guests cannot upgrade the hull until they link an account. Decided from the identity
+      // record, never from the token or the request.
+      if (componentType === 'HULL') {
+        const player = await tx.player.findUnique({ where: { id: playerId }, select: { isAnonymous: true } });
+        if (player?.isAnonymous) {
+          return fail(403, 'Hull upgrades are locked until you link an account.', { code: 'guest_hull_locked' });
+        }
+      }
+
       const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
       const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
       const currentPoints = totalSubsystemPoints(ship.components);

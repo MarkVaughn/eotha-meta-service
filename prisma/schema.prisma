@@ -37,7 +37,6 @@ model Player {
   accounts     Account[]
   refreshTokens RefreshToken[]
   guestDevice  GuestDevice?
-  linkReward   AccountLinkReward?
 }
 
 model SpaceHarbor {
@@ -244,13 +243,4 @@ model RefreshToken {
   createdAt DateTime    @default(now())
 
   @@index([sessionId])
-}
-
-// One row per player makes the account-linking reward idempotent: the primary key admits a single grant.
-model AccountLinkReward {
-  playerId  String   @id @db.Uuid
-  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  provider  String
-  credits   Int
-  grantedAt DateTime @default(now())
 }
