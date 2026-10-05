@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { z } from 'zod';
 
 const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('production'),
   PORT: z.coerce.number().default(3000),
   // Directory holding the shared Ed25519 keypair (private.pem, public.pem).
   KEYS_DIR: z.string().default('keys'),

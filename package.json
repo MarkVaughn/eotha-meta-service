@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/app.js",
+    "dev": "NODE_ENV=development tsx watch src/app.js",
     "build": "prisma generate",
     "start": "node src/app.js",
     "test": "node --test",
