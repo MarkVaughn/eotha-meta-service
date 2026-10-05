@@ -152,7 +152,7 @@ npm test
 - `POST /game/trade/sell` (Protected)
   - Sells `METAL` or `GAS` from the pilot's harbor stock. The stock decrement, trade record and credit increment commit together; a sale the stock cannot cover is refused with `409`.
 - `POST /ship/upgrade` (Protected)
-  - Raises a component tier. The credit cost (`TIER_UPGRADE_COST` in `src/config/components.js`, summed per tier step) is deducted in the same transaction as the tier change; insufficient credits return `402`.
+  - Raises a component tier. The credit cost (`TIER_UPGRADE_COST` in `src/config/components.js`, summed per tier step) is deducted in the same transaction as the tier change; insufficient credits return `402`. Guests are refused `HULL` upgrades with `403 guest_hull_locked` (see [Guest hull lock](#guest-hull-lock)).
 
 ### Game Sessions
 - `GET /game/session` (Protected)
