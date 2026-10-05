@@ -11,7 +11,6 @@ import {
   currentEpoch,
   generateOffers
 } from '../../config/missions.js';
-import { mockAccount } from '../../lib/mock-accounts.js';
 import { loadRtsePublicKey, verifyClaimSignature } from '../../lib/mission-claim.js';
 
 const availableSchema = {
@@ -71,7 +70,7 @@ const completeSchema = {
   }
 };
 
-// Proto-JSON ActiveMission for a stored row / mock record.
+// Proto-JSON ActiveMission for a stored row.
 function toActiveMission(playerId, offer, acceptedAt) {
   const acceptedAtMs = acceptedAt.getTime();
   return {
@@ -91,52 +90,36 @@ export default async function missionsRoutes(fastify, opts) {
     fastify.log.warn('⚠️ keys/public.pem not found; mission completion claims will be rejected.');
   }
 
-  // Dev-login pilots have no database row, so their mission state lives in memory.
-  const mockActiveMissions = new Map(); // playerId -> { offer, acceptedAt: Date }
-  const mockCooldowns = new Map(); // `${playerId}::${stationId}` -> completedAt (ms)
-  const mockCompleted = new Set(); // `${playerId}::${missionId}`
-
   fastify.addHook('onRequest', fastify.authenticate);
 
   async function getPassengerCapacity(request) {
-    if (request.user.mock) return request.user.ship_attributes?.passenger_capacity ?? 0;
     const ship = await prisma.spaceship.findFirst({
       where: { playerId: request.user.sub, active: true },
       orderBy: { createdAt: 'asc' },
       include: { components: true }
     });
-    if (!ship) return 0;
-    return computeShipAttributes(ship.components).passenger_capacity ?? 0;
+    // A pilot with no ship row yet flies the Tier 1 default ship, as in the login token.
+    return computeShipAttributes(ship?.components ?? []).passenger_capacity ?? 0;
   }
 
   async function cooldownRemainingMs(request, stationId) {
     const playerId = request.user.sub;
-    let completedAt;
-    if (request.user.mock) {
-      completedAt = mockCooldowns.get(`${playerId}::${stationId}`);
-    } else {
-      const row = await prisma.missionCooldown.findUnique({
-        where: { playerId_originStationId: { playerId, originStationId: stationId } }
-      });
-      completedAt = row?.completedAt.getTime();
-    }
+    const row = await prisma.missionCooldown.findUnique({
+      where: { playerId_originStationId: { playerId, originStationId: stationId } }
+    });
+    const completedAt = row?.completedAt.getTime();
     if (completedAt == null) return 0;
     return Math.max(0, completedAt + MISSION_COOLDOWN_MS - Date.now());
   }
 
   async function getActive(request) {
     const playerId = request.user.sub;
-    if (request.user.mock) {
-      const rec = mockActiveMissions.get(playerId);
-      return rec ? toActiveMission(playerId, rec.offer, rec.acceptedAt) : null;
-    }
     const row = await prisma.playerMission.findUnique({ where: { playerId } });
     return row ? toActiveMission(playerId, row.offer, row.acceptedAt) : null;
   }
 
   async function alreadyCompleted(request, missionId) {
     const playerId = request.user.sub;
-    if (request.user.mock) return mockCompleted.has(`${playerId}::${missionId}`);
     return (await prisma.completedMission.findUnique({
       where: { playerId_missionId: { playerId, missionId } }
     })) !== null;
@@ -195,20 +178,15 @@ export default async function missionsRoutes(fastify, opts) {
 
     const acceptedAt = new Date();
     try {
-      if (request.user.mock) {
-        if (mockActiveMissions.has(playerId)) throw Object.assign(new Error('active'), { code: 'P2002' });
-        mockActiveMissions.set(playerId, { offer: authoritative, acceptedAt });
-      } else {
-        await prisma.playerMission.create({
-          data: {
-            playerId,
-            missionId: authoritative.mission_id,
-            originStationId: authoritative.origin_station_id,
-            offer: authoritative,
-            acceptedAt
-          }
-        });
-      }
+      await prisma.playerMission.create({
+        data: {
+          playerId,
+          missionId: authoritative.mission_id,
+          originStationId: authoritative.origin_station_id,
+          offer: authoritative,
+          acceptedAt
+        }
+      });
     } catch (err) {
       // Lost a race with a concurrent accept (unique(playerId)).
       if (err?.code === 'P2002') return conflict(reply, 'A mission is already active. Complete or abandon it first.');
@@ -224,8 +202,7 @@ export default async function missionsRoutes(fastify, opts) {
     const active = await getActive(request);
     if (!active) return reply.code(404).send({ error: 'No active mission to abandon.' });
     // No payout and no cooldown.
-    if (request.user.mock) mockActiveMissions.delete(playerId);
-    else await prisma.playerMission.deleteMany({ where: { playerId } });
+    await prisma.playerMission.deleteMany({ where: { playerId } });
     return { abandoned: true, mission_id: active.mission_id };
   });
 
@@ -235,20 +212,6 @@ export default async function missionsRoutes(fastify, opts) {
     const playerId = request.user.sub;
     const stationId = active.offer.origin_station_id;
     const missionId = active.mission_id;
-
-    if (request.user.mock) {
-      const key = `${playerId}::${missionId}`;
-      const rec = mockActiveMissions.get(playerId);
-      if (!rec || rec.offer.mission_id !== missionId || mockCompleted.has(key)) return null;
-      // Synchronous from here on, so concurrent requests cannot both settle.
-      const account = mockAccount(playerId);
-      if (account.credits + claim.rewardCredits > MAX_REWARD_CREDITS) return OVERFLOW;
-      mockActiveMissions.delete(playerId);
-      mockCompleted.add(key);
-      account.credits += claim.rewardCredits;
-      mockCooldowns.set(`${playerId}::${stationId}`, Date.now());
-      return account.credits;
-    }
 
     try {
       return await prisma.$transaction(async (tx) => {

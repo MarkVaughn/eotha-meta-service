@@ -5,6 +5,7 @@ import {
   MAX_TIER,
   computeShipAttributes,
   defaultComponents,
+  upgradeCost,
   hullBudget,
   totalSubsystemPoints
 } from '../../config/components.js';
@@ -32,20 +33,12 @@ function toLoadout(shipId, components) {
 export default async function shipRoutes(fastify, opts) {
   const prisma = fastify.prisma;
 
-  // Dev-login pilots have no database row, so their loadouts live in memory.
-  const mockLoadouts = new Map();
-
   fastify.addHook('onRequest', fastify.authenticate);
 
-  async function getActiveShip(request) {
+  // Runs `fn(tx, ship)` inside one transaction holding a per-player advisory lock, so concurrent
+  // requests cannot create duplicate active ships or interleave a check with its write.
+  function withActiveShip(request, fn) {
     const playerId = request.user.sub;
-    if (request.user.mock) {
-      if (!mockLoadouts.has(playerId)) mockLoadouts.set(playerId, defaultComponents());
-      return { id: `dev-${playerId}`, components: mockLoadouts.get(playerId), mock: true, playerId };
-    }
-
-    // Serialize first-time creation per player with a transaction-scoped advisory lock,
-    // so concurrent requests cannot create duplicate active ships.
     return prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${playerId}))`;
       const existing = await tx.spaceship.findFirst({
@@ -53,8 +46,7 @@ export default async function shipRoutes(fastify, opts) {
         orderBy: { createdAt: 'asc' },
         include: { components: true }
       });
-      if (existing) return existing;
-      return tx.spaceship.create({
+      const ship = existing ?? await tx.spaceship.create({
         data: {
           playerId,
           callsign: request.user.callsign,
@@ -62,6 +54,7 @@ export default async function shipRoutes(fastify, opts) {
         },
         include: { components: true }
       });
+      return fn(tx, ship);
     });
   }
 
@@ -71,16 +64,16 @@ export default async function shipRoutes(fastify, opts) {
     return fastify.jwt.sign({ ...claims, ship_attributes: loadout.ship_attributes });
   }
 
-  const alreadyAtTier = (reply, componentType, tier) =>
-    reply.code(400).send({ error: `${componentType} is already at tier ${tier}.` });
+  const fail = (status, error, extra = {}) => ({ failure: { status, body: { error, ...extra } } });
 
   fastify.get('/loadout', async (request) => {
-    const ship = await getActiveShip(request);
+    const ship = await withActiveShip(request, async (tx, active) => active);
     return toLoadout(ship.id, ship.components);
   });
 
   fastify.post('/upgrade', { schema: upgradeSchema }, async (request, reply) => {
     const { componentType, targetTier } = request.body;
+    const playerId = request.user.sub;
 
     if (ESSENTIAL_COMPONENTS.includes(componentType) && targetTier === 0) {
       return reply.code(400).send({
@@ -88,66 +81,59 @@ export default async function shipRoutes(fastify, opts) {
       });
     }
 
-    const ship = await getActiveShip(request);
+    // Every check, the credit deduction and the tier change commit or roll back together.
+    const outcome = await withActiveShip(request, async (tx, ship) => {
+      const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
+      const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
+      const currentPoints = totalSubsystemPoints(ship.components);
 
-    const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
-    const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
-    const currentPoints = totalSubsystemPoints(ship.components);
-
-    if (componentType === 'HULL') {
-      const budget = hullBudget(targetTier);
-      if (currentPoints > budget) {
-        return reply.code(400).send({
-          error: `Upgrade exceeds Hull Tier ${targetTier} budget of ${budget} points (requested: ${currentPoints}).`
-        });
+      if (componentType === 'HULL') {
+        const budget = hullBudget(targetTier);
+        if (currentPoints > budget) {
+          return fail(400, `Upgrade exceeds Hull Tier ${targetTier} budget of ${budget} points (requested: ${currentPoints}).`);
+        }
+      } else {
+        const projectedPoints = currentPoints - currentComponentTier + targetTier;
+        const budget = hullBudget(currentHullTier);
+        if (projectedPoints > budget) {
+          return fail(400, `Upgrade exceeds Hull Tier ${currentHullTier} budget of ${budget} points (requested: ${projectedPoints}).`);
+        }
       }
-    } else {
-      const projectedPoints = currentPoints - currentComponentTier + targetTier;
-      const budget = hullBudget(currentHullTier);
-      if (projectedPoints > budget) {
-        return reply.code(400).send({
-          error: `Upgrade exceeds Hull Tier ${currentHullTier} budget of ${budget} points (requested: ${projectedPoints}).`
-        });
-      }
-    }
 
-    if (ship.mock) {
-      const current = ship.components.find((c) => c.type === componentType);
-      if (current && targetTier <= current.tier) return alreadyAtTier(reply, componentType, current.tier);
-      const components = ship.components.map((c) =>
-        c.type === componentType ? { ...c, tier: targetTier, healthPct: 100 } : c
-      );
-      mockLoadouts.set(ship.playerId, components);
-      const loadout = toLoadout(ship.id, components);
-      return { ...loadout, token: reissueToken(request, loadout) };
-    }
+      const row = ship.components.find((c) => c.type === componentType);
+      const fromTier = row?.tier ?? (ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0);
+      if (targetTier <= fromTier) return fail(400, `${componentType} is already at tier ${fromTier}.`);
 
-    // Atomic guard: only raise the tier if the stored tier is still lower than the target.
-    const { count } = await prisma.shipComponentRecord.updateMany({
-      where: { spaceshipId: ship.id, type: componentType, tier: { lt: targetTier } },
-      data: { tier: targetTier, healthPct: 100 }
-    });
-    if (count === 0) {
-      const row = await prisma.shipComponentRecord.findUnique({
-        where: { spaceshipId_type: { spaceshipId: ship.id, type: componentType } }
+      // Guarded deduction: only succeeds while the balance still covers the cost.
+      const cost = upgradeCost(fromTier, targetTier);
+      const { count } = await tx.player.updateMany({
+        where: { id: playerId, credits: { gte: cost } },
+        data: { credits: { decrement: cost } }
       });
-      if (row) return alreadyAtTier(reply, componentType, row.tier);
-      try {
-        await prisma.shipComponentRecord.create({
-          data: { spaceshipId: ship.id, type: componentType, tier: targetTier }
+      if (count !== 1) {
+        const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+        if (!player) return fail(404, 'Player not found.');
+        return fail(402, `Insufficient credits: upgrade costs ${cost}, balance is ${player.credits}.`, {
+          cost,
+          credits: player.credits
         });
-      } catch (err) {
-        if (err.code !== 'P2002') throw err;
-        // Lost a creation race; retry the guarded update against the winner's row.
-        const retry = await prisma.shipComponentRecord.updateMany({
-          where: { spaceshipId: ship.id, type: componentType, tier: { lt: targetTier } },
-          data: { tier: targetTier, healthPct: 100 }
-        });
-        if (retry.count === 0) return alreadyAtTier(reply, componentType, targetTier);
       }
-    }
-    const updated = await prisma.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } });
-    const loadout = toLoadout(ship.id, updated);
-    return { ...loadout, token: reissueToken(request, loadout) };
+
+      if (row) {
+        await tx.shipComponentRecord.update({ where: { id: row.id }, data: { tier: targetTier, healthPct: 100 } });
+      } else {
+        await tx.shipComponentRecord.create({ data: { spaceshipId: ship.id, type: componentType, tier: targetTier } });
+      }
+
+      const [components, player] = await Promise.all([
+        tx.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } }),
+        tx.player.findUnique({ where: { id: playerId }, select: { credits: true } })
+      ]);
+      return { shipId: ship.id, components, cost, credits: player.credits };
+    });
+
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
+    const loadout = toLoadout(outcome.shipId, outcome.components);
+    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(request, loadout) };
   });
 }

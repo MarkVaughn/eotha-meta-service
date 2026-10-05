@@ -1,6 +1,7 @@
 import { createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import env from '../config/env.js';
 
 const DOMAIN = Buffer.from('EOTHA_MISSION_CLAIM_V1', 'utf8'); // 22 bytes
 
@@ -37,7 +38,7 @@ export function canonicalClaimPayload(claim) {
   ]);
 }
 
-export function loadRtsePublicKey(path = join(process.cwd(), 'keys', 'public.pem')) {
+export function loadRtsePublicKey(path = join(resolve(env.KEYS_DIR), 'public.pem')) {
   try {
     return createPublicKey(readFileSync(path, 'utf8'));
   } catch {

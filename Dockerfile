@@ -2,6 +2,9 @@ FROM node:24-slim
 
 WORKDIR /app
 
+# Keeps /auth/dev-login (development only) disabled in the image.
+ENV NODE_ENV=production
+
 # Install openssl for Prisma
 RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
 

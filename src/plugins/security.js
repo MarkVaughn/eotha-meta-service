@@ -1,22 +1,25 @@
 import fp from 'fastify-plugin';
 import fastifyJwt from '@fastify/jwt';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
+import env from '../config/env.js';
+
+function readKey(dir, name) {
+  const path = join(dir, name);
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `Signing key ${path} could not be read (${err.code ?? err.message}). ` +
+      'Refusing to start without the shared Ed25519 keypair; run `npm run keys:generate` for local development.'
+    );
+  }
+}
 
 async function securityPlugin(fastify, opts) {
-  let privateKey;
-  let publicKey;
-
-  try {
-    privateKey = readFileSync(join(process.cwd(), 'keys', 'private.pem'), 'utf8');
-    publicKey = readFileSync(join(process.cwd(), 'keys', 'public.pem'), 'utf8');
-  } catch (err) {
-    fastify.log.warn("⚠️ Security keys not found. Falling back to local symmetric development secret!");
-    privateKey = 'super-secret-dev-key';
-    publicKey = 'super-secret-dev-key';
-  }
-
-  const isAsymmetric = privateKey.includes('PRIVATE KEY');
+  const keysDir = resolve(opts.keysDir ?? env.KEYS_DIR);
+  const privateKey = readKey(keysDir, 'private.pem');
+  const publicKey = readKey(keysDir, 'public.pem');
 
   await fastify.register(fastifyJwt, {
     secret: {
@@ -24,7 +27,7 @@ async function securityPlugin(fastify, opts) {
       public: publicKey
     },
     sign: {
-      algorithm: isAsymmetric ? 'EdDSA' : 'HS256',
+      algorithm: 'EdDSA',
       issuer: 'eotha.meta-service',
       expiresIn: '24h'
     }

@@ -1,13 +1,15 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import app from '../src/app.js';
+import { app, call, closeApp, credits, json, newPilot, setCredits } from './helpers.js';
 import {
   computeShipAttributes,
   defaultComponents,
   COMPONENT_TYPES,
   OPTIONAL_COMPONENTS,
   hullBudget,
-  totalSubsystemPoints
+  totalSubsystemPoints,
+  upgradeCost,
+  TIER_UPGRADE_COST
 } from '../src/config/components.js';
 
 describe('computeShipAttributes', () => {
@@ -132,129 +134,154 @@ describe('hullBudget', () => {
   });
 });
 
+describe('upgradeCost', () => {
+  test('charges each tier step once, so multi-tier upgrades sum their steps', () => {
+    assert.equal(upgradeCost(1, 2), TIER_UPGRADE_COST[2]);
+    assert.equal(upgradeCost(0, 1), TIER_UPGRADE_COST[1]);
+    assert.equal(upgradeCost(1, 3), TIER_UPGRADE_COST[2] + TIER_UPGRADE_COST[3]);
+    assert.equal(upgradeCost(0, 5), Object.values(TIER_UPGRADE_COST).reduce((a, b) => a + b, 0));
+    assert.equal(upgradeCost(3, 3), 0);
+  });
+});
+
 describe('ship components over HTTP', () => {
   before(async () => { await app.ready(); });
-  after(async () => { await app.close(); });
+  after(async () => { await closeApp(); });
 
-  async function login() {
-    const res = await app.inject({ method: 'GET', url: '/auth/dev-login?callsign=Shipper' });
-    return JSON.parse(res.body);
-  }
+  const upgrade = (pilot, componentType, targetTier) =>
+    call(pilot, 'POST', '/ship/upgrade', { componentType, targetTier });
+  const loadout = async (pilot) => json(await call(pilot, 'GET', '/ship/loadout'));
+  const tierOf = (lo, type) => lo.components.find((c) => c.type === type).tier;
 
-  test('GET /auth/dev-login includes ship and JWT ship_attributes', async () => {
-    const json = await login();
-    assert.equal(json.player.ship.components.length, 11);
-    const tierOneTypes = ['HULL', 'RADAR', 'ENGINES', 'ENERGY', 'LIFE_SUPPORT', 'SENSORS', 'CARGO'];
-    for (const c of json.player.ship.components) {
-      assert.equal(c.tier, tierOneTypes.includes(c.type) ? 1 : 0, `${c.type} default tier`);
-    }
-    assert.deepEqual(json.player.ship.ship_attributes, computeShipAttributes(defaultComponents()));
-    const decoded = app.jwt.verify(json.token);
+  test('login embeds default ship attributes in the JWT', async () => {
+    const pilot = await newPilot('Shipper');
+    const decoded = app.jwt.verify(pilot.token);
+    assert.deepEqual(decoded.ship_attributes, computeShipAttributes(defaultComponents()));
     assert.equal(decoded.ship_attributes.identification_range_m, 150);
     assert.equal(decoded.ship_attributes.signature_dissipation_rate, 1.0);
-    assert.deepEqual(decoded.ship_attributes, json.player.ship.ship_attributes);
   });
 
-  test('GET /ship/loadout and POST /ship/upgrade for dev pilot', async () => {
-    const { token } = await login();
-    const headers = { authorization: `Bearer ${token}` };
+  test('GET /ship/loadout creates one default ship per pilot, even under concurrency', async () => {
+    const pilot = await newPilot('Loadout');
+    assert.equal((await app.inject({ method: 'GET', url: '/ship/loadout' })).statusCode, 401);
 
-    const unauth = await app.inject({ method: 'GET', url: '/ship/loadout' });
-    assert.equal(unauth.statusCode, 401);
+    const results = await Promise.all([1, 2, 3, 4].map(() => call(pilot, 'GET', '/ship/loadout')));
+    for (const res of results) assert.equal(res.statusCode, 200);
+    assert.equal(new Set(results.map((r) => json(r).ship_id)).size, 1);
+    assert.equal(await app.prisma.spaceship.count({ where: { playerId: pilot.id } }), 1);
 
-    const loadout = await app.inject({ method: 'GET', url: '/ship/loadout', headers });
-    assert.equal(loadout.statusCode, 200);
-    assert.equal(JSON.parse(loadout.body).ship_attributes.max_hull_hp, 100);
+    const lo = json(results[0]);
+    assert.equal(lo.components.length, 11);
+    const tierOneTypes = ['HULL', 'RADAR', 'ENGINES', 'ENERGY', 'LIFE_SUPPORT', 'SENSORS', 'CARGO'];
+    for (const c of lo.components) assert.equal(c.tier, tierOneTypes.includes(c.type) ? 1 : 0, `${c.type} default tier`);
+    assert.equal(lo.ship_attributes.max_hull_hp, 100);
+  });
 
-    const up = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'HULL', targetTier: 3 }
-    });
+  test('POST /ship/upgrade charges credits, persists the tier and reissues the token', async () => {
+    const pilot = await newPilot('Upgrader');
+    await setCredits(pilot, 100_000);
+
+    const hullCost = upgradeCost(1, 3);
+    const up = await upgrade(pilot, 'HULL', 3);
     assert.equal(up.statusCode, 200);
-    assert.equal(JSON.parse(up.body).ship_attributes.max_hull_hp, 500);
-    const reissued = app.jwt.verify(JSON.parse(up.body).token);
-    assert.equal(reissued.sub, app.jwt.verify(token).sub);
-    assert.equal(reissued.mock, true);
+    const body = json(up);
+    assert.equal(body.ship_attributes.max_hull_hp, 500);
+    assert.equal(body.cost, hullCost);
+    assert.equal(body.credits, 100_000 - hullCost);
+    const reissued = app.jwt.verify(body.token);
+    assert.equal(reissued.sub, pilot.id);
     assert.equal(reissued.ship_attributes.max_hull_hp, 500);
+    assert.equal(reissued.mock, undefined);
+    assert.equal(await credits(pilot), 100_000 - hullCost);
+    assert.equal(tierOf(await loadout(pilot), 'HULL'), 3);
 
-    const radarUp = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'RADAR', targetTier: 3 }
-    });
-    assert.equal(radarUp.statusCode, 200);
-    const radarBody = JSON.parse(radarUp.body);
-    assert.equal(radarBody.ship_attributes.identification_range_m, 700);
-    assert.equal(app.jwt.verify(radarBody.token).ship_attributes.identification_range_m, 700);
+    const radarUp = json(await upgrade(pilot, 'RADAR', 3));
+    assert.equal(radarUp.ship_attributes.identification_range_m, 700);
+    assert.equal(radarUp.cost, upgradeCost(1, 3));
+    assert.equal(app.jwt.verify(radarUp.token).ship_attributes.identification_range_m, 700);
 
-    const stealthUp = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'STEALTH', targetTier: 4 }
-    });
-    assert.equal(stealthUp.statusCode, 200);
-    const stealthBody = JSON.parse(stealthUp.body);
-    assert.equal(stealthBody.ship_attributes.signature_dissipation_rate, 1.8);
-    assert.equal(app.jwt.verify(stealthBody.token).ship_attributes.signature_dissipation_rate, 1.8);
+    // An unequipped optional component is priced from tier 0.
+    const stealthUp = json(await upgrade(pilot, 'STEALTH', 4));
+    assert.equal(stealthUp.ship_attributes.signature_dissipation_rate, 1.8);
+    assert.equal(stealthUp.cost, upgradeCost(0, 4));
+    assert.equal(await credits(pilot), 100_000 - hullCost - upgradeCost(1, 3) - upgradeCost(0, 4));
 
-    for (const payload of [
-      { componentType: 'HULL', targetTier: 6 },
-      { componentType: 'HULL', targetTier: 0 },
-      { componentType: 'BOGUS', targetTier: 2 },
-      { componentType: 'HULL', targetTier: 2 }
-    ]) {
-      const bad = await app.inject({ method: 'POST', url: '/ship/upgrade', headers, payload });
-      assert.equal(bad.statusCode, 400);
+    for (const [componentType, targetTier] of [['HULL', 6], ['HULL', 0], ['BOGUS', 2], ['HULL', 2]]) {
+      assert.equal((await upgrade(pilot, componentType, targetTier)).statusCode, 400);
     }
+  });
+
+  test('POST /ship/upgrade without enough credits is refused and changes nothing', async () => {
+    const pilot = await newPilot('Broke');
+    const cost = upgradeCost(1, 2);
+    assert.equal(await credits(pilot), 0);
+
+    let res = await upgrade(pilot, 'HULL', 2);
+    assert.equal(res.statusCode, 402);
+    assert.deepEqual(json(res), {
+      error: `Insufficient credits: upgrade costs ${cost}, balance is 0.`, cost, credits: 0
+    });
+    assert.equal(tierOf(await loadout(pilot), 'HULL'), 1);
+
+    await setCredits(pilot, cost - 1);
+    assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 402);
+    assert.equal(await credits(pilot), cost - 1);
+
+    await setCredits(pilot, cost);
+    res = await upgrade(pilot, 'HULL', 2);
+    assert.equal(res.statusCode, 200);
+    assert.equal(await credits(pilot), 0);
+    assert.equal(tierOf(await loadout(pilot), 'HULL'), 2);
+  });
+
+  test('rejected upgrades (budget, already at tier) are not charged', async () => {
+    const pilot = await newPilot('NoCharge');
+    await setCredits(pilot, 50_000);
+    await loadout(pilot);
+
+    assert.equal((await upgrade(pilot, 'RADAR', 2)).statusCode, 400); // over the Hull Tier 1 budget
+    assert.equal((await upgrade(pilot, 'HULL', 1)).statusCode, 400); // already at tier 1
+    assert.equal(await credits(pilot), 50_000);
+  });
+
+  test('concurrent upgrades cannot spend the same credits twice', async () => {
+    const pilot = await newPilot('DoubleSpend');
+    await loadout(pilot);
+    await setCredits(pilot, upgradeCost(1, 2)); // enough for exactly one hull upgrade
+    const results = await Promise.all([1, 2, 3].map(() => upgrade(pilot, 'HULL', 2)));
+    assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
+    assert.equal(await credits(pilot), 0);
+    assert.equal(tierOf(await loadout(pilot), 'HULL'), 2);
   });
 
   test('POST /ship/upgrade enforces hull budget and essential/optional tier 0 rules', async () => {
-    const { token } = await login();
-    const headers = { authorization: `Bearer ${token}` };
+    const pilot = await newPilot('Budget');
+    await setCredits(pilot, 100_000);
 
     // Default loadout uses exactly the Hull Tier 1 budget (6 points); any further
     // subsystem upgrade without first raising the hull tier must be rejected.
-    const overBudget = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'RADAR', targetTier: 2 }
-    });
+    const overBudget = await upgrade(pilot, 'RADAR', 2);
     assert.equal(overBudget.statusCode, 400);
-    assert.match(JSON.parse(overBudget.body).error, /Hull Tier 1 budget of 6 points/);
+    assert.match(json(overBudget).error, /Hull Tier 1 budget of 6 points/);
 
     // Essential components cannot be unequipped.
-    const essentialToZero = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'LIFE_SUPPORT', targetTier: 0 }
-    });
+    const essentialToZero = await upgrade(pilot, 'LIFE_SUPPORT', 0);
     assert.equal(essentialToZero.statusCode, 400);
-    assert.match(JSON.parse(essentialToZero.body).error, /essential component and cannot be unequipped/);
+    assert.match(json(essentialToZero).error, /essential component and cannot be unequipped/);
 
     // Optional components may be explicitly set to Tier 0 (they already default there).
-    const shieldsAlreadyZero = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'SHIELDS', targetTier: 0 }
-    });
+    const shieldsAlreadyZero = await upgrade(pilot, 'SHIELDS', 0);
     assert.equal(shieldsAlreadyZero.statusCode, 400);
-    assert.match(JSON.parse(shieldsAlreadyZero.body).error, /already at tier 0/);
+    assert.match(json(shieldsAlreadyZero).error, /already at tier 0/);
 
     // Raising the hull tier first grows the budget so the same subsystem upgrade now fits.
-    const hullUp = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'HULL', targetTier: 2 }
-    });
-    assert.equal(hullUp.statusCode, 200);
-
-    const radarUp = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'RADAR', targetTier: 2 }
-    });
-    assert.equal(radarUp.statusCode, 200);
+    assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 200);
+    assert.equal((await upgrade(pilot, 'RADAR', 2)).statusCode, 200);
 
     // Equipping an optional component to a non-zero tier now consumes budget, and is permitted.
-    const shieldsUp = await app.inject({
-      method: 'POST', url: '/ship/upgrade', headers,
-      payload: { componentType: 'SHIELDS', targetTier: 1 }
-    });
+    const shieldsUp = await upgrade(pilot, 'SHIELDS', 1);
     assert.equal(shieldsUp.statusCode, 200);
-    assert.equal(JSON.parse(shieldsUp.body).ship_attributes.max_shield_hp, 50);
+    assert.equal(json(shieldsUp).ship_attributes.max_shield_hp, 50);
   });
 });
 
