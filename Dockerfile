@@ -14,8 +14,9 @@ RUN npm run build
 
 COPY scripts ./scripts/
 COPY src ./src/
+COPY keys ./keys/
 
-RUN npm run keys:generate
+RUN if [ ! -f keys/private.pem ]; then npm run keys:generate; fi
 
 EXPOSE 3000
 
