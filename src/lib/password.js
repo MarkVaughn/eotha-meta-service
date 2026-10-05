@@ -14,8 +14,14 @@ function legacyMatches(password, stored) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-// A real hash to verify against when the account does not exist, so unknown emails cost the same as wrong passwords.
+// A real hash to verify against whenever a failure would otherwise return without running argon2
+// (unknown account, wrong legacy password, unrecognised hash format), so every failed login costs the same.
 const decoyHash = await hashPassword('decoy-password-for-constant-time-login');
+
+async function rejectAfterDecoy(password) {
+  await argon2.verify(decoyHash, password);
+  return { valid: false };
+}
 
 /**
  * Checks a password against a stored hash. Returns `{ valid, upgradedHash }`;
@@ -23,19 +29,16 @@ const decoyHash = await hashPassword('decoy-password-for-constant-time-login');
  * outdated parameters) that matched, and should be persisted in place of the old one.
  */
 export async function verifyPassword(password, stored) {
-  if (stored == null) {
-    await argon2.verify(decoyHash, password);
-    return { valid: false };
-  }
+  if (stored == null) return rejectAfterDecoy(password);
   if (LEGACY_SHA256.test(stored)) {
-    if (!legacyMatches(password, stored)) return { valid: false };
+    if (!legacyMatches(password, stored)) return rejectAfterDecoy(password);
     return { valid: true, upgradedHash: await hashPassword(password) };
   }
   let valid = false;
   try {
     valid = await argon2.verify(stored, password);
   } catch {
-    return { valid: false }; // unrecognised hash format (e.g. a dev-login account's unusable marker)
+    return rejectAfterDecoy(password); // unrecognised hash format (e.g. a dev-login account's unusable marker)
   }
   if (!valid) return { valid: false };
   return argon2.needsRehash(stored) ? { valid: true, upgradedHash: await hashPassword(password) } : { valid: true };
