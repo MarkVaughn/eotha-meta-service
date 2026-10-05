@@ -10,6 +10,17 @@ export const OPTIONAL_COMPONENTS = ['SHIELDS', 'WEAPONS', 'CARGO', 'STEALTH', 'C
 export const MIN_TIER = 1;
 export const MAX_TIER = 5;
 
+// Credits charged to reach a tier from the one below it, for every component type.
+// Upgrading across several tiers costs the sum of each step (e.g. 1 -> 3 = 750 + 2000).
+// Design assumption: a single flat table, not per-component pricing.
+export const TIER_UPGRADE_COST = { 1: 250, 2: 750, 3: 2000, 4: 5000, 5: 12000 };
+
+export function upgradeCost(fromTier, toTier) {
+  let cost = 0;
+  for (let tier = fromTier + 1; tier <= toTier; tier++) cost += TIER_UPGRADE_COST[tier];
+  return cost;
+}
+
 // Nominal/baseline values used for optional components at Tier 0 (unequipped);
 // any attribute not listed here defaults to 0 when its component is Tier 0.
 const ZERO_TIER_OVERRIDES = {

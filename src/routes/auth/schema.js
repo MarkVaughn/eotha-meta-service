@@ -52,10 +52,10 @@ export const devLoginSchema = {
   querystring: {
     type: 'object',
     properties: {
-      callsign: { type: 'string', default: 'DevPilot' },
-      latitude: { type: 'string', default: '37.7749' },
-      longitude: { type: 'string', default: '-122.4194' },
-      h3: { type: 'string', default: '8828308281fffff' }
+      callsign: { type: 'string', default: 'DevPilot', minLength: 1 },
+      latitude: { type: 'string', default: '37.7749', pattern: '^-?\\d+(\\.\\d+)?$' },
+      longitude: { type: 'string', default: '-122.4194', pattern: '^-?\\d+(\\.\\d+)?$' },
+      h3: { type: 'string', default: '8828308281fffff', maxLength: 15 }
     }
   },
   response: {

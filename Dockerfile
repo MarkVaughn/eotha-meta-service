@@ -18,6 +18,10 @@ COPY keys ./keys/
 
 RUN if [ ! -f keys/private.pem ]; then npm run keys:generate; fi
 
+# Set after install/build so devDependencies (prisma CLI) are available above;
+# keeps /auth/dev-login (development only) disabled at runtime.
+ENV NODE_ENV=production
+
 EXPOSE 3000
 
 CMD ["npm", "start"]

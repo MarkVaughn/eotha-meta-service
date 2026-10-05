@@ -5,7 +5,10 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 ## Architecture & Features
 
 - **Asymmetric Authentication (Ed25519 / EdDSA)**: Mints cryptographic JWT tokens signed by a private key. The public key is shared out-of-band with the Rust RTSE cluster for zero-latency local verification without database queries.
-- **Developer Bypass / Fake Auth (`GET /auth/dev-login`)**: Frictionless pilot simulation token generation for rapid CLI and integration testing without database prerequisites.
+- **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing.
+- **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`.
+- **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
+- **Password Hashing**: argon2id. Legacy unsalted SHA-256 hashes still verify and are upgraded to argon2id on the next successful login.
 - **Geospatial Space Harbors**: Spatial anchor persistence for players using PostGIS and Uber H3 hexagonal spatial indexing.
 - **Session Allocation**: Coordinates player assignment to internal RTSE simulation cluster instances.
 
@@ -40,7 +43,8 @@ eotha-meta-service/
 │   │       └── schema.js       # Session route schemas
 │   └── app.js                  # Fastify server entry point
 ├── tests/
-│   └── app.test.js             # Automated test suite
+│   ├── helpers.js              # Test DB guard, throwaway keys, pilot factory
+│   └── *.test.js               # Automated test suite (real PostgreSQL)
 ├── .env.example                # Sample environment configuration
 ├── package.json
 └── README.md
@@ -52,7 +56,7 @@ eotha-meta-service/
 
 ### 1. Prerequisites
 - **Node.js 24+** (configured in `.nvmrc`)
-- **PostgreSQL 15+** with PostGIS (optional for dev-login mode)
+- **PostgreSQL 15+** (required; the service does not start without a database)
 
 ### 2. Installation
 ```bash
@@ -93,7 +97,10 @@ npm start
 ```
 
 ### 7. Run Test Suite
+Tests run against a real PostgreSQL database through Prisma and sign with a throwaway Ed25519 keypair, so they need no `keys/` files. Use a dedicated database whose name ends in `_test` (the suite refuses to run against any other):
 ```bash
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/eotha_meta_test?schema=public"
+npx prisma db push
 npm test
 ```
 
@@ -105,12 +112,18 @@ npm test
 - `GET /health`
   - Health check endpoint returning `{ status: "healthy", service: "eotha-meta-service" }`.
 - `GET /auth/dev-login`
-  - Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
-  - Returns a signed Ed25519 JWT token, WebSocket gateway URL, and mock player profile.
+  - Development only (`NODE_ENV=development`). Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
+  - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, WebSocket gateway URL, and the pilot profile.
 - `POST /auth/register`
   - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index.
 - `POST /auth/login`
   - Validates credentials and returns a signed production JWT.
+
+### Economy
+- `POST /game/trade/sell` (Protected)
+  - Sells `METAL` or `GAS` from the pilot's harbor stock. The stock decrement, trade record and credit increment commit together; a sale the stock cannot cover is refused with `409`.
+- `POST /ship/upgrade` (Protected)
+  - Raises a component tier. The credit cost (`TIER_UPGRADE_COST` in `src/config/components.js`, summed per tier step) is deducted in the same transaction as the tier change; insufficient credits return `402`.
 
 ### Game Sessions
 - `GET /game/session` (Protected)

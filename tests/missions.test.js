@@ -1,25 +1,12 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
-import { createPrivateKey, sign } from 'node:crypto';
-import app from '../src/app.js';
+import { sign } from 'node:crypto';
+import { app, call, closeApp, credits, json, newPilot, rtseKey, setCredits } from './helpers.js';
 import { buildOffer, currentEpoch, parseMissionId } from '../src/config/missions.js';
-import { mockAccount } from '../src/lib/mock-accounts.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 
 const SYSTEM = '8828308281fffff';
 const STATION = 'station-alpha';
-const hasKey = existsSync('keys/private.pem');
-const rtseKey = hasKey ? createPrivateKey(readFileSync('keys/private.pem', 'utf8')) : null;
-
-const json = (res) => JSON.parse(res.body);
-
-async function newPilot(callsign = 'MissionPilot') {
-  const { token, player } = json(await app.inject({ method: 'GET', url: `/auth/dev-login?callsign=${callsign}` }));
-  return { id: player.id, headers: { authorization: `Bearer ${token}` } };
-}
-
-const call = (pilot, method, url, payload) => app.inject({ method, url, headers: pilot.headers, payload });
 
 async function firstOffer(pilot, station = STATION) {
   const res = json(await call(pilot, 'GET', `/game/missions/available?stationId=${station}&systemH3=${SYSTEM}`));
@@ -48,7 +35,7 @@ function signedClaim(pilot, active, overrides = {}) {
 
 describe('authoritative missions', () => {
   before(async () => { await app.ready(); });
-  after(async () => { await app.close(); });
+  after(async () => { await closeApp(); });
 
   test('requires authentication', async () => {
     const res = await app.inject({ method: 'GET', url: `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}` });
@@ -95,7 +82,12 @@ describe('authoritative missions', () => {
     assert.equal(active.player_ship_id, pilot.id);
     assert.equal(active.deadline_ms, active.accepted_at_ms + offers[0].duration_limit_ms);
 
-    assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')).active, active);
+    // The stored offer round-trips through PostgreSQL JSON, which can move a coordinate by one ulp.
+    const stored = json(await call(pilot, 'GET', '/game/missions/active')).active;
+    const { destination_lat: lat, destination_lng: lng, ...storedOffer } = stored.offer;
+    const { destination_lat: expectedLat, destination_lng: expectedLng, ...expectedOffer } = active.offer;
+    assert.deepEqual({ ...stored, offer: storedOffer }, { ...active, offer: expectedOffer });
+    assert.ok(Math.abs(lat - expectedLat) < 1e-9 && Math.abs(lng - expectedLng) < 1e-9);
 
     const other = offers[1] ?? offers[0];
     assert.equal((await accept(pilot, other)).statusCode, 409);
@@ -104,7 +96,7 @@ describe('authoritative missions', () => {
     assert.equal(abandon.statusCode, 200);
     assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
     // Abandoning grants no payout and starts no cooldown.
-    assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+    assert.equal(await credits(pilot), 0);
     assert.equal(json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`)).cooldown.active, false);
   });
 
@@ -131,7 +123,7 @@ describe('authoritative missions', () => {
     assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
   });
 
-  describe('completion', { skip: !hasKey && 'keys/private.pem not present' }, () => {
+  describe('completion', () => {
     test('valid signed claim pays out, sets cooldown, clears mission, and cannot be replayed', async () => {
       const pilot = await newPilot();
       const offer = await firstOffer(pilot);
@@ -142,7 +134,7 @@ describe('authoritative missions', () => {
       assert.equal(res.statusCode, 200);
       assert.deepEqual(json(res), { success: true, credits: claim.rewardCredits, payout: claim.rewardCredits });
 
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, claim.rewardCredits);
+      assert.equal(await credits(pilot), claim.rewardCredits);
       assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
 
       const after = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`));
@@ -153,7 +145,7 @@ describe('authoritative missions', () => {
       // Replayed claim: no active mission, so no second payout.
       const replay = await call(pilot, 'POST', '/game/missions/complete', { claim });
       assert.equal(replay.statusCode, 404);
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, claim.rewardCredits);
+      assert.equal(await credits(pilot), claim.rewardCredits);
 
       // Cooldown is per station: another station is unaffected.
       const elsewhere = json(await call(pilot, 'GET', `/game/missions/available?stationId=station-beta&systemH3=${SYSTEM}`));
@@ -173,7 +165,7 @@ describe('authoritative missions', () => {
       const short = { ...claim, signature: 'AAAA' };
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: short })).statusCode, 403);
 
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.equal(await credits(pilot), 0);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
       // The genuine claim still works afterwards.
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
@@ -185,7 +177,7 @@ describe('authoritative missions', () => {
       const claim = signedClaim(pilot, active, { completedAtMs: active.deadline_ms + 1 });
       const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
       assert.equal(res.statusCode, 400);
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.equal(await credits(pilot), 0);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
     });
 
@@ -196,7 +188,7 @@ describe('authoritative missions', () => {
 
       const over = signedClaim(pilot, active, { rewardCredits: cap + 1 });
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: over })).statusCode, 400);
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.equal(await credits(pilot), 0);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
 
       const atCap = signedClaim(pilot, active, { rewardCredits: cap });
@@ -211,7 +203,7 @@ describe('authoritative missions', () => {
 
       const future = signedClaim(pilot, active, { completedAtMs: Date.now() + 120_000 });
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: future })).statusCode, 400);
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.equal(await credits(pilot), 0);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
 
       const skewed = signedClaim(pilot, active, { completedAtMs: Date.now() + 30_000 });
@@ -223,16 +215,16 @@ describe('authoritative missions', () => {
       const active = json(await accept(pilot, await firstOffer(pilot)));
       const claim = signedClaim(pilot, active);
 
-      mockAccount(pilot.id).credits = 2_147_483_647 - claim.rewardCredits + 1;
+      await setCredits(pilot, 2_147_483_647 - claim.rewardCredits + 1);
       const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
       assert.equal(res.statusCode, 409);
-      assert.equal(mockAccount(pilot.id).credits, 2_147_483_647 - claim.rewardCredits + 1);
+      assert.equal(await credits(pilot), 2_147_483_647 - claim.rewardCredits + 1);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
 
       // Exactly reaching the maximum is allowed.
-      mockAccount(pilot.id).credits = 2_147_483_647 - claim.rewardCredits;
+      await setCredits(pilot, 2_147_483_647 - claim.rewardCredits);
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
-      assert.equal(mockAccount(pilot.id).credits, 2_147_483_647);
+      assert.equal(await credits(pilot), 2_147_483_647);
     });
 
     test('a claim for another pilot is rejected', async () => {
@@ -246,8 +238,8 @@ describe('authoritative missions', () => {
       const relabelled = { ...claim, playerShipId: thief.id };
       assert.equal((await call(thief, 'POST', '/game/missions/complete', { claim: relabelled })).statusCode, 404);
 
-      assert.equal(json(await call(thief, 'GET', '/game/credits')).credits, 0);
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 0);
+      assert.equal(await credits(thief), 0);
+      assert.equal(await credits(pilot), 0);
     });
 
     test('claims must match the active mission', async () => {
@@ -267,7 +259,7 @@ describe('authoritative missions', () => {
       const claim = signedClaim(pilot, active);
       const results = await Promise.all([1, 2, 3].map(() => call(pilot, 'POST', '/game/missions/complete', { claim })));
       assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
-      assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, claim.rewardCredits);
+      assert.equal(await credits(pilot), claim.rewardCredits);
     });
   });
 });

@@ -1,9 +1,8 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
-import { createPrivateKey, createHash, sign } from 'node:crypto';
+import { createHash, sign } from 'node:crypto';
 import { PlanetarySurvey } from '../src/lib/contracts/exploration.js';
-import app from '../src/app.js';
+import { app, call, closeApp, credits, json, newPilot, rtseKey } from './helpers.js';
 import { computeShipAttributes } from '../src/config/components.js';
 import {
   PLANET_CHART_DOMAIN,
@@ -13,19 +12,6 @@ import {
 } from '../src/lib/chart-claim.js';
 
 const SYSTEM = '8828308281fffff';
-const hasKey = existsSync('keys/private.pem');
-const rtseKey = hasKey ? createPrivateKey(readFileSync('keys/private.pem', 'utf8')) : null;
-const skip = hasKey ? false : 'keys/private.pem not present';
-
-const json = (res) => JSON.parse(res.body);
-
-async function newPilot(callsign) {
-  const { token, player } = json(await app.inject({ method: 'GET', url: `/auth/dev-login?callsign=${callsign}` }));
-  return { id: player.id, headers: { authorization: `Bearer ${token}` } };
-}
-
-const call = (pilot, method, url, payload) => app.inject({ method, url, headers: pilot.headers, payload });
-
 const surveyMsg = {
   scanProgressPct: 100,
   metals: ['IRON', 'NICKEL'],
@@ -74,7 +60,7 @@ describe('SENSORS component', () => {
 
 describe('cartography', () => {
   before(async () => { await app.ready(); });
-  after(async () => { await app.close(); });
+  after(async () => { await closeApp(); });
 
   test('requires authentication', async () => {
     for (const [method, url] of [['GET', '/game/charts/inventory'], ['POST', '/game/charts/sell']]) {
@@ -82,7 +68,7 @@ describe('cartography', () => {
     }
   });
 
-  test('registers a signed planet chart, deriving the survey from the signed bytes', { skip }, async () => {
+  test('registers a signed planet chart, deriving the survey from the signed bytes', async () => {
     const pilot = await newPilot('Cartographer');
     const res = await register(pilot, planetKey(pilot));
     assert.equal(res.statusCode, 200);
@@ -100,7 +86,7 @@ describe('cartography', () => {
     assert.equal((await call(pilot, 'GET', '/game/charts/query')).statusCode, 400);
   });
 
-  test('requires surveyBytesBase64 and ignores a client-supplied survey object', { skip }, async () => {
+  test('requires surveyBytesBase64 and ignores a client-supplied survey object', async () => {
     const pilot = await newPilot('NoBytes');
     const key = planetKey(pilot);
     let res = await call(pilot, 'POST', '/game/charts/register-planet', { chartKey: key, survey: { forged: true } });
@@ -113,7 +99,7 @@ describe('cartography', () => {
     assert.equal(q.survey.forged, undefined);
   });
 
-  test('rejects tampered signatures, forged surveys and foreign pilots', { skip }, async () => {
+  test('rejects tampered signatures, forged surveys and foreign pilots', async () => {
     const pilot = await newPilot('Forger');
     const other = await newPilot('Victim');
     const key = planetKey(pilot);
@@ -140,13 +126,13 @@ describe('cartography', () => {
     assert.equal(inv.planetCharts.length, 0);
   });
 
-  test('rejects signed bytes that are not a valid PlanetarySurvey', { skip }, async () => {
+  test('rejects signed bytes that are not a valid PlanetarySurvey', async () => {
     const pilot = await newPilot('Garbage');
     const garbage = Buffer.from([0xff, 0xff, 0xff, 0xff]);
     assert.equal((await register(pilot, planetKey(pilot, 'planet-g', garbage), garbage)).statusCode, 400);
   });
 
-  test('prevents stale-key replay and overwriting sold charts', { skip }, async () => {
+  test('prevents stale-key replay and overwriting sold charts', async () => {
     const pilot = await newPilot('Replayer');
     const t0 = Date.now() - 10_000;
     const first = planetKey(pilot, 'planet-r', surveyBytes(), t0);
@@ -169,7 +155,7 @@ describe('cartography', () => {
     assert.equal(json(res).error, 'CHART_ALREADY_SOLD');
   });
 
-  test('claims a system chart and rejects tampering', { skip }, async () => {
+  test('claims a system chart and rejects tampering', async () => {
     const pilot = await newPilot('SystemClaimer');
     const key = systemKey(pilot);
     let res = await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: { ...key, totalBodiesCharted: 99 } });
@@ -186,7 +172,7 @@ describe('cartography', () => {
     assert.deepEqual(json(res), { error: 'SYSTEM_ALREADY_CLAIMED' });
   });
 
-  test('sells charts once for credits', { skip }, async () => {
+  test('sells charts once for credits', async () => {
     const pilot = await newPilot('Merchant');
     await register(pilot, planetKey(pilot));
     await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) });
@@ -206,7 +192,7 @@ describe('cartography', () => {
     res = await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', systemH3: SYSTEM, stationId: 'station-alpha' });
     assert.equal(res.statusCode, 400);
 
-    assert.equal(json(await call(pilot, 'GET', '/game/credits')).credits, 3000);
+    assert.equal(await credits(pilot), 3000);
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.planetCharts[0].sold, true);
   });

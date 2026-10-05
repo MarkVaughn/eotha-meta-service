@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { PlanetarySurvey } from '../../lib/contracts/exploration.js';
 import { H3_PATTERN, STATION_PATTERN } from '../../config/missions.js';
-import { mockAccount } from '../../lib/mock-accounts.js';
 import {
   loadRtsePublicKey,
   verifyPlanetChartKey,
@@ -114,14 +113,7 @@ export default async function chartsRoutes(fastify, opts) {
     fastify.log.warn('⚠️ keys/public.pem not found; chart registration claims will be rejected.');
   }
 
-  // Dev-login pilots have no database row, so their charts live in memory.
-  const mockPlanets = new Map(); // `${playerId}::${planetId}` -> row
-  const mockSystems = new Map(); // `${playerId}::${systemH3}` -> row
-
   fastify.addHook('onRequest', fastify.authenticate);
-
-  const mockRows = (map, playerId) => [...map.entries()]
-    .filter(([k]) => k.startsWith(`${playerId}::`)).map(([, v]) => v);
 
   const staleKey = (reply) => reply.code(409).send({
     error: 'STALE_CHART_KEY',
@@ -158,14 +150,6 @@ export default async function chartsRoutes(fastify, opts) {
       if (completedAtMs <= BigInt(existing.completedAtMs)) return staleKey(reply);
       return alreadySold(reply); // newer key, but the existing chart was already sold
     };
-
-    if (request.user.mock) {
-      const key = `${playerId}::${chartKey.planetId}`;
-      const prev = mockPlanets.get(key);
-      if (prev && (completedAtMs <= prev.completedAtMs || prev.soldAt)) return reject(prev, reply);
-      mockPlanets.set(key, { ...data, planetId: chartKey.planetId, soldAt: null, discoveredAt: prev?.discoveredAt ?? new Date() });
-      return { registered: true, planetId: chartKey.planetId };
-    }
 
     const where = { playerId_planetId: { playerId, planetId: chartKey.planetId } };
     const existing = await prisma.planetChart.findUnique({ where });
@@ -210,34 +194,21 @@ export default async function chartsRoutes(fastify, opts) {
       signature: systemKey.signature
     };
     const duplicate = () => reply.code(409).send({ error: 'SYSTEM_ALREADY_CLAIMED' });
-    if (request.user.mock) {
-      const key = `${playerId}::${systemKey.systemH3}`;
-      if (mockSystems.has(key)) return duplicate();
-      mockSystems.set(key, { ...data, systemH3: systemKey.systemH3, soldAt: null, discoveredAt: new Date() });
-    } else {
-      try {
-        await prisma.systemChart.create({ data: { playerId, systemH3: systemKey.systemH3, ...data } });
-      } catch (err) {
-        if (err?.code === 'P2002') return duplicate();
-        throw err;
-      }
+    try {
+      await prisma.systemChart.create({ data: { playerId, systemH3: systemKey.systemH3, ...data } });
+    } catch (err) {
+      if (err?.code === 'P2002') return duplicate();
+      throw err;
     }
     return { claimed: true, systemH3: systemKey.systemH3 };
   });
 
   fastify.get('/charts/inventory', async (request) => {
     const playerId = request.user.sub;
-    let planets;
-    let systems;
-    if (request.user.mock) {
-      planets = mockRows(mockPlanets, playerId);
-      systems = mockRows(mockSystems, playerId);
-    } else {
-      [planets, systems] = await Promise.all([
-        prisma.planetChart.findMany({ where: { playerId }, orderBy: { discoveredAt: 'asc' } }),
-        prisma.systemChart.findMany({ where: { playerId }, orderBy: { discoveredAt: 'asc' } })
-      ]);
-    }
+    const [planets, systems] = await Promise.all([
+      prisma.planetChart.findMany({ where: { playerId }, orderBy: { discoveredAt: 'asc' } }),
+      prisma.systemChart.findMany({ where: { playerId }, orderBy: { discoveredAt: 'asc' } })
+    ]);
     return { planetCharts: planets.map((c) => planetView(c)), systemCharts: systems.map(systemView) };
   });
 
@@ -249,24 +220,15 @@ export default async function chartsRoutes(fastify, opts) {
     }
 
     if (planetId !== undefined) {
-      const chart = request.user.mock
-        ? mockPlanets.get(`${playerId}::${planetId}`)
-        : await prisma.planetChart.findUnique({ where: { playerId_planetId: { playerId, planetId } } });
+      const chart = await prisma.planetChart.findUnique({ where: { playerId_planetId: { playerId, planetId } } });
       if (!chart) return reply.code(404).send({ error: 'Chart not registered.' });
       return planetView(chart, true);
     }
 
-    let system;
-    let planets;
-    if (request.user.mock) {
-      system = mockSystems.get(`${playerId}::${systemH3}`);
-      planets = mockRows(mockPlanets, playerId).filter((c) => c.systemH3 === systemH3);
-    } else {
-      [system, planets] = await Promise.all([
-        prisma.systemChart.findUnique({ where: { playerId_systemH3: { playerId, systemH3 } } }),
-        prisma.planetChart.findMany({ where: { playerId, systemH3 } })
-      ]);
-    }
+    const [system, planets] = await Promise.all([
+      prisma.systemChart.findUnique({ where: { playerId_systemH3: { playerId, systemH3 } } }),
+      prisma.planetChart.findMany({ where: { playerId, systemH3 } })
+    ]);
     if (!system && planets.length === 0) return reply.code(404).send({ error: 'Chart not registered.' });
     return {
       systemH3,
@@ -283,19 +245,6 @@ export default async function chartsRoutes(fastify, opts) {
     }
     const isPlanet = planetId !== undefined;
     const rewardCredits = isPlanet ? PLANET_CHART_PAYOUT : SYSTEM_CHART_PAYOUT;
-
-    if (request.user.mock) {
-      const row = isPlanet
-        ? mockPlanets.get(`${playerId}::${planetId}`)
-        : mockSystems.get(`${playerId}::${systemH3}`);
-      if (!row) return reply.code(404).send({ error: 'Chart not registered.' });
-      if (row.soldAt) return reply.code(409).send({ error: 'Chart has already been sold.' });
-      // Synchronous from here on, so concurrent requests cannot both sell.
-      row.soldAt = new Date();
-      const account = mockAccount(playerId);
-      account.credits += rewardCredits;
-      return { sold: true, rewardCredits, newBalance: account.credits };
-    }
 
     const model = isPlanet ? prisma.planetChart : prisma.systemChart;
     const where = isPlanet ? { playerId, planetId } : { playerId, systemH3 };
