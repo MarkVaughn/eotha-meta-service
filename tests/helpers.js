@@ -66,7 +66,7 @@ export async function newPilot(prefix = 'Pilot') {
     method: 'POST',
     url: '/auth/login',
     headers: attestationHeaders,
-    payload: { email, password: PASSWORD }
+    payload: { email, password: PASSWORD, deviceId: 'login-test-device-id' }
   });
   if (login.statusCode !== 200) throw new Error(`login failed: ${login.statusCode} ${login.body}`);
   const { token } = json(login);

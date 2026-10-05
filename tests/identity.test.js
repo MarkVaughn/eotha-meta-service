@@ -97,7 +97,7 @@ describe('guest login', () => {
     const { email } = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
     for (const password of ['!', PASSWORD, '']) {
       const res = await app.inject({
-        method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password }
+        method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password, deviceId: 'login-test-device-id' }
       });
       assert.equal(res.statusCode, 401);
     }
@@ -136,7 +136,7 @@ describe('linking an email account', () => {
 
     // Password login now yields the same player id.
     const login = await app.inject({
-      method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password: PASSWORD }
+      method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password: PASSWORD, deviceId: 'login-test-device-id' }
     });
     assert.equal(login.statusCode, 200);
     assert.equal(json(login).player.id, guest.player.id);
@@ -316,7 +316,7 @@ describe('refresh tokens', () => {
   test('a password login and a resumed guest login each get their own refresh family', async () => {
     const pilot = await newPilot('Refresher');
     const login = json(await app.inject({
-      method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email: pilot.email, password: PASSWORD }
+      method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email: pilot.email, password: PASSWORD, deviceId: 'login-test-device-id' }
     }));
     assert.equal((await refresh(login.refreshToken)).statusCode, 200);
 
@@ -360,7 +360,7 @@ describe('device attestation', () => {
   // Guests are only ever created by this file, so the count is not disturbed by other test files.
   const countPlayers = () => app.prisma.player.count({ where: { isAnonymous: true } });
   const login = (headers) => app.inject({
-    method: 'POST', url: '/auth/login', headers, payload: { email: 'nobody@example.test', password: PASSWORD }
+    method: 'POST', url: '/auth/login', headers, payload: { email: 'nobody@example.test', password: PASSWORD, deviceId: 'login-test-device-id' }
   });
   const withToken = (token, platform = 'play-integrity') => ({
     'x-attestation-platform': platform, 'x-attestation-token': token

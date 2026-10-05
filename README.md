@@ -135,6 +135,7 @@ npm test
 - `POST /auth/guest` (attested)
   - Body `{ deviceId }` (a client-generated random id, 16-128 chars, kept in the device keychain). The first call from a device creates an anonymous player; later calls resume it. Returns `{ token, refreshToken, expiresIn, created, player }`. Once the guest has linked an account the device id is refused with `409 device_account_linked`; sign in with the account instead.
 - `POST /auth/login` (attested)
+  - Body `{ email, password, deviceId }`. `deviceId` (16-128 chars) is required because the attestation nonce is bound to it.
   - Validates credentials and returns `{ token, refreshToken, expiresIn, player }`.
 - `POST /auth/refresh`
   - Body `{ refreshToken }`. Rotates the refresh token and returns a new access token. A token that was already rotated revokes its whole family (`401 refresh_token_reused`).
@@ -175,6 +176,8 @@ npm test
 **Linking.** `POST /auth/link/email` converts a guest in place (same id) and `grantLinkReward` pays `LINK_REWARD_CREDITS` once per player: the `AccountLinkReward` row is keyed by player id and inserted with `ON CONFLICT DO NOTHING`, and the credit increment runs in the same transaction only when that insert happened, so retries, races and later provider links cannot pay twice.
 
 ### Device attestation
+
+> **Production sign-in is intentionally unavailable until real verifiers are wired.** Outside `NODE_ENV=development`, `POST /auth/guest` and `POST /auth/login` (including existing email/password players) are refused with `503 attestation_unavailable` until Play Integrity and App Attest verifiers and their credentials are registered. Wiring them is the first follow-up.
 
 `POST /auth/guest` and `POST /auth/login` are guarded by `fastify.requireAttestation`. It is strict: when verification fails, or when no verifier is configured outside `NODE_ENV=development`, the request is refused (`403 attestation_failed` / `attestation_required`, or `503 attestation_unavailable` when unconfigured). There is no restricted-token fallback. In development with no verifier registered the check is skipped so local flows work.
 

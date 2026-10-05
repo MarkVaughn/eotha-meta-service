@@ -68,7 +68,7 @@ describe('signing keys', () => {
 
 describe('password hashing', () => {
   const login = (email, password) =>
-    app.inject({ method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password } });
+    app.inject({ method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password, deviceId: 'login-test-device-id' } });
 
   test('registration stores a salted argon2id hash, not SHA-256', async () => {
     const a = await newPilot('HashA');
@@ -163,7 +163,7 @@ describe('dev login', () => {
         method: 'POST',
         url: '/auth/login',
         headers: attestationHeaders,
-        payload: { email: row.email, password: '!' }
+        payload: { email: row.email, password: '!', deviceId: 'login-test-device-id' }
       });
       assert.equal(pwLogin.statusCode, 401);
 

@@ -47,10 +47,11 @@ const sessionResponse = {
 export const loginSchema = {
   body: {
     type: 'object',
-    required: ['email', 'password'],
+    required: ['email', 'password', 'deviceId'],
     properties: {
       email: { type: 'string' },
-      password: { type: 'string' }
+      password: { type: 'string' },
+      deviceId: { type: 'string', minLength: DEVICE_ID_MIN_LENGTH, maxLength: DEVICE_ID_MAX_LENGTH }
     }
   },
   response: { 200: sessionResponse }
