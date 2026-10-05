@@ -1,14 +1,22 @@
+import { createHash } from 'node:crypto';
 import env from '../../config/env.js';
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
+import { convertGuest, grantLinkReward } from '../../lib/identity.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
-import { registerSchema, loginSchema, devLoginSchema } from './schema.js';
+import { RefreshError } from '../../lib/refresh-tokens.js';
+import {
+  registerSchema, loginSchema, devLoginSchema, guestSchema, refreshSchema, logoutSchema, linkEmailSchema
+} from './schema.js';
+
+const DEV_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 
 export default async function authRoutes(fastify, opts) {
   const prisma = fastify.prisma;
   const devLoginEnabled = opts.devLogin ?? env.NODE_ENV === 'development';
 
-  // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet).
-  async function signSession(player) {
+  // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet). The claims are
+  // exactly what the RTSE validates; `ttlSeconds` only overrides the default token lifetime.
+  async function signSession(player, { ttlSeconds } = {}) {
     const ship = await prisma.spaceship.findFirst({
       where: { playerId: player.id, active: true },
       orderBy: { createdAt: 'asc' },
@@ -18,14 +26,30 @@ export default async function authRoutes(fastify, opts) {
       ? ship.components.map(({ type, tier, healthPct }) => ({ type, tier, healthPct }))
       : defaultComponents();
     const shipAttributes = computeShipAttributes(components);
-    const token = fastify.jwt.sign({
+    const claims = {
       sub: player.id,
       callsign: player.callsign,
       home_h3: player.harbor?.h3Index || "881f1d4887fffff",
       ship_attributes: shipAttributes
-    });
+    };
+    const token = ttlSeconds
+      ? fastify.signWithExpiry({ ...claims, exp: Math.floor(Date.now() / 1000) + ttlSeconds })
+      : fastify.jwt.sign(claims);
     return { token, components, shipAttributes };
   }
+
+  // The response of every login: a short-lived access token plus the refresh token that renews it.
+  async function issueSession(player, refreshToken) {
+    const { token } = await signSession(player);
+    return {
+      token,
+      refreshToken,
+      expiresIn: env.ACCESS_TOKEN_TTL_SECONDS,
+      player: { id: player.id, callsign: player.callsign, anonymous: player.isAnonymous }
+    };
+  }
+
+  const clientMeta = (request) => ({ ipAddress: request.ip, userAgent: request.headers['user-agent'] });
 
   // Endpoint 1: Register Player
   fastify.post('/register', { schema: registerSchema }, async (request, reply) => {
@@ -58,7 +82,7 @@ export default async function authRoutes(fastify, opts) {
   });
 
   // Endpoint 2: Standard Cryptographic Login
-  fastify.post('/login', { schema: loginSchema }, async (request, reply) => {
+  fastify.post('/login', { schema: loginSchema, preHandler: fastify.requireAttestation }, async (request, reply) => {
     const { email, password } = request.body;
 
     const player = await prisma.player.findUnique({
@@ -79,8 +103,99 @@ export default async function authRoutes(fastify, opts) {
       });
     }
 
+    const { refreshToken } = await fastify.refreshTokens.start(player.id, clientMeta(request));
+    return issueSession(player, refreshToken);
+  });
+
+  // Finds the guest bound to a device, or creates one through Better Auth's anonymous flow.
+  // `session` is set only for a freshly created guest, whose first Better Auth session already exists.
+  async function resolveGuest(deviceHash) {
+    const bound = () => prisma.guestDevice.findUnique({
+      where: { deviceHash },
+      include: { player: { include: { harbor: true } } }
+    });
+    const existing = await bound();
+    if (existing) return { player: existing.player, created: false };
+
+    const { token, user } = await fastify.betterAuth.api.signInAnonymous({ headers: new Headers() });
+    try {
+      await prisma.guestDevice.create({ data: { deviceHash, playerId: user.id } });
+    } catch (err) {
+      if (err.code !== 'P2002') throw err;
+      // A concurrent first launch from this device won the binding; discard our duplicate guest.
+      await prisma.player.delete({ where: { id: user.id } });
+      return { player: (await bound()).player, created: false };
+    }
+    const session = await prisma.authSession.findUnique({ where: { token } });
+    const { player } = await bound();
+    return { player, created: true, session };
+  }
+
+  // Endpoint 2b: Guest login. Instant launch: the first call from a device creates an anonymous
+  // player; later calls from the same device resume the same player.
+  fastify.post('/guest', { schema: guestSchema, preHandler: fastify.requireAttestation }, async (request, reply) => {
+    const deviceHash = createHash('sha256').update(request.body.deviceId).digest('hex');
+    const { player, created, session } = await resolveGuest(deviceHash);
+    if (!player.isAnonymous) return reply.code(409).send({ error: 'device_account_linked' });
+
+    let refreshToken;
+    if (session) {
+      ({ refreshToken } = await fastify.refreshTokens.adopt(session));
+    } else {
+      ({ refreshToken } = await fastify.refreshTokens.start(player.id, clientMeta(request)));
+    }
+    return { ...(await issueSession(player, refreshToken)), created };
+  });
+
+  // Endpoint 2c: Exchange a refresh token for a new access token and a replacement refresh token.
+  fastify.post('/refresh', { schema: refreshSchema }, async (request, reply) => {
+    try {
+      const { refreshToken, playerId } = await fastify.refreshTokens.rotate(request.body.refreshToken);
+      const player = await prisma.player.findUnique({ where: { id: playerId }, include: { harbor: true } });
+      if (!player) return reply.code(401).send({ error: 'invalid_refresh_token' });
+      return issueSession(player, refreshToken);
+    } catch (err) {
+      if (err instanceof RefreshError) return reply.code(401).send({ error: err.code });
+      throw err;
+    }
+  });
+
+  // Endpoint 2d: End the login a refresh token belongs to.
+  fastify.post('/logout', { schema: logoutSchema }, async (request) => {
+    await fastify.refreshTokens.revoke(request.body.refreshToken);
+    return { success: true };
+  });
+
+  // Endpoint 2e: Link an email and password to the calling guest. The player id is unchanged, and
+  // the first link of a player pays out the linking reward (once, atomically with the link).
+  fastify.post('/link/email', {
+    schema: linkEmailSchema,
+    onRequest: fastify.authenticate
+  }, async (request, reply) => {
+    const { email, password, callsign } = request.body;
+    const playerId = request.user.sub;
+    const passwordHash = await hashPassword(password);
+
+    let reward;
+    try {
+      reward = await prisma.$transaction(async (tx) => {
+        const linked = await convertGuest(tx, playerId, { email, passwordHash, ...(callsign && { callsign }) });
+        return linked ? grantLinkReward(tx, playerId, 'credential') : null;
+      });
+    } catch (err) {
+      if (err.code === 'P2002') return reply.code(409).send({ error: 'email_or_callsign_taken' });
+      throw err;
+    }
+    if (!reward) return reply.code(409).send({ error: 'already_linked' });
+
+    const player = await prisma.player.findUnique({ where: { id: playerId }, include: { harbor: true } });
     const { token } = await signSession(player);
-    return { token, player: { id: player.id, callsign: player.callsign } };
+    return {
+      token,
+      expiresIn: env.ACCESS_TOKEN_TTL_SECONDS,
+      player: { id: player.id, callsign: player.callsign, anonymous: false },
+      reward
+    };
   });
 
   // Endpoint 3: Dev-Login (development only). Mints a real token for a persisted pilot so the
@@ -102,7 +217,7 @@ export default async function authRoutes(fastify, opts) {
         include: { harbor: true }
       });
 
-      const { token, components, shipAttributes } = await signSession(player);
+      const { token, components, shipAttributes } = await signSession(player, { ttlSeconds: DEV_TOKEN_TTL_SECONDS });
 
       fastify.log.info(`🎯 Dev token minted for pilot ${callsign} located at H3: ${h3}`);
 

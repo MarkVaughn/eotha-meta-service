@@ -59,9 +59,10 @@ export default async function shipRoutes(fastify, opts) {
   }
 
   // Re-sign the caller's claims with fresh ship attributes so the token RTSE verifies is current.
+  // The expiry is carried over: only a refresh token may extend a login.
   function reissueToken(request, loadout) {
-    const { iat, exp, iss, ...claims } = request.user;
-    return fastify.jwt.sign({ ...claims, ship_attributes: loadout.ship_attributes });
+    const { iat, iss, ...claims } = request.user;
+    return fastify.signWithExpiry({ ...claims, ship_attributes: loadout.ship_attributes });
   }
 
   const fail = (status, error, extra = {}) => ({ failure: { status, body: { error, ...extra } } });

@@ -5,9 +5,11 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
-import { app, closeApp, json, keysDir, newPilot, PASSWORD } from './helpers.js';
+import { app, attestationDouble, attestationHeaders, closeApp, json, keysDir, newPilot, PASSWORD } from './helpers.js';
 import prismaPlugin from '../src/plugins/prisma.js';
 import securityPlugin from '../src/plugins/security.js';
+import attestationPlugin from '../src/plugins/attestation.js';
+import identityPlugin from '../src/plugins/identity.js';
 import authRoutes from '../src/routes/auth/index.js';
 
 const decodeHeader = (token) => JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString());
@@ -18,6 +20,8 @@ async function buildAuthApp(devLogin) {
   const server = Fastify();
   await server.register(prismaPlugin);
   await server.register(securityPlugin, { keysDir });
+  await server.register(attestationPlugin, { verifiers: [attestationDouble] });
+  await server.register(identityPlugin);
   await server.register(authRoutes, { prefix: '/auth', devLogin });
   await server.ready();
   return server;
@@ -63,7 +67,8 @@ describe('signing keys', () => {
 });
 
 describe('password hashing', () => {
-  const login = (email, password) => app.inject({ method: 'POST', url: '/auth/login', payload: { email, password } });
+  const login = (email, password) =>
+    app.inject({ method: 'POST', url: '/auth/login', headers: attestationHeaders, payload: { email, password } });
 
   test('registration stores a salted argon2id hash, not SHA-256', async () => {
     const a = await newPilot('HashA');
@@ -142,6 +147,7 @@ describe('dev login', () => {
       assert.equal(decoded.callsign, callsign);
       assert.equal(decoded.home_h3, '8828308281fffff');
       assert.equal(decoded.mock, undefined);
+      assert.ok(Math.abs(decoded.exp - decoded.iat - 24 * 60 * 60) <= 1); // the dev client has no refresh flow
       assert.deepEqual(decoded.ship_attributes, body.player.ship.ship_attributes);
 
       // The pilot is a real row with a harbor, and repeat logins reuse it.
@@ -153,7 +159,12 @@ describe('dev login', () => {
       assert.equal((await server.prisma.spaceHarbor.findUnique({ where: { playerId: body.player.id } })).h3Index, '8828308281ffffe');
 
       // The account cannot be used with a password.
-      const pwLogin = await server.inject({ method: 'POST', url: '/auth/login', payload: { email: row.email, password: '!' } });
+      const pwLogin = await server.inject({
+        method: 'POST',
+        url: '/auth/login',
+        headers: attestationHeaders,
+        payload: { email: row.email, password: '!' }
+      });
       assert.equal(pwLogin.statusCode, 401);
 
       await server.prisma.player.delete({ where: { id: body.player.id } });

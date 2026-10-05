@@ -1,3 +1,5 @@
+import { DEVICE_ID_MAX_LENGTH, DEVICE_ID_MIN_LENGTH } from '../../config/auth.js';
+
 export const registerSchema = {
   body: {
     type: 'object',
@@ -22,6 +24,26 @@ export const registerSchema = {
   }
 };
 
+// Everything a sign-in, guest login or refresh hands back: a short-lived access JWT (the one the
+// RTSE verifies), the rotating refresh token, and the access token's lifetime in seconds.
+const sessionResponse = {
+  type: 'object',
+  properties: {
+    token: { type: 'string' },
+    refreshToken: { type: 'string' },
+    expiresIn: { type: 'integer' },
+    created: { type: 'boolean' },
+    player: {
+      type: 'object',
+      properties: {
+        id: { type: 'string' },
+        callsign: { type: 'string' },
+        anonymous: { type: 'boolean' }
+      }
+    }
+  }
+};
+
 export const loginSchema = {
   body: {
     type: 'object',
@@ -31,16 +53,66 @@ export const loginSchema = {
       password: { type: 'string' }
     }
   },
+  response: { 200: sessionResponse }
+};
+
+export const guestSchema = {
+  body: {
+    type: 'object',
+    required: ['deviceId'],
+    properties: {
+      deviceId: { type: 'string', minLength: DEVICE_ID_MIN_LENGTH, maxLength: DEVICE_ID_MAX_LENGTH }
+    }
+  },
+  response: { 200: sessionResponse }
+};
+
+export const refreshSchema = {
+  body: {
+    type: 'object',
+    required: ['refreshToken'],
+    properties: { refreshToken: { type: 'string', minLength: 1, maxLength: 256 } }
+  },
+  response: { 200: sessionResponse }
+};
+
+export const logoutSchema = {
+  body: {
+    type: 'object',
+    required: ['refreshToken'],
+    properties: { refreshToken: { type: 'string', minLength: 1, maxLength: 256 } }
+  }
+};
+
+export const linkEmailSchema = {
+  body: {
+    type: 'object',
+    required: ['email', 'password'],
+    properties: {
+      email: { type: 'string', format: 'email' },
+      password: { type: 'string', minLength: 6 },
+      callsign: { type: 'string', minLength: 3 }
+    }
+  },
   response: {
     200: {
       type: 'object',
       properties: {
         token: { type: 'string' },
+        expiresIn: { type: 'integer' },
         player: {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            callsign: { type: 'string' }
+            callsign: { type: 'string' },
+            anonymous: { type: 'boolean' }
+          }
+        },
+        reward: {
+          type: 'object',
+          properties: {
+            granted: { type: 'boolean' },
+            credits: { type: 'integer' }
           }
         }
       }
