@@ -1,7 +1,4 @@
-import { createPublicKey, verify } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import env from '../config/env.js';
+import { verify } from 'node:crypto';
 
 const DOMAIN = Buffer.from('EOTHA_MISSION_CLAIM_V1', 'utf8'); // 22 bytes
 
@@ -36,14 +33,6 @@ export function canonicalClaimPayload(claim) {
     u64(claim.rewardCredits),
     i32(claim.reputationChange)
   ]);
-}
-
-export function loadRtsePublicKey(path = join(resolve(env.KEYS_DIR), 'public.pem')) {
-  try {
-    return createPublicKey(readFileSync(path, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 // `signature` is the base64-encoded 64-byte Ed25519 signature. Never throws.

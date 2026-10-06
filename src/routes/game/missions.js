@@ -10,7 +10,7 @@ import {
   UUID_PATTERN,
   generateOffers
 } from '../../config/missions.js';
-import { loadRtsePublicKey, verifyClaimSignature } from '../../lib/mission-claim.js';
+import { verifyClaimSignature } from '../../lib/mission-claim.js';
 
 const availableSchema = {
   querystring: {
@@ -101,13 +101,8 @@ function toActiveMission(playerId, offer, acceptedAt) {
   };
 }
 
-export default async function missionsRoutes(fastify, opts) {
+export default async function missionsRoutes(fastify) {
   const prisma = fastify.prisma;
-  const rtsePublicKey = opts.rtsePublicKey ?? loadRtsePublicKey();
-  if (!rtsePublicKey) {
-    fastify.log.warn('⚠️ keys/public.pem not found; mission completion claims will be rejected.');
-  }
-
   fastify.addHook('onRequest', fastify.authenticate);
 
   async function getPassengerCapacity(request) {
@@ -274,7 +269,7 @@ export default async function missionsRoutes(fastify, opts) {
     }
   }
 
-  fastify.post('/missions/complete', { schema: completeSchema }, async (request, reply) => {
+  fastify.post('/missions/complete', { schema: completeSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const { claim } = request.body;
 
     // 1. The claim must be for the authenticated pilot's ship.
@@ -305,8 +300,8 @@ export default async function missionsRoutes(fastify, opts) {
       return reply.code(400).send({ error: 'Claim reward exceeds the maximum speed bonus.' });
     }
 
-    // 4. Canonical Ed25519 signature by the RTSE.
-    if (!verifyClaimSignature(claim, rtsePublicKey)) {
+    // 4. Canonical Ed25519 signature by the engine's claim key.
+    if (!verifyClaimSignature(claim, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 

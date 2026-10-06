@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import env from './config/env.js';
 import prismaPlugin from './plugins/prisma.js';
 import securityPlugin from './plugins/security.js';
+import claimKeyPlugin from './plugins/claim-key.js';
 import attestationPlugin from './plugins/attestation.js';
 import identityPlugin from './plugins/identity.js';
 import authRoutes from './routes/auth/index.js';
@@ -26,6 +27,7 @@ const fastify = Fastify({
 await fastify.register(cors, { origin: '*' });
 await fastify.register(prismaPlugin);
 await fastify.register(securityPlugin);
+await fastify.register(claimKeyPlugin);
 await fastify.register(attestationPlugin);
 await fastify.register(identityPlugin);
 

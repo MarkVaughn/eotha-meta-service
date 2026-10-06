@@ -1,5 +1,4 @@
 import { verify } from 'node:crypto';
-export { loadRtsePublicKey } from './mission-claim.js';
 
 export const PLANET_CHART_DOMAIN = Buffer.from('EOTHA_PLANET_CHART_V1', 'utf8'); // 21 bytes
 export const SYSTEM_CHART_DOMAIN = Buffer.from('EOTHA_SYSTEM_CHART_V1', 'utf8'); // 21 bytes

@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, sign } from 'node:crypto';
 import { PlanetarySurvey } from '../src/lib/contracts/exploration.js';
-import { app, call, closeApp, credits, json, newPilot, rtseKey } from './helpers.js';
+import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey } from './helpers.js';
 import { computeShipAttributes } from '../src/config/components.js';
 import {
   PLANET_CHART_DOMAIN,
@@ -21,9 +21,9 @@ const surveyMsg = {
 const surveyBytes = (msg = surveyMsg) => Buffer.from(PlanetarySurvey.encode(PlanetarySurvey.fromPartial(msg)).finish());
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest();
 
-function planetKey(pilot, planetId = 'planet-1', bytes = surveyBytes(), completedAtMs = Date.now()) {
+function planetKey(pilot, planetId = 'planet-1', bytes = surveyBytes(), completedAtMs = Date.now(), signer = rtseKey) {
   const key = { planetId, pilotId: pilot.id, systemH3: SYSTEM, completedAtMs };
-  key.signature = sign(null, canonicalPlanetChartPayload(key, sha256(bytes)), rtseKey).toString('base64');
+  key.signature = sign(null, canonicalPlanetChartPayload(key, sha256(bytes)), signer).toString('base64');
   return key;
 }
 
@@ -31,9 +31,9 @@ function planetKey(pilot, planetId = 'planet-1', bytes = surveyBytes(), complete
 const register = (pilot, key, bytes = surveyBytes()) =>
   call(pilot, 'POST', '/game/charts/register-planet', { chartKey: key, surveyBytesBase64: bytes.toString('base64') });
 
-function systemKey(pilot) {
+function systemKey(pilot, signer = rtseKey) {
   const key = { systemH3: SYSTEM, pilotId: pilot.id, totalBodiesCharted: 7, chartedAtMs: Date.now() };
-  key.signature = sign(null, canonicalSystemChartPayload(key), rtseKey).toString('base64');
+  key.signature = sign(null, canonicalSystemChartPayload(key), signer).toString('base64');
   return key;
 }
 
@@ -66,6 +66,41 @@ describe('cartography', () => {
     for (const [method, url] of [['GET', '/game/charts/inventory'], ['POST', '/game/charts/sell']]) {
       assert.equal((await app.inject({ method, url })).statusCode, 401);
     }
+  });
+
+  test('chart keys signed with the login key are rejected; only the claim key verifies them', async () => {
+    const pilot = await newPilot('Forger');
+    const planet = planetKey(pilot, 'planet-login', surveyBytes(), Date.now(), loginKey);
+    assert.equal((await register(pilot, planet)).statusCode, 403);
+    const system = systemKey(pilot, loginKey);
+    assert.equal((await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: system })).statusCode, 403);
+
+    const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
+    assert.deepEqual([inv.planetCharts.length, inv.systemCharts.length], [0, 0]);
+    assert.equal(await credits(pilot), 0);
+
+    assert.equal((await register(pilot, planetKey(pilot, 'planet-login'))).statusCode, 200);
+    assert.equal((await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) })).statusCode, 200);
+  });
+
+  test('chart registration refuses with a stable error when no claim key is configured', async () => {
+    const pilot = await newPilot('Keyless');
+    const planet = planetKey(pilot);
+    const system = systemKey(pilot);
+    const configured = app.claimKey;
+    app.claimKey = null;
+    try {
+      for (const res of [
+        await register(pilot, planet),
+        await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: system })
+      ]) {
+        assert.equal(res.statusCode, 503);
+        assert.equal(json(res).error, 'CLAIM_KEY_NOT_CONFIGURED');
+      }
+    } finally {
+      app.claimKey = configured;
+    }
+    assert.equal((await register(pilot, planet)).statusCode, 200);
   });
 
   test('registers a signed planet chart, deriving the survey from the signed bytes', async () => {
