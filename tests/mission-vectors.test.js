@@ -9,6 +9,7 @@ import { gridDisk, isPentagon, latLngToCell } from 'h3-js';
 import {
   MISSION_TYPE_PASSAGE,
   MISSION_TYPE_RESEARCH,
+  MAX_FUTURE_SKEW_MS,
   OFFER_WINDOW_MS,
   authenticateOffer,
   generateMissionOffers,
@@ -249,7 +250,7 @@ describe('presented offers are authenticated against the regenerated ones', () =
   });
 
   test('refuses an offer from the future, or one that was altered in any field', () => {
-    assert.equal(check(offer, nowMs - 1), null);
+    assert.equal(check(offer, nowMs - MAX_FUTURE_SKEW_MS - 1), null);
     for (const [field, value] of Object.entries({
       mission_id: '11111111-1111-4111-8111-111111111111',
       reward_credits: offer.reward_credits + 1,
@@ -272,6 +273,15 @@ describe('presented offers are authenticated against the regenerated ones', () =
     assert.equal(check({ ...offer, extra: true }), null);
     assert.equal(check(null), null);
     assert.equal(check('offer'), null);
+  });
+
+  test('tolerates a clock skew ahead of an offer, but never past its expiry', () => {
+    const skew = MAX_FUTURE_SKEW_MS;
+    assert.equal(check(offer, nowMs - skew)?.offeredAtMs, nowMs);
+    assert.equal(check(offer, nowMs - skew - 1), null);
+    // Expiry is not widened: one millisecond late is expired, whatever the skew allowance.
+    assert.equal(check(offer, offer.expires_at_ms + 1)?.expired, true);
+    assert.equal(check(offer, offer.expires_at_ms)?.expired, false);
   });
 
   test('an offer is bound to the berths of the ship it was made for', () => {

@@ -138,10 +138,100 @@ describe('authoritative missions', () => {
     // A real offer under another offer's id, or with its window moved, is forged.
     const [first, second] = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`)).offers;
     assert.equal((await call(pilot, 'POST', '/game/missions/accept', { missionId: second?.mission_id ?? 'x', offer: first })).statusCode, 400);
-    assert.equal((await accept(pilot, { ...first, expires_at_ms: first.expires_at_ms + 60_000 })).statusCode, 400);
+    assert.equal((await accept(pilot, { ...first, expires_at_ms: first.expires_at_ms + 120_000 })).statusCode, 400);
     assert.equal((await accept(pilot, { ...first, origin_station_id: ELSEWHERE.station })).statusCode, 400);
 
     assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
+  });
+
+  test('accepts an offer made by a replica whose clock runs ahead, within the skew tolerance only', async () => {
+    const pilot = await newPilot();
+    const madeAt = (offsetMs) => generateMissionOffers({ stationId: STATION, systemH3: SYSTEM, availableBerths: 2, nowMs: Date.now() + offsetMs })[0];
+
+    const tooFar = madeAt(120_000);
+    assert.equal((await accept(pilot, tooFar)).statusCode, 400);
+
+    const ahead = madeAt(30_000);
+    const res = await accept(pilot, ahead);
+    assert.equal(res.statusCode, 200);
+    // The engine refuses a claim for a mission accepted before its offer was made.
+    assert.ok(json(res).accepted_at_ms >= ahead.expires_at_ms - 30 * 60_000);
+    await call(pilot, 'POST', '/game/missions/abandon');
+
+    // The tolerance does not extend expiry: an offer past its expiry is still refused as expired.
+    const expired = madeAt(-31 * 60_000);
+    assert.equal((await accept(pilot, expired)).statusCode, 410);
+  });
+
+  describe('missions stored before the engine-aligned format', () => {
+    const legacyOffer = (extra = {}) => ({
+      mission_id: 'm1:station-alpha:8828308281fffff:497562:0',
+      type: 'MISSION_TYPE_PASSAGE',
+      origin_station_id: 'station-alpha',
+      origin_system_h3: '8828308281fffff',
+      destination_station_id: 'station-8828308285fffff',
+      destination_lat: 37.77,
+      destination_lng: -122.41,
+      required_berths: 1,
+      duration_limit_ms: 600_000,
+      reward_credits: 150,
+      reputation_change: 1,
+      expires_at_ms: Date.now() + 60_000,
+      ...extra
+    });
+    const seed = (pilot, missionId, offer) =>
+      app.prisma.playerMission.create({ data: { playerId: pilot.id, missionId, originStationId: offer.origin_station_id, offer } });
+    const rows = (pilot) => app.prisma.playerMission.count({ where: { playerId: pilot.id } });
+
+    test('are removed, reported as cancelled, and leave the pilot free to accept a fresh offer', async () => {
+      const pilot = await newPilot();
+      const offer = legacyOffer();
+      await seed(pilot, offer.mission_id, offer);
+
+      const res = json(await call(pilot, 'GET', '/game/missions/active'));
+      assert.equal(res.active, null);
+      assert.equal(res.cancelled_mission.mission_id, offer.mission_id);
+      assert.equal(res.cancelled_mission.reason, 'format_changed');
+      assert.match(res.cancelled_mission.message, /format changed/);
+      assert.equal(await rows(pilot), 0);
+      assert.equal(await credits(pilot), 0); // nothing was charged at accept, so nothing is refunded
+
+      // Reported once; afterwards there is simply no mission.
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
+      assert.equal((await accept(pilot, await firstOffer(pilot))).statusCode, 200);
+    });
+
+    test('are also recognised by a missing exact destination alone, or a legacy id alone', async () => {
+      const noExact = await newPilot();
+      const uuid = '4a5d3a52-6f0c-4b0e-8a64-0c9a3a0f1b11';
+      await seed(noExact, uuid, legacyOffer({ mission_id: uuid }));
+      assert.equal(json(await call(noExact, 'GET', '/game/missions/active')).cancelled_mission.mission_id, uuid);
+
+      const legacyId = await newPilot();
+      const offer = legacyOffer({ exact_destination: ['37.77', '-122.41'] });
+      await seed(legacyId, offer.mission_id, offer);
+      assert.equal(json(await call(legacyId, 'GET', '/game/missions/active')).cancelled_mission.mission_id, offer.mission_id);
+    });
+
+    test('block neither accepting nor the other mission endpoints, and cannot be completed', async () => {
+      const pilot = await newPilot();
+      const offer = legacyOffer();
+      await seed(pilot, offer.mission_id, offer);
+      // Accepting first sweeps the stale row away instead of answering "already active".
+      assert.equal((await accept(pilot, await firstOffer(pilot))).statusCode, 200);
+      assert.equal(await rows(pilot), 1);
+
+      const other = await newPilot();
+      await seed(other, offer.mission_id, offer);
+      assert.equal((await call(other, 'POST', '/game/missions/abandon')).statusCode, 404);
+      assert.equal(await rows(other), 0);
+    });
+
+    test('a current mission is left alone', async () => {
+      const pilot = await newPilot();
+      const active = json(await accept(pilot, await firstOffer(pilot)));
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active });
+    });
   });
 
   describe('completion', () => {

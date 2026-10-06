@@ -51,7 +51,12 @@ const ENGINE_COOLDOWN_MS = 900_000;
 export const MISSION_COOLDOWN_MS = 10 * 60 * 1000; // per (player, origin station) after completion
 export const MAX_REWARD_CREDITS = 2_147_483_647; // Player.credits is a 32-bit Int
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// How far ahead of this process's clock a presented offer may have been made. Offers are stamped
+// by whichever replica served the board, so another replica whose clock is a little behind sees
+// them "from the future". Only the not-in-the-future bound is relaxed; expiry is not.
+export const MAX_FUTURE_SKEW_MS = 60_000;
+
+export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export function isSystemCell(h3) {
   return typeof h3 === 'string' && new RegExp(H3_PATTERN).test(h3) && isValidCell(h3) && getResolution(h3) === SYSTEM_RESOLUTION;
@@ -236,7 +241,8 @@ export const generateOffers = ({ stationId, systemH3, passengerCapacity, nowMs =
 /**
  * The authoritative offer behind one a client presents: `{ offer, expired }`, or `null` if it is
  * not one this service offered a ship with `availableBerths` berths. The presented offer names the
- * window it was made in (its expiry less one window), which must not lie in the future, and must
+ * window it was made in (its expiry less one window), which must not lie in the future (beyond
+ * `MAX_FUTURE_SKEW_MS` of clock skew), and must
  * equal, field for field, what is regenerated for that window.
  */
 export function authenticateOffer(presented, { availableBerths, nowMs = Date.now() }) {
@@ -245,10 +251,15 @@ export function authenticateOffer(presented, { availableBerths, nowMs = Date.now
   if (!isSystemCell(systemH3) || typeof stationId !== 'string' || !UUID_PATTERN.test(stationId)) return null;
   if (!Number.isSafeInteger(expiresAtMs)) return null;
   const offeredAtMs = expiresAtMs - OFFER_WINDOW_MS;
-  if (offeredAtMs < 0 || offeredAtMs > nowMs) return null;
+  // An offer made up to MAX_FUTURE_SKEW_MS ahead of this clock is still the engine's offer: its
+  // fields and id depend only on the window containing offeredAtMs, and the engine bounds nothing
+  // against our clock. What it does check at claim time is that the mission was accepted no
+  // earlier than the offer was made, which is why callers record the acceptance as
+  // `max(now, offeredAtMs)` (returned here as `offeredAtMs`).
+  if (offeredAtMs < 0 || offeredAtMs > nowMs + MAX_FUTURE_SKEW_MS) return null;
 
   const offers = generateMissionOffers({ systemH3, stationId, availableBerths, nowMs: offeredAtMs });
   const authoritative = offers?.find((offer) => offer.mission_id === id);
   if (!authoritative || !isDeepStrictEqual(JSON.parse(JSON.stringify(presented)), authoritative)) return null;
-  return { offer: authoritative, expired: nowMs > expiresAtMs };
+  return { offer: authoritative, expired: nowMs > expiresAtMs, offeredAtMs };
 }

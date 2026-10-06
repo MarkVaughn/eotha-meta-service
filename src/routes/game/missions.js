@@ -7,6 +7,7 @@ import {
   isStationOf,
   isSystemCell,
   authenticateOffer,
+  UUID_PATTERN,
   generateOffers
 } from '../../config/missions.js';
 import { loadRtsePublicKey, verifyClaimSignature } from '../../lib/mission-claim.js';
@@ -85,6 +86,8 @@ function fromStoredOffer(stored) {
   return offer;
 }
 
+const LEGACY_MESSAGE = 'Your previous mission was cancelled because the mission format changed. Nothing was charged; accept a new mission.';
+
 // Proto-JSON ActiveMission for a stored row.
 function toActiveMission(playerId, offer, acceptedAt) {
   const acceptedAtMs = acceptedAt.getTime();
@@ -127,11 +130,24 @@ export default async function missionsRoutes(fastify, opts) {
     return Math.max(0, completedAt + MISSION_COOLDOWN_MS - Date.now());
   }
 
-  async function getActive(request) {
+  // A mission stored before offers followed the engine (legacy id, no exact coordinates) can never
+  // be claimed: the engine would reject its offer as tampered. It is removed on first sight, so
+  // the pilot can take a fresh offer; accepting charged nothing, so there is nothing to refund.
+  const isLegacyRow = (row) =>
+    !UUID_PATTERN.test(row.missionId) || !Array.isArray(row.offer?.exact_destination) || row.offer.exact_destination.length !== 2;
+
+  async function loadActive(request) {
     const playerId = request.user.sub;
     const row = await prisma.playerMission.findUnique({ where: { playerId } });
-    return row ? toActiveMission(playerId, fromStoredOffer(row.offer), row.acceptedAt) : null;
+    if (!row) return { active: null };
+    if (isLegacyRow(row)) {
+      await prisma.playerMission.deleteMany({ where: { id: row.id } });
+      return { active: null, cancelled: { mission_id: row.missionId, reason: 'format_changed', message: LEGACY_MESSAGE } };
+    }
+    return { active: toActiveMission(playerId, fromStoredOffer(row.offer), row.acceptedAt) };
   }
+
+  const getActive = async (request) => (await loadActive(request)).active;
 
   async function alreadyCompleted(request, missionId) {
     const playerId = request.user.sub;
@@ -191,7 +207,8 @@ export default async function missionsRoutes(fastify, opts) {
       return conflict(reply, 'Mission has already been completed.');
     }
 
-    const acceptedAt = new Date();
+    // Never earlier than the offer was made (see authenticateOffer): the engine refuses the claim otherwise.
+    const acceptedAt = new Date(Math.max(Date.now(), verdict.offeredAtMs));
     try {
       await prisma.playerMission.create({
         data: {
@@ -210,7 +227,10 @@ export default async function missionsRoutes(fastify, opts) {
     return toActiveMission(playerId, authoritative, acceptedAt);
   });
 
-  fastify.get('/missions/active', async (request) => ({ active: await getActive(request) }));
+  fastify.get('/missions/active', async (request) => {
+    const { active, cancelled } = await loadActive(request);
+    return cancelled ? { active, cancelled_mission: cancelled } : { active };
+  });
 
   fastify.post('/missions/abandon', async (request, reply) => {
     const playerId = request.user.sub;
