@@ -167,6 +167,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `POST /game/missions/accept`
   - Body `{ missionId, offer }`. The offer must be exactly one this service derives for the window it names (`400` otherwise, `410` once expired, `409` if a mission is active or the station cooling down).
 - `GET /game/missions/active`, `POST /game/missions/abandon`
+  - `active` is `null` when there is no mission. A mission stored before offers followed the engine (legacy id or no exact destination) can never be claimed, so it is deleted on first read and the response is `{ active: null, cancelled_mission: { mission_id, reason: "format_changed", message } }`; nothing was charged.
 - `POST /game/missions/complete`
   - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once.
 
@@ -180,7 +181,7 @@ All Protected. See [Mission offers](#mission-offers).
 
 ## Mission offers
 
-The RTSE re-derives an accepted offer from the procedural content it names and signs a completion claim only for offers it would itself have generated, so the meta-service derives offers by the engine's rules (`src/config/missions.js`, `src/lib/procedural.js`; the engine's `simulation/missions/generator.rs` is authoritative): a station is identified by its RTSE UUID, a mission id is a UUID hashed from the destination's rank in the 30-minute window and the origin station, a passage of `d` systems with `b` passengers pays `1000 + 500d + 250b` credits with `300 000 d` ms allowed, destinations lie 1-3 systems out, and offers expire 30 minutes after the request. Passage and research offers both count as transport missions; travel is real flight at the ship's speed.
+The RTSE re-derives an accepted offer from the procedural content it names and signs a completion claim only for offers it would itself have generated, so the meta-service derives offers by the engine's rules (`src/config/missions.js`, `src/lib/procedural.js`; the engine's `simulation/missions/generator.rs` is authoritative): a station is identified by its RTSE UUID, a mission id is a UUID hashed from the destination's rank in the 30-minute window and the origin station, a passage of `d` systems with `b` passengers pays `1000 + 500d + 250b` credits with `300 000 d` ms allowed, destinations lie 1-3 systems out, and offers expire 30 minutes after the request. `accept` tolerates up to 60 s (`MAX_FUTURE_SKEW_MS`) of replica clock skew for an offer made slightly in the future; expiry is not widened. Passage and research offers both count as transport missions; travel is real flight at the ship's speed.
 
 Offers are a pure function of (system, origin station, passenger berths, window), so `accept` regenerates what the client presents rather than storing boards. A ship is only ever offered passage for as many passengers as it has berths (1 to `min(berths, 4)`), so a Tier 1 ship (2 berths) is never shown a mission it cannot take.
 
