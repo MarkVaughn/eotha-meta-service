@@ -1,7 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { sign } from 'node:crypto';
-import { app, call, closeApp, credits, json, newPilot, rtseKey, setCredits } from './helpers.js';
+import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey, setCredits } from './helpers.js';
 import { generateMissionOffers } from '../src/config/missions.js';
 import { generateCellNodes } from '../src/lib/procedural.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
@@ -21,7 +21,7 @@ async function accept(pilot, offer) {
   return call(pilot, 'POST', '/game/missions/accept', { missionId: offer.mission_id, offer });
 }
 
-function signedClaim(pilot, active, overrides = {}) {
+function signedClaim(pilot, active, overrides = {}, key = rtseKey) {
   const claim = {
     missionId: active.mission_id,
     playerShipId: pilot.id,
@@ -33,7 +33,7 @@ function signedClaim(pilot, active, overrides = {}) {
     ...overrides
   };
   claim.durationTakenMs = overrides.durationTakenMs ?? claim.completedAtMs - claim.acceptedAtMs;
-  claim.signature = sign(null, canonicalClaimPayload(claim), rtseKey).toString('base64');
+  claim.signature = sign(null, canonicalClaimPayload(claim), key).toString('base64');
   return claim;
 }
 
@@ -279,6 +279,38 @@ describe('authoritative missions', () => {
       assert.equal(await credits(pilot), 0);
       assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
       // The genuine claim still works afterwards.
+      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
+    });
+
+    test('a claim signed with the login key is rejected; only the claim key verifies engine claims', async () => {
+      const pilot = await newPilot();
+      const active = json(await accept(pilot, await firstOffer(pilot)));
+
+      const forged = signedClaim(pilot, active, {}, loginKey);
+      const res = await call(pilot, 'POST', '/game/missions/complete', { claim: forged });
+      assert.equal(res.statusCode, 403);
+      assert.equal(await credits(pilot), 0);
+      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+
+      const genuine = signedClaim(pilot, active);
+      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: genuine })).statusCode, 200);
+    });
+
+    test('refuses with a stable error when no claim key is configured', async () => {
+      const pilot = await newPilot();
+      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const claim = signedClaim(pilot, active);
+
+      const configured = app.claimKey;
+      app.claimKey = null;
+      try {
+        const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
+        assert.equal(res.statusCode, 503);
+        assert.equal(json(res).error, 'CLAIM_KEY_NOT_CONFIGURED');
+      } finally {
+        app.claimKey = configured;
+      }
+      assert.equal(await credits(pilot), 0);
       assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
     });
 

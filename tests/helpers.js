@@ -1,8 +1,9 @@
 // Shared test setup. Import this module before anything from ../src so the environment is in place.
 //
 // Tests run against a real PostgreSQL database through Prisma (DATABASE_URL, schema applied with
-// `prisma db push`) and sign with a throwaway Ed25519 keypair generated per test process, so they
-// need neither keys/private.pem nor any state from a previous run.
+// `prisma db push`) and sign with throwaway Ed25519 keypairs generated per test process, so they
+// need neither keys/private.pem nor any state from a previous run. There are two, as in production:
+// the login key signs access tokens, and a separate claim key stands in for the engine's.
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,9 +22,16 @@ writeFileSync(join(keysDir, 'private.pem'), privateKey.export({ format: 'pem', t
 writeFileSync(join(keysDir, 'public.pem'), publicKey.export({ format: 'pem', type: 'spki' }));
 process.env.KEYS_DIR = keysDir;
 
+// The engine holds the private half; the meta service is configured with only the raw public key.
+const claimPair = generateKeyPairSync('ed25519');
+process.env.CLAIM_PUBLIC_KEY = claimPair.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex');
+delete process.env.CLAIM_PUBLIC_KEY_FILE;
+
 export { keysDir };
 // Stands in for the RTSE, which signs the claims and chart keys the meta service verifies.
-export const rtseKey = privateKey;
+export const rtseKey = claimPair.privateKey;
+// The login token key. It must never verify engine claims.
+export const loginKey = privateKey;
 export const app = (await import('../src/app.js')).default;
 
 export const json = (res) => JSON.parse(res.body);

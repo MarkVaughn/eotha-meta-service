@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { PlanetarySurvey } from '../../lib/contracts/exploration.js';
 import { H3_PATTERN, STATION_PATTERN } from '../../config/missions.js';
 import {
-  loadRtsePublicKey,
   verifyPlanetChartKey,
   verifySystemChartSignature
 } from '../../lib/chart-claim.js';
@@ -106,13 +105,8 @@ function systemView(c) {
   };
 }
 
-export default async function chartsRoutes(fastify, opts) {
+export default async function chartsRoutes(fastify) {
   const prisma = fastify.prisma;
-  const rtsePublicKey = opts.rtsePublicKey ?? loadRtsePublicKey();
-  if (!rtsePublicKey) {
-    fastify.log.warn('⚠️ keys/public.pem not found; chart registration claims will be rejected.');
-  }
-
   fastify.addHook('onRequest', fastify.authenticate);
 
   const staleKey = (reply) => reply.code(409).send({
@@ -124,7 +118,7 @@ export default async function chartsRoutes(fastify, opts) {
     message: 'Sold charts cannot be overwritten'
   });
 
-  fastify.post('/charts/register-planet', { schema: registerPlanetSchema }, async (request, reply) => {
+  fastify.post('/charts/register-planet', { schema: registerPlanetSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const { chartKey, surveyBytesBase64 } = request.body;
     const playerId = request.user.sub;
     if (chartKey.pilotId !== playerId) {
@@ -134,7 +128,7 @@ export default async function chartsRoutes(fastify, opts) {
     // The signature binds the exact survey bytes; the survey JSON is only ever derived from them.
     const surveyBytes = Buffer.from(surveyBytesBase64, 'base64');
     const surveyHash = createHash('sha256').update(surveyBytes).digest();
-    if (!verifyPlanetChartKey(chartKey, chartKey.signature, surveyHash, rtsePublicKey)) {
+    if (!verifyPlanetChartKey(chartKey, chartKey.signature, surveyHash, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'Invalid chart signature.' });
     }
     let surveyJson;
@@ -174,7 +168,7 @@ export default async function chartsRoutes(fastify, opts) {
     return { registered: true, planetId: chartKey.planetId };
   });
 
-  fastify.post('/charts/claim-system', { schema: claimSystemSchema }, async (request, reply) => {
+  fastify.post('/charts/claim-system', { schema: claimSystemSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const { systemKey } = request.body;
     const playerId = request.user.sub;
     if (systemKey.pilotId !== playerId) {
@@ -184,7 +178,7 @@ export default async function chartsRoutes(fastify, opts) {
     // system catalog. It is authoritative because the RTSE's Ed25519 signature covers it in the
     // canonical EOTHA_SYSTEM_CHART_V1 payload (pilot, systemH3, totalBodiesCharted, chartedAtMs), so
     // a client cannot alter the count without invalidating the signature.
-    if (!verifySystemChartSignature(systemKey, rtsePublicKey)) {
+    if (!verifySystemChartSignature(systemKey, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'Invalid chart signature.' });
     }
 

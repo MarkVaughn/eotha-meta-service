@@ -9,6 +9,7 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 - **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing.
 - **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`.
 - **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
+- **Separate engine claim key**: Engine-signed claims (mission completion, planet and system charts) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
 - **Password Hashing**: argon2id. Legacy unsalted SHA-256 hashes still verify and are upgraded to argon2id on the next successful login.
 - **Geospatial Space Harbors**: Spatial anchor persistence for players using PostGIS and Uber H3 hexagonal spatial indexing.
 - **Session Allocation**: Coordinates player assignment to internal RTSE simulation cluster instances.
@@ -37,6 +38,7 @@ eotha-meta-service/
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
+│   │   ├── claim-key.js        # Loads the public key engine-signed claims verify against
 │   │   ├── crmath.js           # Correctly rounded sin/cos/asin/atan2 (matches the RTSE's libm)
 │   │   ├── fma.js              # Exactly rounded fused multiply-add
 │   │   ├── h3geo.js            # Bit-compatible port of h3o's cell center and vertex arithmetic
@@ -45,6 +47,7 @@ eotha-meta-service/
 │   │   └── refresh-tokens.js   # Refresh rotation with reuse detection
 │   ├── plugins/
 │   │   ├── attestation.js      # requireAttestation preHandler
+│   │   ├── claim-key.js        # Decorates the claim verification key, requireClaimKey preHandler
 │   │   ├── identity.js         # Wires Better Auth and refresh tokens into Fastify
 │   │   ├── prisma.js           # Prisma client lifecycle plugin
 │   │   └── security.js         # JWT plugin (Ed25519 / EdDSA), JWKS, key derivation
@@ -95,6 +98,9 @@ HOST="0.0.0.0"
 # SESSION_TTL_DAYS=90
 # BETTER_AUTH_URL=https://meta.example.com
 # BETTER_AUTH_SECRET=  # defaults to a key derived from keys/private.pem
+# Public key that engine-signed claims verify against (see "Engine claim key")
+# CLAIM_PUBLIC_KEY=    # 64 hex characters, the raw Ed25519 public key
+# CLAIM_PUBLIC_KEY_FILE=  # alternatively a file holding that hex or a PEM public key
 ```
 
 ### 4. Generate Asymmetric Cryptographic Keys
@@ -119,7 +125,7 @@ npm start
 ```
 
 ### 7. Run Test Suite
-Tests run against a real PostgreSQL database through Prisma and sign with a throwaway Ed25519 keypair, so they need no `keys/` files. Use a dedicated database whose name ends in `_test` (the suite refuses to run against any other):
+Tests run against a real PostgreSQL database through Prisma and sign with throwaway Ed25519 keypairs (a login key and a separate claim key), so they need no `keys/` files and no `CLAIM_PUBLIC_KEY`. Use a dedicated database whose name ends in `_test` (the suite refuses to run against any other):
 ```bash
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/eotha_meta_test?schema=public"
 npx prisma db push
@@ -169,7 +175,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `GET /game/missions/active`, `POST /game/missions/abandon`
   - `active` is `null` when there is no mission. A mission stored before offers followed the engine (legacy id or no exact destination) can never be claimed, so it is deleted on first read and the response is `{ active: null, cancelled_mission: { mission_id, reason: "format_changed", message } }`; nothing was charged.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once.
+  - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -226,6 +232,22 @@ Nothing for Apple or Google is configured or registered today. The wiring is in 
 
 Whichever way the account row is created, the `databaseHooks.account.create.after` hook in `src/lib/auth.js` calls `linkExternalAccount`, which promotes the guest, lifting the hull lock. A returning player on a new device signs in with the provider identity instead of linking.
 
+### Engine claim key
+
+The RTSE signs mission completion claims, planet charts and system charts with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
+
+- `CLAIM_PUBLIC_KEY`: the raw 32-byte Ed25519 public key as 64 hex characters.
+- `CLAIM_PUBLIC_KEY_FILE`: optional path to a file holding the same hex or a PEM public key. If both are set they must name the same key, otherwise startup fails. An unreadable or malformed key also fails startup; a blank variable counts as unset.
+- Startup logs `Engine claims are verified with Ed25519 key sha256:<16 hex>`, the fingerprint of the key in use, and never any key material.
+- With neither set, startup logs a warning and `POST /game/missions/complete`, `POST /game/charts/register-planet` and `POST /game/charts/claim-system` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
+- `keys/public.pem` is the login key and is never used to verify claims, so a claim signed with the login key is refused with `403`.
+
+In the cluster the seed comes from the Secret `eotha-claim-key` (key `seed`) and the public key from the ConfigMap `eotha-claim-pubkey` (key `public_key`). To derive the public key from a seed locally without printing the seed:
+
+```bash
+node -e "const {createPrivateKey,createPublicKey}=require('node:crypto');const seed=Buffer.from(process.env.RTSE_EXPLORATION_SEED,'hex');const k=createPrivateKey({key:Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]),format:'der',type:'pkcs8'});console.log(createPublicKey(k).export({format:'der',type:'spki'}).subarray(-32).toString('hex'))"
+```
+
 ---
 
 ## RTSE Integration
@@ -234,3 +256,4 @@ Whichever way the account row is created, the `databaseHooks.account.create.afte
 2. The corresponding public key (`keys/public.pem`) is mounted or configured in the Rust RTSE engine.
 3. The RTSE engine verifies client JWT claims locally without issuing database lookups.
 4. The same key is published at `/.well-known/jwks.json`, so the RTSE can later fetch it instead of pinning the PEM (not implemented in the RTSE yet).
+5. In the other direction, the RTSE signs claims with a separate key whose public half is `CLAIM_PUBLIC_KEY` (see [Engine claim key](#engine-claim-key)).
