@@ -2,11 +2,15 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { sign } from 'node:crypto';
 import { app, call, closeApp, credits, json, newPilot, rtseKey, setCredits } from './helpers.js';
-import { buildOffer, currentEpoch, parseMissionId } from '../src/config/missions.js';
+import { generateMissionOffers } from '../src/config/missions.js';
+import { generateCellNodes } from '../src/lib/procedural.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 
-const SYSTEM = '8828308281fffff';
-const STATION = 'station-alpha';
+// The nearest station to the starter spawn (San Francisco): the engine puts none in the spawn system.
+const SYSTEM = '8828308285fffff';
+const [{ id: STATION }, { id: OTHER_STATION } = {}] = generateCellNodes(SYSTEM).filter((node) => node.isStation);
+// A second station elsewhere, for per-station behavior.
+const ELSEWHERE = { system: '88195da49bfffff', station: generateCellNodes('88195da49bfffff').find((node) => node.isStation).id };
 
 async function firstOffer(pilot, station = STATION) {
   const res = json(await call(pilot, 'GET', `/game/missions/available?stationId=${station}&systemH3=${SYSTEM}`));
@@ -50,6 +54,7 @@ describe('authoritative missions', () => {
     assert.equal(res.cooldown.active, false);
     for (const o of res.offers) {
       assert.ok(o.required_berths <= 2);
+      assert.match(o.mission_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       assert.match(o.destination_system_h3, /^[0-9a-f]{15}$/);
       assert.match(o.destination_node_h3, /^[0-9a-f]{15}$/);
       assert.ok(o.distance_hexes >= 1 && o.distance_hexes <= 3);
@@ -57,15 +62,29 @@ describe('authoritative missions', () => {
       assert.ok(o.expires_at_ms > Date.now());
       assert.ok(['MISSION_TYPE_PASSAGE', 'MISSION_TYPE_RESEARCH'].includes(o.type));
     }
-    // Deterministic within an epoch.
+    // Deterministic within an offer window.
+    // Only the expiry follows the time of the request, as in the engine: it is one window after it.
     const again = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`));
-    assert.deepEqual(again.offers, res.offers);
+    const withoutExpiry = (offers) => offers.map(({ expires_at_ms, ...rest }) => rest);
+    assert.deepEqual(withoutExpiry(again.offers), withoutExpiry(res.offers));
+    for (const o of res.offers) assert.ok(o.expires_at_ms > Date.now() + 29 * 60_000 && o.expires_at_ms <= Date.now() + 30 * 60_000);
   });
 
   test('rejects malformed query parameters', async () => {
     const pilot = await newPilot();
     for (const q of ['systemH3=nothex', `stationId=${STATION}`, `stationId=${STATION}&systemH3=8c283082e1801ff`, `stationId=bad%20id&systemH3=${SYSTEM}`]) {
       assert.equal((await call(pilot, 'GET', `/game/missions/available?${q}`)).statusCode, 400);
+    }
+  });
+
+  test('refuses a station the engine does not know in that system', async () => {
+    const pilot = await newPilot();
+    // Not an id at all, a station of another system, and a resource node of this system.
+    const node = generateCellNodes(SYSTEM).find((n) => !n.isStation);
+    const unknown = ['station-alpha', ELSEWHERE.station, node?.id].filter(Boolean);
+    for (const stationId of unknown) {
+      const res = await call(pilot, 'GET', `/game/missions/available?stationId=${stationId}&systemH3=${SYSTEM}`);
+      assert.equal(res.statusCode, 400, stationId);
     }
   });
 
@@ -82,12 +101,9 @@ describe('authoritative missions', () => {
     assert.equal(active.player_ship_id, pilot.id);
     assert.equal(active.deadline_ms, active.accepted_at_ms + offers[0].duration_limit_ms);
 
-    // The stored offer round-trips through PostgreSQL JSON, which can move a coordinate by one ulp.
+    // The stored offer comes back bit for bit (coordinates included): the engine compares them exactly.
     const stored = json(await call(pilot, 'GET', '/game/missions/active')).active;
-    const { destination_lat: lat, destination_lng: lng, ...storedOffer } = stored.offer;
-    const { destination_lat: expectedLat, destination_lng: expectedLng, ...expectedOffer } = active.offer;
-    assert.deepEqual({ ...stored, offer: storedOffer }, { ...active, offer: expectedOffer });
-    assert.ok(Math.abs(lat - expectedLat) < 1e-9 && Math.abs(lng - expectedLng) < 1e-9);
+    assert.deepEqual(stored, active);
 
     const other = offers[1] ?? offers[0];
     assert.equal((await accept(pilot, other)).statusCode, 409);
@@ -108,17 +124,22 @@ describe('authoritative missions', () => {
     assert.equal((await accept(pilot, forged)).statusCode, 400);
     assert.equal((await call(pilot, 'POST', '/game/missions/accept', { missionId: 'garbage', offer })).statusCode, 400);
 
-    // A berth count above capacity is rejected even though the offer is authentic.
-    let big;
-    for (let index = 0; index < 6 && !big; index++) {
-      const o = buildOffer({ stationId: STATION, systemH3: SYSTEM, epoch: currentEpoch(), index });
-      if (o.required_berths > 2) big = o;
-    }
+    // A berth count above capacity is rejected even though the engine would generate the offer
+    // for a bigger ship.
+    const big = generateMissionOffers({ stationId: STATION, systemH3: SYSTEM, availableBerths: 4, nowMs: Date.now() })
+      .find((o) => o.required_berths > 2);
     assert.ok(big, 'expected at least one high-berth offer');
     assert.equal((await accept(pilot, big)).statusCode, 400);
 
-    const stale = buildOffer({ ...parseMissionId(offer.mission_id), epoch: currentEpoch() - 1 });
+    // An offer for a window that has ended is refused as expired, not as forged.
+    const stale = generateMissionOffers({ stationId: STATION, systemH3: SYSTEM, availableBerths: 2, nowMs: Date.now() - 31 * 60_000 })[0];
     assert.equal((await accept(pilot, stale)).statusCode, 410);
+
+    // A real offer under another offer's id, or with its window moved, is forged.
+    const [first, second] = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`)).offers;
+    assert.equal((await call(pilot, 'POST', '/game/missions/accept', { missionId: second?.mission_id ?? 'x', offer: first })).statusCode, 400);
+    assert.equal((await accept(pilot, { ...first, expires_at_ms: first.expires_at_ms + 60_000 })).statusCode, 400);
+    assert.equal((await accept(pilot, { ...first, origin_station_id: ELSEWHERE.station })).statusCode, 400);
 
     assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
   });
@@ -148,7 +169,7 @@ describe('authoritative missions', () => {
       assert.equal(await credits(pilot), claim.rewardCredits);
 
       // Cooldown is per station: another station is unaffected.
-      const elsewhere = json(await call(pilot, 'GET', `/game/missions/available?stationId=station-beta&systemH3=${SYSTEM}`));
+      const elsewhere = json(await call(pilot, 'GET', `/game/missions/available?stationId=${ELSEWHERE.station}&systemH3=${ELSEWHERE.system}`));
       assert.equal(elsewhere.cooldown.active, false);
       assert.ok(elsewhere.offers.length > 0);
     });

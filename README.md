@@ -32,11 +32,16 @@ eotha-meta-service/
 ├── src/
 │   ├── config/
 │   │   ├── auth.js             # Device-id length constants
-│   │   └── env.js              # Environment validation via Zod
+│   │   ├── env.js              # Environment validation via Zod
+│   │   └── missions.js         # Mission offers, derived exactly as the RTSE derives them
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
+│   │   ├── crmath.js           # Correctly rounded sin/cos/asin/atan2 (matches the RTSE's libm)
+│   │   ├── fma.js              # Exactly rounded fused multiply-add
+│   │   ├── h3geo.js            # Bit-compatible port of h3o's cell center and vertex arithmetic
 │   │   ├── identity.js         # Guest -> linked player conversion
+│   │   ├── procedural.js       # Port of the RTSE's procedural stations, nodes and names
 │   │   └── refresh-tokens.js   # Refresh rotation with reuse detection
 │   ├── plugins/
 │   │   ├── attestation.js      # requireAttestation preHandler
@@ -53,6 +58,7 @@ eotha-meta-service/
 │   │       └── schema.js       # Session route schemas
 │   └── app.js                  # Fastify server entry point
 ├── tests/
+│   ├── fixtures/               # Offers and nodes the RTSE itself produced, and the Rust exporter
 │   ├── helpers.js              # Test DB guard, throwaway keys, pilot factory
 │   └── *.test.js               # Automated test suite (real PostgreSQL)
 ├── .env.example                # Sample environment configuration
@@ -154,6 +160,16 @@ npm test
 - `POST /ship/upgrade` (Protected)
   - Raises a component tier. The credit cost (`TIER_UPGRADE_COST` in `src/config/components.js`, summed per tier step) is deducted in the same transaction as the tier change; insufficient credits return `402`. Guests are refused `HULL` upgrades with `403 guest_hull_locked` (see [Guest hull lock](#guest-hull-lock)).
 
+### Missions
+All Protected. See [Mission offers](#mission-offers).
+- `GET /game/missions/available?stationId=...&systemH3=...`
+  - The board at a station: `stationId` is the station's RTSE id (a UUID) and `systemH3` the Resolution 8 cell it sits in (`400` for anything else). Returns `{ offers, cooldown, passenger_capacity }`; offers fit the ship's passenger berths.
+- `POST /game/missions/accept`
+  - Body `{ missionId, offer }`. The offer must be exactly one this service derives for the window it names (`400` otherwise, `410` once expired, `409` if a mission is active or the station cooling down).
+- `GET /game/missions/active`, `POST /game/missions/abandon`
+- `POST /game/missions/complete`
+  - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once.
+
 ### Game Sessions
 - `GET /game/session` (Protected)
   - Fetches the active game session and assigned RTSE host for the authenticated pilot.
@@ -161,6 +177,18 @@ npm test
   - Allocates or updates an RTSE instance assignment for the authenticated pilot.
 
 ---
+
+## Mission offers
+
+The RTSE re-derives an accepted offer from the procedural content it names and signs a completion claim only for offers it would itself have generated, so the meta-service derives offers by the engine's rules (`src/config/missions.js`, `src/lib/procedural.js`; the engine's `simulation/missions/generator.rs` is authoritative): a station is identified by its RTSE UUID, a mission id is a UUID hashed from the destination's rank in the 30-minute window and the origin station, a passage of `d` systems with `b` passengers pays `1000 + 500d + 250b` credits with `300 000 d` ms allowed, destinations lie 1-3 systems out, and offers expire 30 minutes after the request. Passage and research offers both count as transport missions; travel is real flight at the ship's speed.
+
+Offers are a pure function of (system, origin station, passenger berths, window), so `accept` regenerates what the client presents rather than storing boards. A ship is only ever offered passage for as many passengers as it has berths (1 to `min(berths, 4)`), so a Tier 1 ship (2 berths) is never shown a mission it cannot take.
+
+What the meta-service chooses to *show* among the engine's valid offers differs from the engine's top three in two ways, both so that every shown offer authenticates and no pilot sees an empty board:
+- A destination whose coordinates cannot be reproduced bit for bit is passed over for the next one. The engine compares an offer's destination latitude and longitude for exact equality, and its libm and ours can disagree in the last bit when a result is within about 0.01 ulp of a rounding tie (`MIN_ROUNDING_MARGIN` leaves a wide safety factor); pentagon systems and systems on an icosahedron face edge are never used. A survey of a node that shares its node cell with an earlier research-grade node of the same system is skipped as well, because the engine would authenticate it as that earlier node.
+- If the engine's rule leaves a ship with berths nothing to carry passengers to (no usable station within 3 systems), it is shown surveys instead of an empty board.
+
+`tests/fixtures/rtse-mission-vectors.json` holds nodes and offers generated by the engine itself (`tests/fixtures/rtse-mission-vectors.rs` regenerates it in an `eotha-rtse` checkout); `tests/mission-vectors.test.js` asserts this service reproduces them.
 
 ## Authentication model
 

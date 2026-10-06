@@ -1,14 +1,12 @@
-import { isDeepStrictEqual } from 'node:util';
 import { computeShipAttributes } from '../../config/components.js';
 import {
   H3_PATTERN,
   STATION_PATTERN,
   MISSION_COOLDOWN_MS,
   MAX_REWARD_CREDITS,
+  isStationOf,
   isSystemCell,
-  parseMissionId,
-  buildOffer,
-  currentEpoch,
+  authenticateOffer,
   generateOffers
 } from '../../config/missions.js';
 import { loadRtsePublicKey, verifyClaimSignature } from '../../lib/mission-claim.js';
@@ -70,6 +68,23 @@ const completeSchema = {
   }
 };
 
+// The JSON column does not keep every double exactly (it moved four in five destination
+// coordinates by an ulp), and the RTSE compares the coordinates of an offer for exact equality,
+// so they are stored as text beside the offer and restored on the way out.
+const toStoredOffer = (offer) => ({
+  ...offer,
+  exact_destination: [String(offer.destination_lat), String(offer.destination_lng)]
+});
+
+function fromStoredOffer(stored) {
+  const { exact_destination: exact, ...offer } = stored;
+  if (Array.isArray(exact)) {
+    offer.destination_lat = Number(exact[0]);
+    offer.destination_lng = Number(exact[1]);
+  }
+  return offer;
+}
+
 // Proto-JSON ActiveMission for a stored row.
 function toActiveMission(playerId, offer, acceptedAt) {
   const acceptedAtMs = acceptedAt.getTime();
@@ -115,7 +130,7 @@ export default async function missionsRoutes(fastify, opts) {
   async function getActive(request) {
     const playerId = request.user.sub;
     const row = await prisma.playerMission.findUnique({ where: { playerId } });
-    return row ? toActiveMission(playerId, row.offer, row.acceptedAt) : null;
+    return row ? toActiveMission(playerId, fromStoredOffer(row.offer), row.acceptedAt) : null;
   }
 
   async function alreadyCompleted(request, missionId) {
@@ -131,6 +146,10 @@ export default async function missionsRoutes(fastify, opts) {
     const { stationId, systemH3 } = request.query;
     if (!isSystemCell(systemH3)) {
       return reply.code(400).send({ error: 'systemH3 must be a valid H3 resolution 8 cell.' });
+    }
+    // Offers are the engine's, and it knows stations only by their id in the system they sit in.
+    if (!isStationOf(systemH3, stationId)) {
+      return reply.code(400).send({ error: 'stationId must be the id of a station in systemH3.' });
     }
 
     const passengerCapacity = await getPassengerCapacity(request);
@@ -151,23 +170,19 @@ export default async function missionsRoutes(fastify, opts) {
       return conflict(reply, 'A mission is already active. Complete or abandon it first.');
     }
 
-    // Offers are client-presented but never trusted: the id must decode to a
-    // current-epoch slot, and the presented offer must equal what we derive from it.
-    const parsed = parseMissionId(missionId);
-    if (!parsed || parsed.epoch > currentEpoch()) {
-      return reply.code(400).send({ error: 'Invalid missionId.' });
+    // Offers are client-presented but never trusted: the presented offer must equal what this
+    // service derives for the window it names, for a ship with this many berths.
+    const capacity = Math.floor(await getPassengerCapacity(request));
+    if (offer.required_berths > capacity) {
+      return reply.code(400).send({ error: 'Ship has insufficient passenger berths for this mission.' });
     }
-    const authoritative = buildOffer(parsed);
-    if (!isDeepStrictEqual(JSON.parse(JSON.stringify(offer)), authoritative)) {
+    const verdict = missionId === offer.mission_id ? authenticateOffer(offer, { availableBerths: capacity }) : null;
+    if (!verdict) {
       return reply.code(400).send({ error: 'Offer does not match the authoritative mission.' });
     }
-    if (Date.now() > authoritative.expires_at_ms) {
+    const authoritative = verdict.offer;
+    if (verdict.expired) {
       return reply.code(410).send({ error: 'Offer has expired.' });
-    }
-
-    const capacity = Math.floor(await getPassengerCapacity(request));
-    if (authoritative.required_berths > capacity) {
-      return reply.code(400).send({ error: 'Ship has insufficient passenger berths for this mission.' });
     }
     if (await cooldownRemainingMs(request, authoritative.origin_station_id) > 0) {
       return conflict(reply, 'Station is on cooldown.');
@@ -183,7 +198,7 @@ export default async function missionsRoutes(fastify, opts) {
           playerId,
           missionId: authoritative.mission_id,
           originStationId: authoritative.origin_station_id,
-          offer: authoritative,
+          offer: toStoredOffer(authoritative),
           acceptedAt
         }
       });
