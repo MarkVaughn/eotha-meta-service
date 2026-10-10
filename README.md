@@ -103,8 +103,8 @@ HOST="0.0.0.0"
 # Public key that engine-signed claims verify against (see "Engine claim key")
 # CLAIM_PUBLIC_KEY=    # 64 hex characters, the raw Ed25519 public key
 # CLAIM_PUBLIC_KEY_FILE=  # alternatively a file holding that hex or a PEM public key
-# Full ws:// or wss:// URL of the RTSE gateway handed to clients (see "Gateway address")
-# GATEWAY_WS_URL=wss://abc.ngrok-free.app/session
+# Fixed ws:// or wss:// URL of the RTSE gateway handed to clients (see "Gateway address")
+# GATEWAY_WS_URL=wss://gateway.example.com/session
 ```
 
 ### 4. Generate Asymmetric Cryptographic Keys
@@ -189,15 +189,14 @@ All Protected. See [Mission offers](#mission-offers).
 
 ### Gateway address
 
-`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`. A phone cannot reach `localhost`, so it is resolved as follows:
+`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`, and `POST /game/session` defaults `rtseHost` to a gateway host. Both come from configuration, never from the request:
 
-1. `GATEWAY_WS_URL`, when set (a full `ws://` or `wss://` URL), is returned as is.
-2. Otherwise, only when `NODE_ENV=development`, a request that came through a tunnel (it carries `x-forwarded-proto` or `x-forwarded-host`, as ngrok adds) yields `<scheme>://<host>/session`: `wss` when `x-forwarded-proto` is `https`, else `ws`, and the host is `x-forwarded-host`, falling back to the `Host` header. For example `x-forwarded-proto: https` with `x-forwarded-host: abc.ngrok-free.app` gives `wss://abc.ngrok-free.app/session`.
-3. Anywhere else (outside development, or a direct call without those headers) it is `ws://localhost:8080/session`. Request headers are never used outside development.
+1. `GATEWAY_WS_URL`, when set, is returned as is (`rtseHost` is its host). Use it to pin a fixed staging or production host, e.g. `wss://gateway.example.com/session`.
+2. Otherwise it is `ws://localhost:8080/session` (`rtseHost` `localhost:8080`), the local Minikube gateway port.
 
-The derived address only works when the tunnel fronts the cluster gateway, which routes `/auth` and `/game` to the meta-service and the `/session` WebSocket to the engine: run `make gateway`, then `make tunnel-up` (eotha-kube). Forwarded values must be a bare hostname (or IP) with an optional port and an `http`/`https` scheme; anything else discards the derivation. Only the leftmost entry of a comma-separated forwarded header is read.
+`GATEWAY_WS_URL` must be a `ws://` or `wss://` URL with a hostname, an optional port and an optional path, and no credentials (`user:pass@`), query or fragment. The service refuses to start with any other value. `POST /game/session` additionally honours an explicit `DEFAULT_RTSE_HOST` (ahead of `GATEWAY_WS_URL`), and a `rtseHost` in the request body always wins.
 
-`POST /game/session` never derives `rtseHost` from request headers, in any environment: without a `rtseHost` in the body it uses `DEFAULT_RTSE_HOST`, else the host of `GATEWAY_WS_URL`, else `localhost:8080`.
+Forwarded headers (`x-forwarded-proto`, `x-forwarded-host`) and the `Host` header are ignored: a client can forge them, and the address is returned next to a signed token. Over an ngrok tunnel the dev client therefore derives the address itself: when the server returns a loopback address, its mobile mode builds `wss://<tunnel host>/session` from the tunnel base it already uses for `/auth` and `/game`. That only works when the tunnel fronts the cluster gateway, which routes `/auth` and `/game` to the meta-service and the `/session` WebSocket to the engine (`make gateway`, then `make tunnel-up` in eotha-kube).
 
 ---
 

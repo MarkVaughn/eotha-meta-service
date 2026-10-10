@@ -15,7 +15,6 @@ const DEV_TOKEN_TTL_SECONDS = 24 * 60 * 60;
 export default async function authRoutes(fastify, opts) {
   const prisma = fastify.prisma;
   const devLoginEnabled = opts.devLogin ?? env.NODE_ENV === 'development';
-  const development = opts.development ?? env.NODE_ENV === 'development';
 
   // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet). The claims are
   // exactly what the RTSE validates; `ttlSeconds` only overrides the default token lifetime.
@@ -242,7 +241,7 @@ export default async function authRoutes(fastify, opts) {
 
       return {
         token,
-        gateway_ws_url: gatewayWsUrl(request, opts.gatewayWsUrl ?? env.GATEWAY_WS_URL, { development }),
+        gateway_ws_url: gatewayWsUrl(opts.gatewayWsUrl ?? env.GATEWAY_WS_URL),
         player: {
           id: player.id,
           callsign,
