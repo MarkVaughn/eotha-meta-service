@@ -161,6 +161,9 @@ model SystemChart {
   totalBodiesCharted Int
   chartedAtMs        BigInt
   signature          String    // base64-encoded 64-byte Ed25519 signature
+  // 32-byte SHA-256 over the system's planet survey hashes, covered by the V2 signature. Null only
+  // for charts claimed under V1.
+  systemDigest       Bytes?
   soldAt             DateTime?
   discoveredAt       DateTime  @default(now())
 

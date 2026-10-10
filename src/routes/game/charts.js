@@ -12,6 +12,8 @@ const SYSTEM_CHART_PAYOUT = 2500;
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 const id = { type: 'string', minLength: 1, maxLength: 256 };
 const signature = { type: 'string', minLength: 1, maxLength: 512 };
+// Standard base64 of exactly 32 bytes.
+const digest32 = { type: 'string', pattern: '^[A-Za-z0-9+/]{43}=$' };
 
 const registerPlanetSchema = {
   body: {
@@ -42,13 +44,16 @@ const claimSystemSchema = {
     properties: {
       systemKey: {
         type: 'object',
-        required: ['systemH3', 'pilotId', 'totalBodiesCharted', 'chartedAtMs', 'signature'],
+        // systemDigest is required: V1 keys, signed without it, are refused.
+        required: ['systemH3', 'pilotId', 'totalBodiesCharted', 'chartedAtMs', 'signature', 'systemDigest'],
         properties: {
           systemH3: { type: 'string', pattern: H3_PATTERN },
           pilotId: id,
           totalBodiesCharted: { type: 'integer', minimum: 0, maximum: 4294967295 },
           chartedAtMs: uint,
-          signature
+          signature,
+          // Base64 of the 32-byte SHA-256 over the system's planet survey hashes the RTSE signed.
+          systemDigest: digest32
         }
       }
     }
@@ -99,6 +104,7 @@ function systemView(c) {
     totalBodiesCharted: c.totalBodiesCharted,
     chartedAtMs: Number(c.chartedAtMs),
     signature: c.signature,
+    systemDigest: c.systemDigest ? Buffer.from(c.systemDigest).toString('base64') : null,
     sold: !!c.soldAt,
     soldAt: iso(c.soldAt),
     discoveredAt: iso(c.discoveredAt)
@@ -176,16 +182,19 @@ export default async function chartsRoutes(fastify) {
     }
     // totalBodiesCharted is not validated against any local body count: the meta-service has no
     // system catalog. It is authoritative because the RTSE's Ed25519 signature covers it in the
-    // canonical EOTHA_SYSTEM_CHART_V1 payload (pilot, systemH3, totalBodiesCharted, chartedAtMs), so
-    // a client cannot alter the count without invalidating the signature.
-    if (!verifySystemChartSignature(systemKey, fastify.claimKey.key)) {
+    // canonical EOTHA_SYSTEM_CHART_V2 payload (pilot, systemH3, totalBodiesCharted, chartedAtMs,
+    // systemDigest), so a client cannot alter the count or the digest without invalidating the
+    // signature.
+    const systemDigest = Buffer.from(systemKey.systemDigest, 'base64');
+    if (!verifySystemChartSignature(systemKey, systemDigest, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'Invalid chart signature.' });
     }
 
     const data = {
       totalBodiesCharted: systemKey.totalBodiesCharted,
       chartedAtMs: BigInt(systemKey.chartedAtMs),
-      signature: systemKey.signature
+      signature: systemKey.signature,
+      systemDigest
     };
     const duplicate = () => reply.code(409).send({ error: 'SYSTEM_ALREADY_CLAIMED' });
     try {

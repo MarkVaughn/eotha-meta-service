@@ -1,6 +1,6 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, sign } from 'node:crypto';
+import { createHash, createPublicKey, sign } from 'node:crypto';
 import { PlanetarySurvey } from '../src/lib/contracts/exploration.js';
 import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey } from './helpers.js';
 import { computeShipAttributes } from '../src/config/components.js';
@@ -8,7 +8,8 @@ import {
   PLANET_CHART_DOMAIN,
   SYSTEM_CHART_DOMAIN,
   canonicalPlanetChartPayload,
-  canonicalSystemChartPayload
+  canonicalSystemChartPayload,
+  verifySystemChartSignature
 } from '../src/lib/chart-claim.js';
 
 const SYSTEM = '8828308281fffff';
@@ -31,9 +32,13 @@ function planetKey(pilot, planetId = 'planet-1', bytes = surveyBytes(), complete
 const register = (pilot, key, bytes = surveyBytes()) =>
   call(pilot, 'POST', '/game/charts/register-planet', { chartKey: key, surveyBytesBase64: bytes.toString('base64') });
 
-function systemKey(pilot, signer = rtseKey) {
+// The RTSE's system digest: SHA-256 over every planet's survey hash, ordered by planet id.
+const systemDigest = sha256(Buffer.concat([sha256(surveyBytes()), sha256(surveyBytes({ ...surveyMsg, gases: [] }))]));
+
+function systemKey(pilot, signer = rtseKey, digest = systemDigest) {
   const key = { systemH3: SYSTEM, pilotId: pilot.id, totalBodiesCharted: 7, chartedAtMs: Date.now() };
-  key.signature = sign(null, canonicalSystemChartPayload(key), signer).toString('base64');
+  key.signature = sign(null, canonicalSystemChartPayload(key, digest), signer).toString('base64');
+  key.systemDigest = digest.toString('base64');
   return key;
 }
 
@@ -41,6 +46,45 @@ describe('SENSORS component', () => {
   test('domain tags are 21 bytes', () => {
     assert.equal(PLANET_CHART_DOMAIN.length, 21);
     assert.equal(SYSTEM_CHART_DOMAIN.length, 21);
+    assert.equal(SYSTEM_CHART_DOMAIN.toString('utf8'), 'EOTHA_SYSTEM_CHART_V2');
+  });
+
+  // Known answers copied from eotha-rtse src/simulation/exploration/charts.rs
+  // (signing_payloads_are_length_prefixed_and_domain_separated).
+  test('signing payloads match the engine byte for byte', () => {
+    const planet = canonicalPlanetChartPayload(
+      { pilotId: 'p', planetId: 'ab', systemH3: '', completedAtMs: 0x0102 },
+      Buffer.alloc(32, 9)
+    );
+    assert.deepEqual(planet, Buffer.concat([
+      Buffer.from('EOTHA_PLANET_CHART_V1'),
+      Buffer.from([1, 0, 0, 0, 0x70, 2, 0, 0, 0, 0x61, 0x62, 0, 0, 0, 0]),
+      Buffer.from([2, 1, 0, 0, 0, 0, 0, 0]),
+      Buffer.alloc(32, 9)
+    ]));
+
+    const system = canonicalSystemChartPayload(
+      { pilotId: 'p', systemH3: 'ab', totalBodiesCharted: 3, chartedAtMs: 4 },
+      Buffer.alloc(32, 8)
+    );
+    assert.deepEqual(system, Buffer.concat([
+      Buffer.from('EOTHA_SYSTEM_CHART_V2'),
+      Buffer.from([1, 0, 0, 0, 0x70, 2, 0, 0, 0, 0x61, 0x62]),
+      Buffer.from([3, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0]),
+      Buffer.alloc(32, 8)
+    ]));
+  });
+
+  test('a system chart verifies only with the exact 32-byte digest', () => {
+    const key = { pilotId: 'p', systemH3: SYSTEM, totalBodiesCharted: 3, chartedAtMs: 4 };
+    key.signature = sign(null, canonicalSystemChartPayload(key, systemDigest), rtseKey).toString('base64');
+    const pub = createPublicKey(rtseKey);
+    assert.equal(verifySystemChartSignature(key, systemDigest, pub), true);
+    const flipped = Buffer.from(systemDigest);
+    flipped[31] ^= 1;
+    assert.equal(verifySystemChartSignature(key, flipped, pub), false);
+    assert.equal(verifySystemChartSignature(key, systemDigest.subarray(0, 31), pub), false);
+    assert.equal(verifySystemChartSignature(key, undefined, pub), false);
   });
 
   test('computeShipAttributes maps every SENSORS tier', () => {
@@ -200,11 +244,38 @@ describe('cartography', () => {
     assert.deepEqual(json(res), { claimed: true, systemH3: SYSTEM });
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.systemCharts[0].totalBodiesCharted, 7);
+    assert.equal(inv.systemCharts[0].systemDigest, systemDigest.toString('base64'));
 
     // Duplicate claims (even with a fresh valid signature) are rejected.
     res = await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) });
     assert.equal(res.statusCode, 409);
     assert.deepEqual(json(res), { error: 'SYSTEM_ALREADY_CLAIMED' });
+  });
+
+  test('rejects V1 system chart keys and keys whose digest does not match the signature', async () => {
+    const pilot = await newPilot('LegacyClaimer');
+    const claim = (systemKey) => call(pilot, 'POST', '/game/charts/claim-system', { systemKey });
+
+    // A V1 key: signed over the payload without a digest, and submitted without one.
+    const v1 = { systemH3: SYSTEM, pilotId: pilot.id, totalBodiesCharted: 7, chartedAtMs: Date.now() };
+    const v1Payload = Buffer.concat([
+      Buffer.from('EOTHA_SYSTEM_CHART_V1'),
+      canonicalSystemChartPayload(v1, Buffer.alloc(0)).subarray(SYSTEM_CHART_DOMAIN.length)
+    ]);
+    v1.signature = sign(null, v1Payload, rtseKey).toString('base64');
+    assert.equal((await claim(v1)).statusCode, 400);
+    assert.equal((await claim({ ...v1, systemDigest: systemDigest.toString('base64') })).statusCode, 403);
+
+    // A V2 key whose digest is swapped, truncated or not base64.
+    const key = systemKey(pilot);
+    const other = sha256(Buffer.from('another system'));
+    assert.equal((await claim({ ...key, systemDigest: other.toString('base64') })).statusCode, 403);
+    assert.equal((await claim({ ...key, systemDigest: systemDigest.subarray(0, 31).toString('base64') })).statusCode, 400);
+    assert.equal((await claim({ ...key, systemDigest: '!'.repeat(43) + '=' })).statusCode, 400);
+
+    const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
+    assert.deepEqual(inv.systemCharts, []);
+    assert.equal((await claim(key)).statusCode, 200);
   });
 
   test('sells charts once for credits', async () => {
