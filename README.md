@@ -103,6 +103,8 @@ HOST="0.0.0.0"
 # Public key that engine-signed claims verify against (see "Engine claim key")
 # CLAIM_PUBLIC_KEY=    # 64 hex characters, the raw Ed25519 public key
 # CLAIM_PUBLIC_KEY_FILE=  # alternatively a file holding that hex or a PEM public key
+# Full ws:// or wss:// URL of the RTSE gateway handed to clients (see "Gateway address")
+# GATEWAY_WS_URL=wss://abc.ngrok-free.app/session
 ```
 
 ### 4. Generate Asymmetric Cryptographic Keys
@@ -143,7 +145,7 @@ npm test
   - Health check endpoint returning `{ status: "healthy", service: "eotha-meta-service" }`.
 - `GET /auth/dev-login`
   - Development only (`NODE_ENV=development`). Grants the one-time `DEV_STARTING_CREDITS` to a dev pilot (see above). Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
-  - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, WebSocket gateway URL, and the pilot profile.
+  - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, the WebSocket gateway URL (`gateway_ws_url`, see [Gateway address](#gateway-address)), and the pilot profile.
 - `POST /auth/register`
   - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index.
 - `POST /auth/guest` (attested)
@@ -183,7 +185,17 @@ All Protected. See [Mission offers](#mission-offers).
 - `GET /game/session` (Protected)
   - Fetches the active game session and assigned RTSE host for the authenticated pilot.
 - `POST /game/session` (Protected)
-  - Allocates or updates an RTSE instance assignment for the authenticated pilot.
+  - Allocates or updates an RTSE instance assignment for the authenticated pilot. Without a `rtseHost` in the body, the host is chosen as described in [Gateway address](#gateway-address).
+
+### Gateway address
+
+`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`, and `POST /game/session` defaults `rtseHost` to a gateway host. A phone cannot reach `localhost`, so both follow the request instead of a fixed value:
+
+1. `GATEWAY_WS_URL`, when set (a full `ws://` or `wss://` URL), is returned as is; `rtseHost` is its host.
+2. Otherwise, a request that came through a proxy or tunnel (it carries `x-forwarded-proto` or `x-forwarded-host`, as ngrok adds) yields `<scheme>://<host>/session`: `wss` when `x-forwarded-proto` is `https`, else `ws`, and the host is `x-forwarded-host`, falling back to the `Host` header. For example `x-forwarded-proto: https` with `x-forwarded-host: abc.ngrok-free.app` gives `wss://abc.ngrok-free.app/session`, and `rtseHost` becomes `abc.ngrok-free.app`.
+3. A direct call (neither header, e.g. `localhost:3000`) keeps `ws://localhost:8080/session` and `localhost:8080`.
+
+For `rtseHost`, an explicit `DEFAULT_RTSE_HOST` still takes precedence over steps 1-3, and a `rtseHost` in the request body over everything. Forwarded values must be a bare hostname (or IP) with an optional port and an `http`/`https` scheme; anything else (a path, credentials, another scheme) discards the derivation and the localhost defaults apply, so a request cannot make the service reflect an arbitrary address. Only the leftmost entry of a comma-separated forwarded header is read.
 
 ---
 

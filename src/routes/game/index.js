@@ -1,3 +1,5 @@
+import env from '../../config/env.js';
+import { defaultRtseHost } from '../../lib/gateway-url.js';
 import { getSessionSchema, createSessionSchema } from './schema.js';
 
 export default async function gameRoutes(fastify, opts) {
@@ -24,8 +26,10 @@ export default async function gameRoutes(fastify, opts) {
   // Endpoint 2: Lookup or Instantiate Game Session
   fastify.post('/session', { schema: createSessionSchema }, async (request, reply) => {
     const playerId = request.user.sub;
-    const defaultHost = process.env.DEFAULT_RTSE_HOST || 'localhost:8080';
-    const rtseHost = request.body?.rtseHost || defaultHost;
+    const rtseHost = request.body?.rtseHost || defaultRtseHost(request, {
+      configuredHost: process.env.DEFAULT_RTSE_HOST,
+      configuredUrl: opts.gatewayWsUrl ?? env.GATEWAY_WS_URL
+    });
 
     const session = await prisma.gameSession.upsert({
       where: { playerId },
