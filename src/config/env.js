@@ -26,6 +26,8 @@ const envSchema = z.object({
   CLAIM_PUBLIC_KEY: optionalString(z.string().regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hex characters (a raw Ed25519 public key)')),
   // File holding the same key as hex or a PEM public key; when both are set they must agree.
   CLAIM_PUBLIC_KEY_FILE: optionalString(z.string().min(1)),
+  // Credits a development-login pilot receives once, on its first dev login (never in production).
+  DEV_STARTING_CREDITS: z.coerce.number().int().min(0).default(20_000),
   DATABASE_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/eotha_meta?schema=public')
 });
 

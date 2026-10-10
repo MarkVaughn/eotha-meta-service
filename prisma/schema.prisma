@@ -27,6 +27,8 @@ model Player {
   session      GameSession?
   spaceships   Spaceship[]
   credits      Int           @default(0)
+  // Set when development login grants the pilot its one-time starting credits; never granted twice.
+  devCreditsGrantedAt DateTime?
   trades       TradeTransaction[]
   activeMission    PlayerMission?
   missionCooldowns MissionCooldown[]

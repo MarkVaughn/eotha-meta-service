@@ -6,7 +6,7 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 
 - **Asymmetric Authentication (Ed25519 / EdDSA)**: Mints cryptographic JWT tokens signed by a private key. The public key is shared out-of-band with the Rust RTSE cluster for zero-latency local verification without database queries.
 - **Better Auth identity layer**: [Better Auth](https://better-auth.com) owns users, sessions, linked accounts and the anonymous-guest flow inside this Fastify app and database. Its `user` is the existing `Player` model, so the player id stays the one stable identity across guest, email and (later) Apple/Google accounts. See [Authentication model](#authentication-model).
-- **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing.
+- **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing. A pilot created by dev login (and an existing dev pilot that has never been granted, holds 0 credits and has no upgraded components) receives `DEV_STARTING_CREDITS` (default 20,000) exactly once, recorded in `Player.devCreditsGrantedAt`, so ship upgrades can be bought; later logins never add more, and guests, linked and registered accounts never get it.
 - **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`.
 - **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
 - **Separate engine claim key**: Engine-signed claims (mission completion, planet and system charts) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
@@ -33,6 +33,7 @@ eotha-meta-service/
 ├── src/
 │   ├── config/
 │   │   ├── auth.js             # Device-id length constants
+│   │   ├── dev.js              # Development-login starting credits
 │   │   ├── env.js              # Environment validation via Zod
 │   │   └── missions.js         # Mission offers, derived exactly as the RTSE derives them
 │   ├── lib/
@@ -96,6 +97,7 @@ HOST="0.0.0.0"
 # ACCESS_TOKEN_TTL_SECONDS=900
 # REFRESH_TOKEN_TTL_DAYS=30
 # SESSION_TTL_DAYS=90
+# DEV_STARTING_CREDITS=20000  # one-time credits for a new /auth/dev-login pilot (development only)
 # BETTER_AUTH_URL=https://meta.example.com
 # BETTER_AUTH_SECRET=  # defaults to a key derived from keys/private.pem
 # Public key that engine-signed claims verify against (see "Engine claim key")
@@ -140,7 +142,7 @@ npm test
 - `GET /health`
   - Health check endpoint returning `{ status: "healthy", service: "eotha-meta-service" }`.
 - `GET /auth/dev-login`
-  - Development only (`NODE_ENV=development`). Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
+  - Development only (`NODE_ENV=development`). Grants the one-time `DEV_STARTING_CREDITS` to a dev pilot (see above). Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
   - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, WebSocket gateway URL, and the pilot profile.
 - `POST /auth/register`
   - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index.
