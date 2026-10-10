@@ -103,6 +103,8 @@ HOST="0.0.0.0"
 # Public key that engine-signed claims verify against (see "Engine claim key")
 # CLAIM_PUBLIC_KEY=    # 64 hex characters, the raw Ed25519 public key
 # CLAIM_PUBLIC_KEY_FILE=  # alternatively a file holding that hex or a PEM public key
+# Fixed ws:// or wss:// URL of the RTSE gateway handed to clients (see "Gateway address")
+# GATEWAY_WS_URL=wss://gateway.example.com/session
 ```
 
 ### 4. Generate Asymmetric Cryptographic Keys
@@ -143,7 +145,7 @@ npm test
   - Health check endpoint returning `{ status: "healthy", service: "eotha-meta-service" }`.
 - `GET /auth/dev-login`
   - Development only (`NODE_ENV=development`). Grants the one-time `DEV_STARTING_CREDITS` to a dev pilot (see above). Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
-  - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, WebSocket gateway URL, and the pilot profile.
+  - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, the WebSocket gateway URL (`gateway_ws_url`, see [Gateway address](#gateway-address)), and the pilot profile.
 - `POST /auth/register`
   - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index.
 - `POST /auth/guest` (attested)
@@ -183,7 +185,18 @@ All Protected. See [Mission offers](#mission-offers).
 - `GET /game/session` (Protected)
   - Fetches the active game session and assigned RTSE host for the authenticated pilot.
 - `POST /game/session` (Protected)
-  - Allocates or updates an RTSE instance assignment for the authenticated pilot.
+  - Allocates or updates an RTSE instance assignment for the authenticated pilot. Without a `rtseHost` in the body, the host is chosen as described in [Gateway address](#gateway-address).
+
+### Gateway address
+
+`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`, and `POST /game/session` defaults `rtseHost` to a gateway host. Both come from configuration, never from the request:
+
+1. `GATEWAY_WS_URL`, when set, is returned as is (`rtseHost` is its host). Use it to pin a fixed staging or production host, e.g. `wss://gateway.example.com/session`.
+2. Otherwise it is `ws://localhost:8080/session` (`rtseHost` `localhost:8080`), the local Minikube gateway port.
+
+`GATEWAY_WS_URL` must be a `ws://` or `wss://` URL with a hostname, an optional port and an optional path, and no credentials (`user:pass@`), query or fragment. The service refuses to start with any other value. `POST /game/session` additionally honours an explicit `DEFAULT_RTSE_HOST` (ahead of `GATEWAY_WS_URL`), and a `rtseHost` in the request body always wins.
+
+Forwarded headers (`x-forwarded-proto`, `x-forwarded-host`) and the `Host` header are ignored: a client can forge them, and the address is returned next to a signed token. Over an ngrok tunnel the dev client therefore derives the address itself: when the server returns a loopback address, its mobile mode builds `wss://<tunnel host>/session` from the tunnel base it already uses for `/auth` and `/game`. That only works when the tunnel fronts the cluster gateway, which routes `/auth` and `/game` to the meta-service and the `/session` WebSocket to the engine (`make gateway`, then `make tunnel-up` in eotha-kube).
 
 ---
 

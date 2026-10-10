@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { z } from 'zod';
+import { parseGatewayWsUrl } from '../lib/gateway-url.js';
 
 // An empty variable (a blank ConfigMap value, `FOO=` in a dotenv file) counts as unset.
 const optionalString = (schema) => z.preprocess((value) => (value === '' ? undefined : value), schema.optional());
@@ -28,6 +29,15 @@ const envSchema = z.object({
   CLAIM_PUBLIC_KEY_FILE: optionalString(z.string().min(1)),
   // Credits a development-login pilot receives once, on its first dev login (never in production).
   DEV_STARTING_CREDITS: z.coerce.number().int().min(0).default(20_000),
+  // Full WebSocket URL of the RTSE gateway handed to clients (a fixed staging host, say). Unset, it is
+  // ws://localhost:8080/session; it is never derived from the request.
+  GATEWAY_WS_URL: optionalString(z.string().superRefine((value, ctx) => {
+    try {
+      parseGatewayWsUrl(value);
+    } catch (err) {
+      ctx.addIssue({ code: 'custom', message: err.message });
+    }
+  })),
   DATABASE_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/eotha_meta?schema=public')
 });
 

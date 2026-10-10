@@ -4,6 +4,7 @@ import { DEV_LOGIN_EMAIL_DOMAIN, DEV_STARTING_CREDITS } from '../../config/dev.j
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
 import { convertGuest } from '../../lib/identity.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
+import { gatewayWsUrl } from '../../lib/gateway-url.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
 import {
   registerSchema, loginSchema, devLoginSchema, guestSchema, refreshSchema, logoutSchema, linkEmailSchema
@@ -240,7 +241,7 @@ export default async function authRoutes(fastify, opts) {
 
       return {
         token,
-        gateway_ws_url: "ws://localhost:8080/session", // Local Minikube RTSE WebSocket port [3]
+        gateway_ws_url: gatewayWsUrl(opts.gatewayWsUrl ?? env.GATEWAY_WS_URL),
         player: {
           id: player.id,
           callsign,
