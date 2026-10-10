@@ -189,13 +189,15 @@ All Protected. See [Mission offers](#mission-offers).
 
 ### Gateway address
 
-`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`, and `POST /game/session` defaults `rtseHost` to a gateway host. A phone cannot reach `localhost`, so both follow the request instead of a fixed value:
+`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`. A phone cannot reach `localhost`, so it is resolved as follows:
 
-1. `GATEWAY_WS_URL`, when set (a full `ws://` or `wss://` URL), is returned as is; `rtseHost` is its host.
-2. Otherwise, a request that came through a proxy or tunnel (it carries `x-forwarded-proto` or `x-forwarded-host`, as ngrok adds) yields `<scheme>://<host>/session`: `wss` when `x-forwarded-proto` is `https`, else `ws`, and the host is `x-forwarded-host`, falling back to the `Host` header. For example `x-forwarded-proto: https` with `x-forwarded-host: abc.ngrok-free.app` gives `wss://abc.ngrok-free.app/session`, and `rtseHost` becomes `abc.ngrok-free.app`.
-3. A direct call (neither header, e.g. `localhost:3000`) keeps `ws://localhost:8080/session` and `localhost:8080`.
+1. `GATEWAY_WS_URL`, when set (a full `ws://` or `wss://` URL), is returned as is.
+2. Otherwise, only when `NODE_ENV=development`, a request that came through a tunnel (it carries `x-forwarded-proto` or `x-forwarded-host`, as ngrok adds) yields `<scheme>://<host>/session`: `wss` when `x-forwarded-proto` is `https`, else `ws`, and the host is `x-forwarded-host`, falling back to the `Host` header. For example `x-forwarded-proto: https` with `x-forwarded-host: abc.ngrok-free.app` gives `wss://abc.ngrok-free.app/session`.
+3. Anywhere else (outside development, or a direct call without those headers) it is `ws://localhost:8080/session`. Request headers are never used outside development.
 
-For `rtseHost`, an explicit `DEFAULT_RTSE_HOST` still takes precedence over steps 1-3, and a `rtseHost` in the request body over everything. Forwarded values must be a bare hostname (or IP) with an optional port and an `http`/`https` scheme; anything else (a path, credentials, another scheme) discards the derivation and the localhost defaults apply, so a request cannot make the service reflect an arbitrary address. Only the leftmost entry of a comma-separated forwarded header is read.
+The derived address only works when the tunnel fronts the cluster gateway, which routes `/auth` and `/game` to the meta-service and the `/session` WebSocket to the engine: run `make gateway`, then `make tunnel-up` (eotha-kube). Forwarded values must be a bare hostname (or IP) with an optional port and an `http`/`https` scheme; anything else discards the derivation. Only the leftmost entry of a comma-separated forwarded header is read.
+
+`POST /game/session` never derives `rtseHost` from request headers, in any environment: without a `rtseHost` in the body it uses `DEFAULT_RTSE_HOST`, else the host of `GATEWAY_WS_URL`, else `localhost:8080`.
 
 ---
 

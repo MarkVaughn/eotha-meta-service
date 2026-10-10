@@ -28,8 +28,8 @@ const envSchema = z.object({
   CLAIM_PUBLIC_KEY_FILE: optionalString(z.string().min(1)),
   // Credits a development-login pilot receives once, on its first dev login (never in production).
   DEV_STARTING_CREDITS: z.coerce.number().int().min(0).default(20_000),
-  // Full WebSocket URL of the RTSE gateway handed to clients. Unset, it is derived from the request
-  // (see src/lib/gateway-url.js) so a tunnelled phone gets an address it can reach.
+  // Full WebSocket URL of the RTSE gateway handed to clients. Unset, development derives it from the
+  // tunnelled request (see src/lib/gateway-url.js); elsewhere it defaults to the local gateway.
   GATEWAY_WS_URL: optionalString(z.string().url().regex(/^wss?:\/\//, 'must be a ws:// or wss:// URL')),
   DATABASE_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/eotha_meta?schema=public')
 });

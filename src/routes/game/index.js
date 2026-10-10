@@ -26,7 +26,7 @@ export default async function gameRoutes(fastify, opts) {
   // Endpoint 2: Lookup or Instantiate Game Session
   fastify.post('/session', { schema: createSessionSchema }, async (request, reply) => {
     const playerId = request.user.sub;
-    const rtseHost = request.body?.rtseHost || defaultRtseHost(request, {
+    const rtseHost = request.body?.rtseHost || defaultRtseHost({
       configuredHost: process.env.DEFAULT_RTSE_HOST,
       configuredUrl: opts.gatewayWsUrl ?? env.GATEWAY_WS_URL
     });

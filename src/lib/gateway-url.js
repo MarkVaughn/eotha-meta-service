@@ -1,5 +1,6 @@
 // Where a client reaches the RTSE WebSocket gateway. A phone behind a tunnel cannot use the
-// localhost address the local dev flow hands out, so the address follows the request it answers.
+// localhost address the local dev flow hands out, so in development the address follows the
+// tunnelled request it answers; anywhere else it is configured, never read from request headers.
 
 export const LOCAL_GATEWAY_HOST = 'localhost:8080';
 
@@ -37,16 +38,19 @@ export function forwardedOrigin(request) {
   return { secure: (proto ?? request.protocol) === 'https', host };
 }
 
-/** The WebSocket URL of the gateway: GATEWAY_WS_URL when set, else derived from the request. */
-export function gatewayWsUrl(request, configured) {
+/**
+ * The WebSocket URL of the gateway: GATEWAY_WS_URL when set; in development, derived from the
+ * tunnelled request; otherwise the local default.
+ */
+export function gatewayWsUrl(request, configured, { development = false } = {}) {
   if (configured) return configured;
-  const origin = forwardedOrigin(request);
+  const origin = development ? forwardedOrigin(request) : null;
   return origin ? `${origin.secure ? 'wss' : 'ws'}://${origin.host}/session` : `ws://${LOCAL_GATEWAY_HOST}/session`;
 }
 
 /** The engine host (no scheme) recorded for a game session when the caller names none. */
-export function defaultRtseHost(request, { configuredUrl, configuredHost } = {}) {
+export function defaultRtseHost({ configuredUrl, configuredHost } = {}) {
   if (configuredHost) return configuredHost;
   if (configuredUrl) return new URL(configuredUrl).host;
-  return forwardedOrigin(request)?.host ?? LOCAL_GATEWAY_HOST;
+  return LOCAL_GATEWAY_HOST;
 }
