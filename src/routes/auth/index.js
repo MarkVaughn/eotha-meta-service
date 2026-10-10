@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import env from '../../config/env.js';
+import { DEV_LOGIN_EMAIL_DOMAIN, DEV_STARTING_CREDITS } from '../../config/dev.js';
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
 import { convertGuest } from '../../lib/identity.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
@@ -201,16 +202,36 @@ export default async function authRoutes(fastify, opts) {
       const { callsign = 'DevPilot', latitude = '37.7749', longitude = '-122.4194', h3 = '8828308281fffff' } = request.query;
       const harbor = { latitude: parseFloat(latitude), longitude: parseFloat(longitude), h3Index: h3 };
 
-      const player = await prisma.player.upsert({
-        where: { callsign },
-        update: { harbor: { upsert: { create: harbor, update: harbor } } },
-        create: {
-          email: `${encodeURIComponent(callsign)}@dev-login.invalid`,
-          passwordHash: UNUSABLE_PASSWORD_HASH,
-          callsign,
-          harbor: { create: harbor }
-        },
-        include: { harbor: true }
+      // The starting credits are granted exactly once per dev pilot: with the pilot's creation, or
+      // (for a dev pilot created before the grant existed) by the guarded update below. Real
+      // accounts, guests and linked accounts never match it.
+      const player = await prisma.$transaction(async (tx) => {
+        const now = new Date();
+        const pilot = await tx.player.upsert({
+          where: { callsign },
+          update: { harbor: { upsert: { create: harbor, update: harbor } } },
+          create: {
+            email: `${encodeURIComponent(callsign)}@${DEV_LOGIN_EMAIL_DOMAIN}`,
+            passwordHash: UNUSABLE_PASSWORD_HASH,
+            callsign,
+            credits: DEV_STARTING_CREDITS,
+            devCreditsGrantedAt: now,
+            harbor: { create: harbor }
+          },
+          include: { harbor: true }
+        });
+        await tx.player.updateMany({
+          where: {
+            id: pilot.id,
+            email: { endsWith: `@${DEV_LOGIN_EMAIL_DOMAIN}` },
+            isAnonymous: false,
+            devCreditsGrantedAt: null,
+            credits: 0,
+            spaceships: { none: { components: { some: { tier: { gt: 1 } } } } }
+          },
+          data: { credits: { increment: DEV_STARTING_CREDITS }, devCreditsGrantedAt: now }
+        });
+        return pilot;
       });
 
       const { token, components, shipAttributes } = await signSession(player, { ttlSeconds: DEV_TOKEN_TTL_SECONDS });
