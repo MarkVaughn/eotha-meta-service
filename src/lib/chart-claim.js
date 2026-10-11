@@ -1,7 +1,7 @@
 import { verify } from 'node:crypto';
 
 export const PLANET_CHART_DOMAIN = Buffer.from('EOTHA_PLANET_CHART_V1', 'utf8'); // 21 bytes
-export const SYSTEM_CHART_DOMAIN = Buffer.from('EOTHA_SYSTEM_CHART_V1', 'utf8'); // 21 bytes
+export const SYSTEM_CHART_DOMAIN = Buffer.from('EOTHA_SYSTEM_CHART_V2', 'utf8'); // 21 bytes
 
 function lenPrefixed(value) {
   const bytes = Buffer.from(value, 'utf8');
@@ -33,13 +33,16 @@ export function canonicalPlanetChartPayload(key, surveyHashBuffer) {
   ]);
 }
 
-export function canonicalSystemChartPayload(key) {
+// Mirrors eotha-rtse `system_chart_signing_payload`. `systemDigest` is the 32-byte SHA-256 over the
+// survey hashes of every planet in the system, ordered by planet id.
+export function canonicalSystemChartPayload(key, systemDigestBuffer) {
   return Buffer.concat([
     SYSTEM_CHART_DOMAIN,
     lenPrefixed(key.pilotId),
     lenPrefixed(key.systemH3),
     u32(key.totalBodiesCharted),
-    u64(key.chartedAtMs)
+    u64(key.chartedAtMs),
+    systemDigestBuffer // 32 bytes SHA-256
   ]);
 }
 
@@ -66,9 +69,12 @@ export function verifyPlanetChartKey(chartKey, signature, surveyHash, publicKey)
   }
 }
 
-export function verifySystemChartSignature(key, publicKey) {
+// `key` carries { systemH3, pilotId, totalBodiesCharted, chartedAtMs, signature }; `systemDigest`
+// must be the 32-byte digest the RTSE signed. A key without one (a V1 key) never verifies.
+export function verifySystemChartSignature(key, systemDigest, publicKey) {
+  if (!Buffer.isBuffer(systemDigest) || systemDigest.length !== 32) return false;
   try {
-    return verifyPayload(canonicalSystemChartPayload(key), key.signature, publicKey);
+    return verifyPayload(canonicalSystemChartPayload(key, systemDigest), key.signature, publicKey);
   } catch {
     return false;
   }

@@ -132,6 +132,53 @@ export function scanResultToJSON(object) {
             return "UNRECOGNIZED";
     }
 }
+/** Outcome of a system chart claim */
+export var SystemChartClaimResult;
+(function (SystemChartClaimResult) {
+    SystemChartClaimResult[SystemChartClaimResult["SYSTEM_CHART_CLAIM_RESULT_UNSPECIFIED"] = 0] = "SYSTEM_CHART_CLAIM_RESULT_UNSPECIFIED";
+    /** SYSTEM_CHART_CLAIM_RESULT_SUCCESS - Every body charted; `system_key` carries the signed key */
+    SystemChartClaimResult[SystemChartClaimResult["SYSTEM_CHART_CLAIM_RESULT_SUCCESS"] = 1] = "SYSTEM_CHART_CLAIM_RESULT_SUCCESS";
+    /** SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM - `system_h3` is not a valid system cell */
+    SystemChartClaimResult[SystemChartClaimResult["SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM"] = 2] = "SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM";
+    /** SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE - The pilot has not fully charted every body in the system */
+    SystemChartClaimResult[SystemChartClaimResult["SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE"] = 3] = "SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE";
+    SystemChartClaimResult[SystemChartClaimResult["UNRECOGNIZED"] = -1] = "UNRECOGNIZED";
+})(SystemChartClaimResult || (SystemChartClaimResult = {}));
+export function systemChartClaimResultFromJSON(object) {
+    switch (object) {
+        case 0:
+        case "SYSTEM_CHART_CLAIM_RESULT_UNSPECIFIED":
+            return SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_UNSPECIFIED;
+        case 1:
+        case "SYSTEM_CHART_CLAIM_RESULT_SUCCESS":
+            return SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_SUCCESS;
+        case 2:
+        case "SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM":
+            return SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM;
+        case 3:
+        case "SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE":
+            return SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE;
+        case -1:
+        case "UNRECOGNIZED":
+        default:
+            return SystemChartClaimResult.UNRECOGNIZED;
+    }
+}
+export function systemChartClaimResultToJSON(object) {
+    switch (object) {
+        case SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_UNSPECIFIED:
+            return "SYSTEM_CHART_CLAIM_RESULT_UNSPECIFIED";
+        case SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_SUCCESS:
+            return "SYSTEM_CHART_CLAIM_RESULT_SUCCESS";
+        case SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM:
+            return "SYSTEM_CHART_CLAIM_RESULT_UNKNOWN_SYSTEM";
+        case SystemChartClaimResult.SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE:
+            return "SYSTEM_CHART_CLAIM_RESULT_SURVEY_INCOMPLETE";
+        case SystemChartClaimResult.UNRECOGNIZED:
+        default:
+            return "UNRECOGNIZED";
+    }
+}
 function createBasePlanetaryResource() {
     return { resourceType: "", isVolatileGas: false, abundance: 0, grade: 0, purityPct: 0, harmonicFrequencyHz: 0 };
 }
@@ -1449,7 +1496,14 @@ export const ClaimSystemChartRequest = {
     },
 };
 function createBaseSystemChartKey() {
-    return { systemH3: "", pilotId: "", totalBodiesCharted: 0, chartedAtMs: "0", signature: Buffer.alloc(0) };
+    return {
+        systemH3: "",
+        pilotId: "",
+        totalBodiesCharted: 0,
+        chartedAtMs: "0",
+        signature: Buffer.alloc(0),
+        systemDigest: Buffer.alloc(0),
+    };
 }
 export const SystemChartKey = {
     encode(message, writer = new BinaryWriter()) {
@@ -1467,6 +1521,9 @@ export const SystemChartKey = {
         }
         if (message.signature.length !== 0) {
             writer.uint32(42).bytes(message.signature);
+        }
+        if (message.systemDigest.length !== 0) {
+            writer.uint32(50).bytes(message.systemDigest);
         }
         return writer;
     },
@@ -1518,6 +1575,13 @@ export const SystemChartKey = {
                         message.signature = Buffer.from(reader.bytes());
                         continue;
                     }
+                    case 6: {
+                        if (tag !== 50) {
+                            break;
+                        }
+                        message.systemDigest = Buffer.from(reader.bytes());
+                        continue;
+                    }
                 }
                 if ((tag & 7) === 4 || tag === 0) {
                     break;
@@ -1553,6 +1617,11 @@ export const SystemChartKey = {
                     ? globalThis.String(object.charted_at_ms)
                     : "0",
             signature: isSet(object.signature) ? Buffer.from(bytesFromBase64(object.signature)) : Buffer.alloc(0),
+            systemDigest: isSet(object.systemDigest)
+                ? Buffer.from(bytesFromBase64(object.systemDigest))
+                : isSet(object.system_digest)
+                    ? Buffer.from(bytesFromBase64(object.system_digest))
+                    : Buffer.alloc(0),
         };
     },
     toJSON(message) {
@@ -1572,6 +1641,9 @@ export const SystemChartKey = {
         if (message.signature.length !== 0) {
             obj.signature = base64FromBytes(message.signature);
         }
+        if (message.systemDigest.length !== 0) {
+            obj.systemDigest = base64FromBytes(message.systemDigest);
+        }
         return obj;
     },
     create(base) {
@@ -1584,6 +1656,7 @@ export const SystemChartKey = {
         message.totalBodiesCharted = object.totalBodiesCharted ?? 0;
         message.chartedAtMs = object.chartedAtMs ?? "0";
         message.signature = object.signature ?? Buffer.alloc(0);
+        message.systemDigest = object.systemDigest ?? Buffer.alloc(0);
         return message;
     },
 };
@@ -1669,6 +1742,176 @@ export const ClaimSystemChartResponse = {
     fromPartial(object) {
         const message = createBaseClaimSystemChartResponse();
         message.systemH3 = object.systemH3 ?? "";
+        message.systemKey = (object.systemKey !== undefined && object.systemKey !== null)
+            ? SystemChartKey.fromPartial(object.systemKey)
+            : undefined;
+        return message;
+    },
+};
+function createBaseSystemChartClaimRequest() {
+    return { systemH3: "" };
+}
+export const SystemChartClaimRequest = {
+    encode(message, writer = new BinaryWriter()) {
+        if (message.systemH3 !== "") {
+            writer.uint32(10).string(message.systemH3);
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        const previousRecursionDepth = reader.__tsProtoDecodeDepth ?? 0;
+        if (previousRecursionDepth >= 100) {
+            throw new globalThis.Error("protobuf decode recursion limit exceeded");
+        }
+        reader.__tsProtoDecodeDepth = previousRecursionDepth + 1;
+        try {
+            const end = length === undefined ? reader.len : reader.pos + length;
+            const message = createBaseSystemChartClaimRequest();
+            while (reader.pos < end) {
+                const tag = reader.uint32();
+                switch (tag >>> 3) {
+                    case 1: {
+                        if (tag !== 10) {
+                            break;
+                        }
+                        message.systemH3 = reader.string();
+                        continue;
+                    }
+                }
+                if ((tag & 7) === 4 || tag === 0) {
+                    break;
+                }
+                reader.skip(tag & 7);
+            }
+            return message;
+        }
+        finally {
+            reader.__tsProtoDecodeDepth = previousRecursionDepth;
+        }
+    },
+    fromJSON(object) {
+        return {
+            systemH3: isSet(object.systemH3)
+                ? globalThis.String(object.systemH3)
+                : isSet(object.system_h3)
+                    ? globalThis.String(object.system_h3)
+                    : "",
+        };
+    },
+    toJSON(message) {
+        const obj = {};
+        if (message.systemH3 !== "") {
+            obj.systemH3 = message.systemH3;
+        }
+        return obj;
+    },
+    create(base) {
+        return SystemChartClaimRequest.fromPartial(base ?? {});
+    },
+    fromPartial(object) {
+        const message = createBaseSystemChartClaimRequest();
+        message.systemH3 = object.systemH3 ?? "";
+        return message;
+    },
+};
+function createBaseSystemChartClaimResponse() {
+    return { systemH3: "", result: 0, systemKey: undefined };
+}
+export const SystemChartClaimResponse = {
+    encode(message, writer = new BinaryWriter()) {
+        if (message.systemH3 !== "") {
+            writer.uint32(10).string(message.systemH3);
+        }
+        if (message.result !== 0) {
+            writer.uint32(16).int32(message.result);
+        }
+        if (message.systemKey !== undefined) {
+            SystemChartKey.encode(message.systemKey, writer.uint32(26).fork()).join();
+        }
+        return writer;
+    },
+    decode(input, length) {
+        const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+        const previousRecursionDepth = reader.__tsProtoDecodeDepth ?? 0;
+        if (previousRecursionDepth >= 100) {
+            throw new globalThis.Error("protobuf decode recursion limit exceeded");
+        }
+        reader.__tsProtoDecodeDepth = previousRecursionDepth + 1;
+        try {
+            const end = length === undefined ? reader.len : reader.pos + length;
+            const message = createBaseSystemChartClaimResponse();
+            while (reader.pos < end) {
+                const tag = reader.uint32();
+                switch (tag >>> 3) {
+                    case 1: {
+                        if (tag !== 10) {
+                            break;
+                        }
+                        message.systemH3 = reader.string();
+                        continue;
+                    }
+                    case 2: {
+                        if (tag !== 16) {
+                            break;
+                        }
+                        message.result = reader.int32();
+                        continue;
+                    }
+                    case 3: {
+                        if (tag !== 26) {
+                            break;
+                        }
+                        message.systemKey = SystemChartKey.decode(reader, reader.uint32());
+                        continue;
+                    }
+                }
+                if ((tag & 7) === 4 || tag === 0) {
+                    break;
+                }
+                reader.skip(tag & 7);
+            }
+            return message;
+        }
+        finally {
+            reader.__tsProtoDecodeDepth = previousRecursionDepth;
+        }
+    },
+    fromJSON(object) {
+        return {
+            systemH3: isSet(object.systemH3)
+                ? globalThis.String(object.systemH3)
+                : isSet(object.system_h3)
+                    ? globalThis.String(object.system_h3)
+                    : "",
+            result: isSet(object.result) ? systemChartClaimResultFromJSON(object.result) : 0,
+            systemKey: isSet(object.systemKey)
+                ? SystemChartKey.fromJSON(object.systemKey)
+                : isSet(object.system_key)
+                    ? SystemChartKey.fromJSON(object.system_key)
+                    : undefined,
+        };
+    },
+    toJSON(message) {
+        const obj = {};
+        if (message.systemH3 !== "") {
+            obj.systemH3 = message.systemH3;
+        }
+        if (message.result !== 0) {
+            obj.result = systemChartClaimResultToJSON(message.result);
+        }
+        if (message.systemKey !== undefined) {
+            obj.systemKey = SystemChartKey.toJSON(message.systemKey);
+        }
+        return obj;
+    },
+    create(base) {
+        return SystemChartClaimResponse.fromPartial(base ?? {});
+    },
+    fromPartial(object) {
+        const message = createBaseSystemChartClaimResponse();
+        message.systemH3 = object.systemH3 ?? "";
+        message.result = object.result ?? 0;
         message.systemKey = (object.systemKey !== undefined && object.systemKey !== null)
             ? SystemChartKey.fromPartial(object.systemKey)
             : undefined;
