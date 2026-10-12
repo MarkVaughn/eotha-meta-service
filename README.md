@@ -281,12 +281,12 @@ Whichever way the account row is created, the `databaseHooks.account.create.afte
 
 ### Engine claim key
 
-The RTSE signs mission completion claims, planet charts and system charts with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
+The RTSE signs mission completion claims, planet charts, system charts and docked receipts with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
 
 - `CLAIM_PUBLIC_KEY`: the raw 32-byte Ed25519 public key as 64 hex characters.
 - `CLAIM_PUBLIC_KEY_FILE`: optional path to a file holding the same hex or a PEM public key. If both are set they must name the same key, otherwise startup fails. An unreadable or malformed key also fails startup; a blank variable counts as unset.
 - Startup logs `Engine claims are verified with Ed25519 key sha256:<16 hex>`, the fingerprint of the key in use, and never any key material.
-- With neither set, startup logs a warning and `POST /game/missions/complete`, `POST /game/charts/register-planet` and `POST /game/charts/claim-system` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
+- With neither set, startup logs a warning and `POST /game/missions/complete`, `POST /game/charts/register-planet` `POST /game/charts/claim-system` and `POST /ship/upgrade` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
 - System charts are verified under `EOTHA_SYSTEM_CHART_V2`: `POST /game/charts/claim-system` requires `systemKey.systemDigest` (base64 of the 32-byte SHA-256 of the system's planet survey hashes, in planet id order) beside the signed fields, and the signature must cover it. V1 keys without a digest are refused.
 - `keys/public.pem` is the login key and is never used to verify claims, so a claim signed with the login key is refused with `403`.
 
