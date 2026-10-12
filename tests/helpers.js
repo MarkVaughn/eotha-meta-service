@@ -7,7 +7,7 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 
 const dbName = new URL(process.env.DATABASE_URL ?? 'postgresql://localhost/').pathname.slice(1);
 if (!dbName.endsWith('_test')) {
@@ -79,6 +79,48 @@ export async function newPilot(prefix = 'Pilot') {
   if (login.statusCode !== 200) throw new Error(`login failed: ${login.statusCode} ${login.body}`);
   const { token } = json(login);
   return { id, email, callsign, token, headers: { authorization: `Bearer ${token}` } };
+}
+
+/**
+ * A docked receipt signed the way the engine signs it (eotha-contracts `DockedReceipt`): Ed25519 over
+ * the domain, then the length-prefixed pilot id, the 16 raw bytes of the station id, the
+ * length-prefixed system cell, both times as u64 LE and the 16-byte nonce. The bytes are assembled
+ * here, not with src/lib/docked-receipt.js, so the verifier is checked against an independent
+ * encoder. `overrides` replace any field before signing; pass `signer` to sign with another key.
+ * `pilot` is a newPilot() result, a guest session, or a bare player id.
+ */
+export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
+  const nowMs = Date.now();
+  const receipt = {
+    pilotId: typeof pilot === 'string' ? pilot : (pilot.id ?? pilot.player.id),
+    dockedEntityId: randomUUID(),
+    systemH3: '8828308281fffff',
+    dockedAtMs: nowMs - 2_000,
+    issuedAtMs: nowMs,
+    nonce: randomBytes(16).toString('base64'),
+    ...overrides
+  };
+  const str = (value) => {
+    const bytes = Buffer.from(value, 'utf8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(bytes.length);
+    return Buffer.concat([len, bytes]);
+  };
+  const u64 = (value) => {
+    const buf = Buffer.alloc(8);
+    buf.writeBigUInt64LE(BigInt(value));
+    return buf;
+  };
+  const payload = Buffer.concat([
+    Buffer.from('EOTHA_DOCKED_RECEIPT_V1', 'ascii'),
+    str(receipt.pilotId),
+    Buffer.from(receipt.dockedEntityId.replaceAll('-', ''), 'hex'),
+    str(receipt.systemH3),
+    u64(receipt.dockedAtMs),
+    u64(receipt.issuedAtMs),
+    Buffer.from(receipt.nonce, 'base64')
+  ]);
+  return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }
 
 export const call = (pilot, method, url, payload) => app.inject({ method, url, headers: pilot.headers, payload });

@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
-import { app, attestationDouble, attestationHeaders, closeApp, json, keysDir, newPilot, PASSWORD } from './helpers.js';
+import { app, attestationDouble, attestationHeaders, closeApp, dockedReceipt, json, keysDir, newPilot, PASSWORD } from './helpers.js';
 import { DEV_STARTING_CREDITS } from '../src/config/dev.js';
 import { upgradeCost } from '../src/config/components.js';
 import prismaPlugin from '../src/plugins/prisma.js';
@@ -194,11 +194,11 @@ describe('dev login starting credits', () => {
     return body;
   };
   const row = (id) => server.prisma.player.findUnique({ where: { id } });
-  const upgrade = (token, componentType, targetTier) => app.inject({
+  const upgrade = (token, playerId, componentType, targetTier) => app.inject({
     method: 'POST',
     url: '/ship/upgrade',
     headers: { authorization: `Bearer ${token}` },
-    payload: { componentType, targetTier }
+    payload: { componentType, targetTier, dockedReceipt: dockedReceipt(playerId) }
   });
 
   test('a new dev pilot is granted the starting credits once', async () => {
@@ -324,9 +324,9 @@ describe('dev login starting credits', () => {
     assert.equal(first.player.ship.ship_attributes.max_speed_mps, 20);
 
     // Tier 1 hull budgets only the default loadout, so the hull is raised before the engines.
-    const hull = await upgrade(first.token, 'HULL', 2);
+    const hull = await upgrade(first.token, first.player.id, 'HULL', 2);
     assert.equal(hull.statusCode, 200);
-    const engines = await upgrade(first.token, 'ENGINES', 4);
+    const engines = await upgrade(first.token, first.player.id, 'ENGINES', 4);
     assert.equal(engines.statusCode, 200);
     const upgraded = json(engines);
     const cost = upgradeCost(1, 2) + upgradeCost(1, 4);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { sign } from 'node:crypto';
 import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey, setCredits } from './helpers.js';
 import { generateMissionOffers } from '../src/config/missions.js';
-import { generateCellNodes } from '../src/lib/procedural.js';
+import { generateCellNodes, systemsWithin } from '../src/lib/procedural.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 
 // The nearest station to the starter spawn (San Francisco): the engine puts none in the spawn system.
@@ -126,7 +126,11 @@ describe('authoritative missions', () => {
 
     // A berth count above capacity is rejected even though the engine would generate the offer
     // for a bigger ship.
-    const big = generateMissionOffers({ stationId: STATION, systemH3: SYSTEM, availableBerths: 4, nowMs: Date.now() })
+    // Whether a station's board holds one depends on the 30-minute window, so look across nearby stations.
+    const nowMs = Date.now();
+    const big = systemsWithin(SYSTEM, 3)
+      .flatMap(({ cell }) => generateCellNodes(cell).filter((n) => n.isStation).map((n) => ({ cell, id: n.id })))
+      .flatMap(({ cell, id }) => generateMissionOffers({ stationId: id, systemH3: cell, availableBerths: 4, nowMs }))
       .find((o) => o.required_berths > 2);
     assert.ok(big, 'expected at least one high-berth offer');
     assert.equal((await accept(pilot, big)).statusCode, 400);
