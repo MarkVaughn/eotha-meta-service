@@ -37,7 +37,7 @@ describe('computeShipAttributes', () => {
   test('computes Tier 5 values for every component', () => {
     const a = computeShipAttributes(COMPONENT_TYPES.map((type) => ({ type, tier: 5 })));
     assert.deepEqual(a, {
-      max_hull_hp: 2000, dry_mass_kg: 4000,
+      max_hull_hp: 2000, dry_mass_kg: 4000, hull_tier: 5,
       max_shield_hp: 1000, shield_regen_rate: 50,
       radar_range_m: 4000, identification_range_m: 2000, cargo_capacity_m3: 320, stealth_rating: 0.8,
       signature_dissipation_rate: 2.2,
@@ -47,6 +47,13 @@ describe('computeShipAttributes', () => {
       passenger_capacity: 50,
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5
     });
+  });
+
+  test('reports the HULL component tier as hull_tier for tiers 1 to 5', () => {
+    for (let tier = 1; tier <= 5; tier++) {
+      assert.equal(computeShipAttributes([{ type: 'HULL', tier }]).hull_tier, tier);
+    }
+    assert.equal(computeShipAttributes([]).hull_tier, 1);
   });
 
   test('maps every life support tier to its passenger capacity', () => {
@@ -159,6 +166,21 @@ describe('ship components over HTTP', () => {
     assert.deepEqual(decoded.ship_attributes, computeShipAttributes(defaultComponents()));
     assert.equal(decoded.ship_attributes.identification_range_m, 150);
     assert.equal(decoded.ship_attributes.signature_dissipation_rate, 1.0);
+    assert.equal(decoded.ship_attributes.hull_tier, 1);
+  });
+
+  test('hull_tier 1 to 5 appears in the token, and upgrade reissues carry the new tier', async () => {
+    const pilot = await newPilot('HullTier');
+    await setCredits(pilot, 100_000);
+    for (let tier = 2; tier <= 5; tier++) {
+      const up = await upgrade(pilot, 'HULL', tier);
+      assert.equal(up.statusCode, 200);
+      const body = json(up);
+      assert.equal(body.ship_attributes.hull_tier, tier);
+      assert.equal(app.jwt.verify(body.token).ship_attributes.hull_tier, tier);
+    }
+    const current = await call(pilot, 'GET', '/ship/loadout');
+    assert.equal(json(current).ship_attributes.hull_tier, 5);
   });
 
   test('GET /ship/loadout creates one default ship per pilot, even under concurrency', async () => {

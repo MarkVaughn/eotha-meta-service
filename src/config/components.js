@@ -32,7 +32,8 @@ const ZERO_TIER_OVERRIDES = {
 const TIER_TABLE = {
   HULL: {
     max_hull_hp: [100, 250, 500, 1000, 2000],
-    dry_mass_kg: [1000, 1500, 2200, 3000, 4000]
+    dry_mass_kg: [1000, 1500, 2200, 3000, 4000],
+    hull_tier: [1, 2, 3, 4, 5]
   },
   SHIELDS: {
     max_shield_hp: [50, 120, 250, 500, 1000],
