@@ -46,6 +46,7 @@ describe('guest login', () => {
     const claims = app.jwt.verify(guest.token);
     assert.equal(claims.sub, guest.player.id);
     assert.equal(claims.callsign, guest.player.callsign);
+    assert.equal(claims.ship_attributes.hull_tier, 1);
     assert.ok(claims.home_h3);
     assert.ok(claims.ship_attributes.max_hull_hp);
     assert.equal(claims.mock, undefined);
