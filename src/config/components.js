@@ -94,11 +94,18 @@ export function totalSubsystemPoints(components = []) {
     .reduce((sum, c) => sum + (Number.isInteger(c.tier) ? c.tier : 0), 0);
 }
 
+/** Passengers aboard bounded to 0..capacity; anything that is not a whole number counts as 0. */
+export function clampPassengers(count, capacity) {
+  if (!Number.isInteger(count) || count < 0) return 0;
+  return Math.min(count, Math.max(0, Math.floor(capacity)));
+}
+
 /**
  * Deterministically derive ship attributes from a list of `{ type, tier }`
- * components. Missing components (and invalid tiers) default to Tier 1.
+ * components. Missing components (and invalid tiers) default to Tier 1. `passengersAboard` is the
+ * ship's persisted manifest count; it is clamped to the life support's passenger_capacity.
  */
-export function computeShipAttributes(components = []) {
+export function computeShipAttributes(components = [], passengersAboard = 0) {
   const tiers = {};
   for (const c of components) {
     if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
@@ -113,5 +120,6 @@ export function computeShipAttributes(components = []) {
       attributes[attr] = tier === 0 ? (ZERO_TIER_OVERRIDES[attr] ?? 0) : values[tier - 1];
     }
   }
+  attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity);
   return attributes;
 }

@@ -3,12 +3,14 @@ import {
   ESSENTIAL_COMPONENTS,
   MIN_TIER,
   MAX_TIER,
+  clampPassengers,
   computeShipAttributes,
   defaultComponents,
   upgradeCost,
   hullBudget,
   totalSubsystemPoints
 } from '../../config/components.js';
+import { devPassengersEnabled } from '../../config/dev.js';
 import { H3_PATTERN } from '../../config/missions.js';
 import {
   DOCKED_ENTITY_ID_PATTERN,
@@ -46,17 +48,29 @@ const upgradeSchema = {
   }
 };
 
-function toLoadout(shipId, components) {
+// Development-only: sets the passenger count directly, since boarding is not a feature yet.
+const devPassengersSchema = {
+  body: {
+    type: 'object',
+    required: ['passengersAboard'],
+    additionalProperties: false,
+    properties: { passengersAboard: { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER } }
+  }
+};
+
+function toLoadout(shipId, components, passengersAboard) {
   const list = COMPONENT_TYPES.map((type) => {
     const found = components.find((c) => c.type === type);
     const fallbackTier = ESSENTIAL_COMPONENTS.includes(type) ? MIN_TIER : 0;
     return { type, tier: found?.tier ?? fallbackTier, healthPct: found?.healthPct ?? 100 };
   });
-  return { ship_id: shipId, components: list, ship_attributes: computeShipAttributes(list) };
+  return { ship_id: shipId, components: list, ship_attributes: computeShipAttributes(list, passengersAboard) };
 }
 
 export default async function shipRoutes(fastify, opts) {
   const prisma = fastify.prisma;
+  // In production the test-only passenger route is never registered.
+  const devPassengers = opts.devPassengers ?? devPassengersEnabled();
 
   fastify.addHook('onRequest', fastify.authenticate);
 
@@ -94,8 +108,28 @@ export default async function shipRoutes(fastify, opts) {
 
   fastify.get('/loadout', async (request) => {
     const ship = await withActiveShip(request, async (tx, active) => active);
-    return toLoadout(ship.id, ship.components);
+    return toLoadout(ship.id, ship.components, ship.passengersAboard);
   });
+
+  if (devPassengers) {
+    fastify.post('/dev/passengers', { schema: devPassengersSchema }, async (request, reply) => {
+      const { passengersAboard } = request.body;
+      const outcome = await withActiveShip(request, async (tx, ship) => {
+        const capacity = computeShipAttributes(ship.components).passenger_capacity;
+        if (passengersAboard > capacity) {
+          return fail(400, `Passengers aboard cannot exceed the passenger capacity of ${capacity}.`, {
+            code: 'passengers_exceed_capacity',
+            passenger_capacity: capacity
+          });
+        }
+        await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+        return { shipId: ship.id, components: ship.components, passengersAboard };
+      });
+      if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
+      const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard);
+      return { ...loadout, token: reissueToken(request, loadout) };
+    });
+  }
 
   fastify.post('/upgrade', { schema: upgradeSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const { componentType, targetTier, dockedReceipt } = request.body;
@@ -181,15 +215,20 @@ export default async function shipRoutes(fastify, opts) {
         await tx.shipComponentRecord.create({ data: { spaceshipId: ship.id, type: componentType, tier: targetTier } });
       }
 
-      const [components, player] = await Promise.all([
-        tx.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } }),
-        tx.player.findUnique({ where: { id: playerId }, select: { credits: true } })
-      ]);
-      return { shipId: ship.id, components, cost, credits: player.credits };
+      // A component change can lower the passenger capacity; persist the clamped count with it.
+      const components = await tx.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } });
+      const capacity = computeShipAttributes(components).passenger_capacity;
+      const passengersAboard = clampPassengers(ship.passengersAboard, capacity);
+      if (passengersAboard !== ship.passengersAboard) {
+        await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+      }
+
+      const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { shipId: ship.id, components, passengersAboard, cost, credits: player.credits };
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-    const loadout = toLoadout(outcome.shipId, outcome.components);
+    const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard);
     return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(request, loadout) };
   });
 }

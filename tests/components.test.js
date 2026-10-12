@@ -1,11 +1,20 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { app, call, closeApp, credits, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
+import Fastify from 'fastify';
+import {
+  PASSWORD, app, attestationHeaders, call, closeApp, credits, dockedReceipt, json, keysDir, newPilot, setCredits
+} from './helpers.js';
+import { devPassengersEnabled } from '../src/config/dev.js';
+import prismaPlugin from '../src/plugins/prisma.js';
+import securityPlugin from '../src/plugins/security.js';
+import claimKeyPlugin from '../src/plugins/claim-key.js';
+import shipRoutes from '../src/routes/ship/index.js';
 import {
   computeShipAttributes,
   defaultComponents,
   COMPONENT_TYPES,
   OPTIONAL_COMPONENTS,
+  clampPassengers,
   hullBudget,
   totalSubsystemPoints,
   upgradeCost,
@@ -45,7 +54,8 @@ describe('computeShipAttributes', () => {
       energy_capacity: 1500, energy_regen_rate: 75,
       comms_range_m: 25000, max_speed_mps: 100,
       passenger_capacity: 50,
-      sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5
+      sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
+      passengers_aboard: 0
     });
   });
 
@@ -54,6 +64,18 @@ describe('computeShipAttributes', () => {
       assert.equal(computeShipAttributes([{ type: 'HULL', tier }]).hull_tier, tier);
     }
     assert.equal(computeShipAttributes([]).hull_tier, 1);
+  });
+
+  test('passengers_aboard defaults to 0 and is clamped to the passenger capacity', () => {
+    assert.equal(computeShipAttributes([]).passengers_aboard, 0);
+    assert.equal(computeShipAttributes(defaultComponents()).passengers_aboard, 0);
+    assert.equal(computeShipAttributes([], 2).passengers_aboard, 2);
+    assert.equal(computeShipAttributes([], 40).passengers_aboard, 2);
+    assert.equal(computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: 4 }], 15).passengers_aboard, 15);
+    assert.equal(computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: 4 }], 21).passengers_aboard, 20);
+    for (const bad of [-1, 1.5, NaN, null, undefined, '3']) {
+      assert.equal(clampPassengers(bad, 10), 0, `${bad}`);
+    }
   });
 
   test('maps every life support tier to its passenger capacity', () => {
@@ -181,6 +203,121 @@ describe('ship components over HTTP', () => {
     }
     const current = await call(pilot, 'GET', '/ship/loadout');
     assert.equal(json(current).ship_attributes.hull_tier, 5);
+  });
+
+  test('a new ship has no passengers aboard, in the loadout and in the token', async () => {
+    const pilot = await newPilot('NoPax');
+    assert.equal(app.jwt.verify(pilot.token).ship_attributes.passengers_aboard, 0);
+    const lo = await loadout(pilot);
+    assert.equal(lo.ship_attributes.passengers_aboard, 0);
+    assert.equal(
+      (await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } })).passengersAboard,
+      0
+    );
+  });
+
+  test('persisted passengers_aboard is in the loadout, the login token and upgrade tokens', async () => {
+    const pilot = await newPilot('Pax');
+    await setCredits(pilot, 100_000);
+    await loadout(pilot);
+    await app.prisma.spaceship.updateMany({ where: { playerId: pilot.id }, data: { passengersAboard: 2 } });
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+
+    const login = await app.inject({
+      method: 'POST',
+      url: '/auth/login',
+      headers: attestationHeaders,
+      payload: { email: pilot.email, password: PASSWORD, deviceId: 'login-test-device-id' }
+    });
+    assert.equal(app.jwt.verify(json(login).token).ship_attributes.passengers_aboard, 2);
+
+    assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 200); // Tier 1 hull budget is full
+    const up = json(await upgrade(pilot, 'RADAR', 2));
+    assert.equal(up.ship_attributes.passengers_aboard, 2);
+    assert.equal(app.jwt.verify(up.token).ship_attributes.passengers_aboard, 2);
+  });
+
+  test('a count above the passenger capacity is clamped in the loadout and persisted by a component change', async () => {
+    const pilot = await newPilot('PaxClamp');
+    await setCredits(pilot, 100_000);
+    await loadout(pilot);
+    // Capacity is 2 at life support Tier 1; 40 is the state left behind if capacity ever drops.
+    await app.prisma.spaceship.updateMany({ where: { playerId: pilot.id }, data: { passengersAboard: 40 } });
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+    // The loadout only clamps what it reports; the stored count is untouched until a component changes.
+    assert.equal((await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } })).passengersAboard, 40);
+
+    assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 200); // Tier 1 hull budget is full
+    const up = json(await upgrade(pilot, 'RADAR', 2));
+    assert.equal(up.ship_attributes.passengers_aboard, 2);
+    assert.equal(app.jwt.verify(up.token).ship_attributes.passengers_aboard, 2);
+    const stored = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } });
+    assert.equal(stored.passengersAboard, 2);
+  });
+
+  test('POST /ship/dev/passengers sets the count within capacity and reissues the token', async () => {
+    const pilot = await newPilot('DevPax');
+    await setCredits(pilot, 100_000);
+    const set = (n) => call(pilot, 'POST', '/ship/dev/passengers', { passengersAboard: n });
+
+    const ok = await set(2);
+    assert.equal(ok.statusCode, 200);
+    assert.equal(json(ok).ship_attributes.passengers_aboard, 2);
+    assert.equal(app.jwt.verify(json(ok).token).ship_attributes.passengers_aboard, 2);
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+
+    const over = await set(3);
+    assert.equal(over.statusCode, 400);
+    assert.equal(json(over).code, 'passengers_exceed_capacity');
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+
+    assert.equal((await set(-1)).statusCode, 400);
+    assert.equal((await set(1.5)).statusCode, 400);
+    assert.equal((await call(pilot, 'POST', '/ship/dev/passengers', {})).statusCode, 400);
+
+    // Capacity grows with life support, so a larger count becomes valid.
+    assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 200);
+    assert.equal((await upgrade(pilot, 'LIFE_SUPPORT', 2)).statusCode, 200);
+    assert.equal(json(await set(5)).ship_attributes.passengers_aboard, 5);
+    assert.equal(json(await set(0)).ship_attributes.passengers_aboard, 0);
+
+    const anon = await app.inject({ method: 'POST', url: '/ship/dev/passengers', payload: { passengersAboard: 1 } });
+    assert.equal(anon.statusCode, 401);
+  });
+
+  test('POST /ship/dev/passengers is not registered in production', async () => {
+    const buildShipApp = async (opts) => {
+      const server = Fastify();
+      await server.register(prismaPlugin);
+      await server.register(securityPlugin, { keysDir });
+      await server.register(claimKeyPlugin);
+      await server.register(shipRoutes, { prefix: '/ship', ...opts });
+      await server.ready();
+      return server;
+    };
+    const pilot = await newPilot('ProdPax');
+    const send = (server) => server.inject({
+      method: 'POST',
+      url: '/ship/dev/passengers',
+      headers: pilot.headers,
+      payload: { passengersAboard: 1 }
+    });
+
+    const production = await buildShipApp({ devPassengers: false });
+    const enabled = await buildShipApp({ devPassengers: true });
+    try {
+      assert.equal((await send(production)).statusCode, 404);
+      assert.equal((await send(enabled)).statusCode, 200);
+    } finally {
+      await production.close();
+      await enabled.close();
+    }
+  });
+
+  test('the dev passenger route is enabled by default everywhere but production', () => {
+    assert.equal(devPassengersEnabled('production'), false);
+    assert.equal(devPassengersEnabled('development'), true);
+    assert.equal(devPassengersEnabled('test'), true);
   });
 
   test('GET /ship/loadout creates one default ship per pilot, even under concurrency', async () => {
