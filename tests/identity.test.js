@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import Fastify from 'fastify';
 import { createLocalJWKSet, jwtVerify } from 'jose';
 import {
-  app, attestationDouble, attestationHeaders, call, closeApp, GOOD_ATTESTATION, json, keysDir, newPilot,
+  app, attestationDouble, attestationHeaders, call, closeApp, dockedReceipt, GOOD_ATTESTATION, json, keysDir, newPilot,
   PASSWORD, setCredits, track
 } from './helpers.js';
 import { createPlayIntegrityVerifier } from '../src/lib/attestation/play-integrity.js';
@@ -209,7 +209,8 @@ describe('linking an email account', () => {
 
 describe('guest hull lock', () => {
   const upgrade = (session, componentType, targetTier) => app.inject({
-    method: 'POST', url: '/ship/upgrade', headers: { authorization: `Bearer ${session.token}` }, payload: { componentType, targetTier }
+    method: 'POST', url: '/ship/upgrade', headers: { authorization: `Bearer ${session.token}` },
+    payload: { componentType, targetTier, dockedReceipt: dockedReceipt(session) }
   });
   const fundedGuest = async () => {
     const guest = await newGuest();
@@ -269,7 +270,9 @@ describe('guest hull lock', () => {
       method: 'POST',
       url: '/ship/upgrade',
       headers: { authorization: `Bearer ${guest.token}`, 'x-guest': 'false' },
-      payload: { componentType: 'HULL', targetTier: 2, isAnonymous: false, anonymous: false }
+      payload: {
+        componentType: 'HULL', targetTier: 2, isAnonymous: false, anonymous: false, dockedReceipt: dockedReceipt(guest)
+      }
     });
     assert.ok([400, 403].includes(res.statusCode));
     assert.notEqual(res.statusCode, 200);
@@ -389,7 +392,7 @@ describe('token lifetime', () => {
     const token = app.signWithExpiry({ ...claims, exp: exp5min });
 
     const res = await call({ headers: { authorization: `Bearer ${token}` } }, 'POST', '/ship/upgrade', {
-      componentType: 'HULL', targetTier: 2
+      componentType: 'HULL', targetTier: 2, dockedReceipt: dockedReceipt(guest)
     });
     assert.equal(res.statusCode, 200, res.body);
     const reissued = app.jwt.verify(json(res).token);

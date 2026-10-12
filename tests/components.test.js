@@ -1,6 +1,6 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { app, call, closeApp, credits, json, newPilot, setCredits } from './helpers.js';
+import { app, call, closeApp, credits, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
 import {
   computeShipAttributes,
   defaultComponents,
@@ -156,7 +156,7 @@ describe('ship components over HTTP', () => {
   after(async () => { await closeApp(); });
 
   const upgrade = (pilot, componentType, targetTier) =>
-    call(pilot, 'POST', '/ship/upgrade', { componentType, targetTier });
+    call(pilot, 'POST', '/ship/upgrade', { componentType, targetTier, dockedReceipt: dockedReceipt(pilot) });
   const loadout = async (pilot) => json(await call(pilot, 'GET', '/ship/loadout'));
   const tierOf = (lo, type) => lo.components.find((c) => c.type === type).tier;
 
