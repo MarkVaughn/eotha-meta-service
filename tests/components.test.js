@@ -52,7 +52,7 @@ describe('computeShipAttributes', () => {
       signature_dissipation_rate: 2.2,
       weapon_dps: 200, weapon_range_m: 1000,
       energy_capacity: 1500, energy_regen_rate: 75,
-      comms_range_m: 25000, max_speed_mps: 100,
+      comms_range_m: 25000, max_speed_mps: 343,
       passenger_capacity: 50,
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
       passengers_aboard: 0
@@ -111,10 +111,18 @@ describe('computeShipAttributes', () => {
     const a = computeShipAttributes(comps);
     assert.equal(a.max_hull_hp, 500);
     assert.equal(a.dry_mass_kg, 2200);
-    assert.equal(a.max_speed_mps, 35);
+    assert.equal(a.max_speed_mps, 40);
     assert.equal(a.radar_range_m, 500);
     assert.equal(a.identification_range_m, 150);
     assert.deepEqual(computeShipAttributes(comps), a);
+  });
+
+  test('maps every engine tier to its speed in m/s', () => {
+    const expected = [20, 40, 85, 170, 343];
+    expected.forEach((speed, i) => {
+      const a = computeShipAttributes([{ type: 'ENGINES', tier: i + 1 }]);
+      assert.equal(a.max_speed_mps, speed);
+    });
   });
 
   test('maps every radar tier to its identification range', () => {
