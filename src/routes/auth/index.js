@@ -27,7 +27,7 @@ export default async function authRoutes(fastify, opts) {
     const components = ship?.components?.length
       ? ship.components.map(({ type, tier, healthPct }) => ({ type, tier, healthPct }))
       : defaultComponents();
-    const shipAttributes = computeShipAttributes(components);
+    const shipAttributes = computeShipAttributes(components, ship?.passengersAboard);
     const claims = {
       sub: player.id,
       callsign: player.callsign,

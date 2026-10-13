@@ -5,3 +5,6 @@ export const DEV_LOGIN_EMAIL_DOMAIN = 'dev-login.invalid';
 
 // One-time starting balance of a development-login pilot (env DEV_STARTING_CREDITS).
 export const DEV_STARTING_CREDITS = env.DEV_STARTING_CREDITS;
+
+// The test-only passenger route (POST /ship/dev/passengers) exists in every environment but production.
+export const devPassengersEnabled = (nodeEnv = env.NODE_ENV) => nodeEnv !== 'production';
