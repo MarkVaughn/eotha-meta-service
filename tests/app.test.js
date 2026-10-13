@@ -331,12 +331,12 @@ describe('dev login starting credits', () => {
     const upgraded = json(engines);
     const cost = upgradeCost(1, 2) + upgradeCost(1, 4);
     assert.equal(upgraded.credits, DEV_STARTING_CREDITS - cost);
-    assert.equal(app.jwt.verify(upgraded.token).ship_attributes.max_speed_mps, 75);
+    assert.equal(app.jwt.verify(upgraded.token).ship_attributes.max_speed_mps, 170);
 
     const second = await devLogin(callsign);
     assert.equal(second.player.id, first.player.id);
-    assert.equal(second.player.ship.ship_attributes.max_speed_mps, 75);
-    assert.equal(server.jwt.verify(second.token).ship_attributes.max_speed_mps, 75);
+    assert.equal(second.player.ship.ship_attributes.max_speed_mps, 170);
+    assert.equal(server.jwt.verify(second.token).ship_attributes.max_speed_mps, 170);
     assert.equal(second.player.ship.components.find((c) => c.type === 'ENGINES').tier, 4);
     assert.equal((await row(first.player.id)).credits, DEV_STARTING_CREDITS - cost); // not re-credited
   });

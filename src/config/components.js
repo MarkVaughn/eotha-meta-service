@@ -57,7 +57,7 @@ const TIER_TABLE = {
     energy_regen_rate: [10, 20, 35, 50, 75]
   },
   COMMS: { comms_range_m: [1000, 2500, 5000, 10000, 25000] },
-  ENGINES: { max_speed_mps: [20, 35, 50, 75, 100] },
+  ENGINES: { max_speed_mps: [20, 40, 85, 170, 343] },
   LIFE_SUPPORT: { passenger_capacity: [2, 5, 10, 20, 50] },
   SENSORS: {
     sensor_range_m: [1500, 3000, 4500, 6000, 7500],
