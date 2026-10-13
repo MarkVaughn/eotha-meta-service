@@ -224,7 +224,7 @@ Taking off takes 0.5 s longer per passenger, so the real-time engine needs the s
 
 The count never exceeds `ship_attributes.passenger_capacity` (from the LIFE_SUPPORT tier): the attributes clamp it on every read, and `POST /ship/upgrade` writes the clamped count back if a component change leaves it above the new capacity.
 
-How passengers board is a later feature. Until then `POST /ship/dev/passengers` sets the count for testing; it exists only outside production (see [Economy](#economy)). Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
+How passengers board is a later feature. Until then `POST /ship/dev/passengers` sets the count for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
 
 ## Docked upgrades
 
