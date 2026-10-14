@@ -1,36 +1,69 @@
 import { computeShipAttributes } from '../../config/components.js';
+import { MAX_OFFER_FUTURE_SKEW_MS, MAX_REWARD_CREDITS, MISSION_COOLDOWN_MS } from '../../config/missions.js';
+import { H3_PATTERN, UUID_PATTERN } from '../../config/patterns.js';
 import {
-  H3_PATTERN,
-  STATION_PATTERN,
-  MISSION_COOLDOWN_MS,
-  MAX_REWARD_CREDITS,
-  isStationOf,
-  isSystemCell,
-  authenticateOffer,
-  UUID_PATTERN,
-  generateOffers
-} from '../../config/missions.js';
+  DOCKED_ENTITY_ID_PATTERN,
+  SIGNATURE_B64_PATTERN,
+  dockedReceiptRefusal,
+  dockedReceiptSchema
+} from '../../lib/docked-receipt.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
+import { MISSION_TYPES, verifyMissionOffer } from '../../lib/mission-offer.js';
+import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
-const availableSchema = {
+const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
+const uint32 = { type: 'integer', minimum: 0, maximum: 4_294_967_295 };
+const int32 = { type: 'integer', minimum: -2147483648, maximum: 2147483647 };
+const text = (maxLength) => ({ type: 'string', maxLength, default: '' });
+
+const cooldownSchema = {
   querystring: {
     type: 'object',
-    required: ['stationId', 'systemH3'],
-    properties: {
-      stationId: { type: 'string', pattern: STATION_PATTERN },
-      systemH3: { type: 'string', pattern: H3_PATTERN }
-    }
+    required: ['originId'],
+    properties: { originId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN } }
   }
 };
 
+// A `MissionOffer` (eotha-contracts `rtse/v1/mission.proto`) as proto-JSON, signed by the engine.
+// Proto-JSON may omit a field holding its zero value (a survey's `required_berths`, say), so those
+// default to it; the fields no genuine offer leaves at zero are required. Unknown fields are
+// dropped, so only what the engine signed is ever stored.
+const offerSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['mission_id', 'type', 'origin_station_id', 'origin_system_h3', 'offered_at_ms', 'expires_at_ms', 'pilot_id', 'signature'],
+  properties: {
+    mission_id: { type: 'string', pattern: UUID_PATTERN.source },
+    type: { type: 'string', enum: Object.keys(MISSION_TYPES) },
+    title: text(512),
+    description: text(4096),
+    origin_station_id: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
+    origin_system_h3: { type: 'string', pattern: H3_PATTERN },
+    destination_station_id: text(256),
+    destination_system_h3: text(256),
+    destination_node_h3: text(256),
+    destination_lat: { type: 'number', default: 0 },
+    destination_lng: { type: 'number', default: 0 },
+    distance_hexes: { ...uint32, default: 0 },
+    required_berths: { ...uint32, default: 0 },
+    duration_limit_ms: { ...uint, default: 0 },
+    reward_credits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS, default: 0 },
+    reputation_change: { ...int32, default: 0 },
+    faction_id: text(256),
+    expires_at_ms: uint,
+    offered_at_ms: uint,
+    pilot_id: { type: 'string', minLength: 1, maxLength: 256 },
+    signature: { type: 'string', pattern: SIGNATURE_B64_PATTERN }
+  }
+};
+
+// `dockedReceipt` is optional here on purpose: the route answers its absence with the coded 403
+// `docked_receipt_required` rather than a generic schema 400.
 const acceptSchema = {
   body: {
     type: 'object',
-    required: ['missionId', 'offer'],
-    properties: {
-      missionId: { type: 'string', minLength: 1, maxLength: 256 },
-      offer: { type: 'object' }
-    }
+    required: ['offer'],
+    properties: { offer: offerSchema, dockedReceipt: dockedReceiptSchema }
   }
 };
 
@@ -39,8 +72,6 @@ const MAX_BONUS_MULTIPLIER = 1.25;
 // Tolerated RTSE/meta clock skew for completion timestamps.
 const MAX_FUTURE_SKEW_MS = 60_000;
 const OVERFLOW = Symbol('credit-overflow');
-
-const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 
 const completeSchema = {
   body: {
@@ -61,7 +92,7 @@ const completeSchema = {
           completedAtMs: uint,
           durationTakenMs: uint,
           rewardCredits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS },
-          reputationChange: { type: 'integer', minimum: -2147483648, maximum: 2147483647 },
+          reputationChange: int32,
           signature: { type: 'string', minLength: 1, maxLength: 512 }
         }
       }
@@ -70,8 +101,8 @@ const completeSchema = {
 };
 
 // The JSON column does not keep every double exactly (it moved four in five destination
-// coordinates by an ulp), and the RTSE compares the coordinates of an offer for exact equality,
-// so they are stored as text beside the offer and restored on the way out.
+// coordinates by an ulp), and the offer's signature covers the coordinates' exact bits, so they
+// are stored as text beside the offer and restored on the way out.
 const toStoredOffer = (offer) => ({
   ...offer,
   exact_destination: [String(offer.destination_lat), String(offer.destination_lng)]
@@ -88,6 +119,16 @@ function fromStoredOffer(stored) {
 
 const LEGACY_MESSAGE = 'Your previous mission was cancelled because the mission format changed. Nothing was charged; accept a new mission.';
 
+// A mission stored before offers were signed by the engine (legacy id, no exact coordinates, or no
+// signature) can never be claimed: the engine would not recognise its offer. It is removed on first
+// sight, so the pilot can take a fresh offer; accepting it charged nothing and boarded no one, so
+// there is nothing to refund or unboard.
+const isLegacyRow = (row) =>
+  !UUID_PATTERN.test(row.missionId)
+  || !Array.isArray(row.offer?.exact_destination)
+  || row.offer.exact_destination.length !== 2
+  || typeof row.offer.signature !== 'string';
+
 // Proto-JSON ActiveMission for a stored row.
 function toActiveMission(playerId, offer, acceptedAt) {
   const acceptedAtMs = acceptedAt.getTime();
@@ -101,35 +142,22 @@ function toActiveMission(playerId, offer, acceptedAt) {
   };
 }
 
+// Passengers the ship carries once a mission's `berths` disembark (never below zero).
+const unboarded = (ship, berths) => Math.max(0, ship.passengersAboard - berths);
+
 export default async function missionsRoutes(fastify) {
   const prisma = fastify.prisma;
   fastify.addHook('onRequest', fastify.authenticate);
 
-  async function getPassengerCapacity(request) {
-    const ship = await prisma.spaceship.findFirst({
-      where: { playerId: request.user.sub, active: true },
-      orderBy: { createdAt: 'asc' },
-      include: { components: true }
-    });
-    // A pilot with no ship row yet flies the Tier 1 default ship, as in the login token.
-    return computeShipAttributes(ship?.components ?? []).passenger_capacity ?? 0;
-  }
-
-  async function cooldownRemainingMs(request, stationId) {
-    const playerId = request.user.sub;
-    const row = await prisma.missionCooldown.findUnique({
+  // `db` is the Prisma client or an open transaction.
+  async function cooldownRemainingMs(db, playerId, stationId, nowMs) {
+    const row = await db.missionCooldown.findUnique({
       where: { playerId_originStationId: { playerId, originStationId: stationId } }
     });
     const completedAt = row?.completedAt.getTime();
     if (completedAt == null) return 0;
-    return Math.max(0, completedAt + MISSION_COOLDOWN_MS - Date.now());
+    return Math.max(0, completedAt + MISSION_COOLDOWN_MS - nowMs);
   }
-
-  // A mission stored before offers followed the engine (legacy id, no exact coordinates) can never
-  // be claimed: the engine would reject its offer as tampered. It is removed on first sight, so
-  // the pilot can take a fresh offer; accepting charged nothing, so there is nothing to refund.
-  const isLegacyRow = (row) =>
-    !UUID_PATTERN.test(row.missionId) || !Array.isArray(row.offer?.exact_destination) || row.offer.exact_destination.length !== 2;
 
   async function loadActive(request) {
     const playerId = request.user.sub;
@@ -144,82 +172,96 @@ export default async function missionsRoutes(fastify) {
 
   const getActive = async (request) => (await loadActive(request)).active;
 
-  async function alreadyCompleted(request, missionId) {
-    const playerId = request.user.sub;
-    return (await prisma.completedMission.findUnique({
-      where: { playerId_missionId: { playerId, missionId } }
-    })) !== null;
-  }
-
+  const fail = (status, error, extra = {}) => ({ failure: { status, body: { error, ...extra } } });
   const conflict = (reply, error) => reply.code(409).send({ error });
 
-  fastify.get('/missions/available', { schema: availableSchema }, async (request, reply) => {
-    const { stationId, systemH3 } = request.query;
-    if (!isSystemCell(systemH3)) {
-      return reply.code(400).send({ error: 'systemH3 must be a valid H3 resolution 8 cell.' });
-    }
-    // Offers are the engine's, and it knows stations only by their id in the system they sit in.
-    if (!isStationOf(systemH3, stationId)) {
-      return reply.code(400).send({ error: 'stationId must be the id of a station in systemH3.' });
-    }
+  // The reissued token carrying the ship's new passenger count.
+  const tokenFor = (request, ship, passengersAboard) =>
+    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard).ship_attributes);
 
-    const passengerCapacity = await getPassengerCapacity(request);
-    const remainingMs = await cooldownRemainingMs(request, stationId);
-    const cooldown = remainingMs > 0
-      ? { active: true, remaining_ms: remainingMs, available_at_ms: Date.now() + remainingMs }
+  fastify.get('/missions/cooldown', { schema: cooldownSchema }, async (request) => {
+    const nowMs = Date.now();
+    const remainingMs = await cooldownRemainingMs(prisma, request.user.sub, request.query.originId, nowMs);
+    return remainingMs > 0
+      ? { active: true, remaining_ms: remainingMs, available_at_ms: nowMs + remainingMs }
       : { active: false, remaining_ms: 0, available_at_ms: 0 };
-
-    const offers = cooldown.active ? [] : generateOffers({ stationId, systemH3, passengerCapacity });
-    return { offers, cooldown, passenger_capacity: passengerCapacity };
   });
 
-  fastify.post('/missions/accept', { schema: acceptSchema }, async (request, reply) => {
+  fastify.post('/missions/accept', { schema: acceptSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
-    const { missionId, offer } = request.body;
+    const { offer, dockedReceipt } = request.body;
+    const nowMs = Date.now();
 
-    if (await getActive(request)) {
-      return conflict(reply, 'A mission is already active. Complete or abandon it first.');
+    // Stateless checks first, so a refusal changes nothing.
+    // 1. The engine made this offer, to this pilot. Every field is signed, so nothing in it is the client's.
+    if (offer.pilot_id !== playerId || !verifyMissionOffer(offer, fastify.claimKey.key)) {
+      return reply.code(403).send({ error: 'The mission offer is not valid for this pilot.', code: 'mission_offer_invalid' });
+    }
+    // 2. The offer is current.
+    if (offer.offered_at_ms > nowMs + MAX_OFFER_FUTURE_SKEW_MS || nowMs > offer.expires_at_ms) {
+      return reply.code(410).send({ error: 'The mission offer has expired.', code: 'mission_offer_expired' });
+    }
+    // 3. The pilot is docked at the offer's origin right now, as the engine vouches.
+    if (!dockedReceipt) {
+      return reply.code(403).send({
+        error: 'Accepting a mission requires a docked receipt from the engine.',
+        code: 'docked_receipt_required'
+      });
+    }
+    const refusal = dockedReceiptRefusal(dockedReceipt, {
+      pilotId: playerId,
+      publicKey: fastify.claimKey.key,
+      nowMs,
+      log: request.log
+    });
+    if (refusal) return reply.code(403).send(refusal);
+    if (dockedReceipt.dockedEntityId !== offer.origin_station_id || dockedReceipt.systemH3 !== offer.origin_system_h3) {
+      return reply.code(403).send({ error: 'Missions can only be accepted while docked where they are offered.', code: 'not_docked_at_origin' });
     }
 
-    // Offers are client-presented but never trusted: the presented offer must equal what this
-    // service derives for the window it names, for a ship with this many berths.
-    const capacity = Math.floor(await getPassengerCapacity(request));
-    if (offer.required_berths > capacity) {
-      return reply.code(400).send({ error: 'Ship has insufficient passenger berths for this mission.' });
-    }
-    const verdict = missionId === offer.mission_id ? authenticateOffer(offer, { availableBerths: capacity }) : null;
-    if (!verdict) {
-      return reply.code(400).send({ error: 'Offer does not match the authoritative mission.' });
-    }
-    const authoritative = verdict.offer;
-    if (verdict.expired) {
-      return reply.code(410).send({ error: 'Offer has expired.' });
-    }
-    if (await cooldownRemainingMs(request, authoritative.origin_station_id) > 0) {
-      return conflict(reply, 'Station is on cooldown.');
-    }
-    if (await alreadyCompleted(request, authoritative.mission_id)) {
-      return conflict(reply, 'Mission has already been completed.');
-    }
+    // Never earlier than the offer was made: the engine refuses the claim otherwise.
+    const acceptedAt = new Date(Math.max(nowMs, offer.offered_at_ms));
 
-    // Never earlier than the offer was made (see authenticateOffer): the engine refuses the claim otherwise.
-    const acceptedAt = new Date(Math.max(Date.now(), verdict.offeredAtMs));
-    try {
-      await prisma.playerMission.create({
+    // The player rules, the mission and the boarding commit or roll back together.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const current = await tx.playerMission.findUnique({ where: { playerId } });
+      if (current && !isLegacyRow(current)) {
+        return fail(409, 'A mission is already active. Complete or abandon it first.', { code: 'mission_active' });
+      }
+      const remainingMs = await cooldownRemainingMs(tx, playerId, offer.origin_station_id, nowMs);
+      if (remainingMs > 0) return fail(409, 'Station is on cooldown.', { code: 'origin_on_cooldown', remaining_ms: remainingMs });
+      const completed = await tx.completedMission.findUnique({
+        where: { playerId_missionId: { playerId, missionId: offer.mission_id } }
+      });
+      if (completed) return fail(409, 'Mission has already been completed.', { code: 'mission_already_completed' });
+
+      const { passenger_capacity: capacity, passengers_aboard: aboard } = computeShipAttributes(ship.components, ship.passengersAboard);
+      const freeBerths = Math.max(0, Math.floor(capacity) - aboard);
+      if (offer.required_berths > freeBerths) {
+        return fail(400, 'Ship has insufficient free passenger berths for this mission.', {
+          code: 'insufficient_berths',
+          available_berths: freeBerths
+        });
+      }
+
+      if (current) await tx.playerMission.delete({ where: { id: current.id } });
+      await tx.playerMission.create({
         data: {
           playerId,
-          missionId: authoritative.mission_id,
-          originStationId: authoritative.origin_station_id,
-          offer: toStoredOffer(authoritative),
+          missionId: offer.mission_id,
+          originStationId: offer.origin_station_id,
+          offer: toStoredOffer(offer),
           acceptedAt
         }
       });
-    } catch (err) {
-      // Lost a race with a concurrent accept (unique(playerId)).
-      if (err?.code === 'P2002') return conflict(reply, 'A mission is already active. Complete or abandon it first.');
-      throw err;
-    }
-    return toActiveMission(playerId, authoritative, acceptedAt);
+      const passengersAboard = aboard + offer.required_berths;
+      await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+      return { ship, passengersAboard };
+    });
+
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
+    return { active: toActiveMission(playerId, offer, acceptedAt), token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
   fastify.get('/missions/active', async (request) => {
@@ -229,14 +271,22 @@ export default async function missionsRoutes(fastify) {
 
   fastify.post('/missions/abandon', async (request, reply) => {
     const playerId = request.user.sub;
-    const active = await getActive(request);
-    if (!active) return reply.code(404).send({ error: 'No active mission to abandon.' });
-    // No payout and no cooldown.
-    await prisma.playerMission.deleteMany({ where: { playerId } });
-    return { abandoned: true, mission_id: active.mission_id };
+    // No payout and no cooldown; the mission's passengers disembark wherever the ship is.
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const row = await tx.playerMission.findUnique({ where: { playerId } });
+      if (!row) return null;
+      await tx.playerMission.delete({ where: { id: row.id } });
+      if (isLegacyRow(row)) return null;
+      const passengersAboard = unboarded(ship, row.offer.required_berths);
+      await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+      return { ship, passengersAboard, missionId: row.missionId };
+    });
+    if (!outcome) return reply.code(404).send({ error: 'No active mission to abandon.' });
+    return { abandoned: true, mission_id: outcome.missionId, token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
-  // Returns the new credit balance, null if the mission was already settled, or
+  // Returns `{ credits, ship, passengersAboard }`, null if the mission was already settled, or
   // OVERFLOW (mission left active, nothing changed) if the payout would overflow credits.
   async function settle(request, active, claim) {
     const playerId = request.user.sub;
@@ -245,6 +295,7 @@ export default async function missionsRoutes(fastify) {
 
     try {
       return await prisma.$transaction(async (tx) => {
+        const ship = await lockActiveShip(tx, request.user);
         const { count } = await tx.playerMission.deleteMany({ where: { playerId, missionId } });
         if (count !== 1) return null;
         await tx.completedMission.create({ data: { playerId, missionId, rewardCredits: claim.rewardCredits } });
@@ -260,7 +311,9 @@ export default async function missionsRoutes(fastify) {
           update: { completedAt: new Date() },
           create: { playerId, originStationId: stationId }
         });
-        return player.credits;
+        const passengersAboard = unboarded(ship, active.offer.required_berths);
+        await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+        return { credits: player.credits, ship, passengersAboard };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -305,10 +358,15 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
-    // 5. Atomic settlement.
-    const credits = await settle(request, active, claim);
-    if (credits === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
-    if (credits === null) return conflict(reply, 'Mission has already been completed.');
-    return { success: true, credits, payout: claim.rewardCredits };
+    // 5. Atomic settlement: payout, cooldown, and the passengers disembark.
+    const settled = await settle(request, active, claim);
+    if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
+    if (settled === null) return conflict(reply, 'Mission has already been completed.');
+    return {
+      success: true,
+      credits: settled.credits,
+      payout: claim.rewardCredits,
+      token: tokenFor(request, settled.ship, settled.passengersAboard)
+    };
   });
 }

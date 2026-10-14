@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { PlanetarySurvey } from '../../lib/contracts/exploration.js';
-import { H3_PATTERN, STATION_PATTERN } from '../../config/missions.js';
+import { H3_PATTERN, STATION_PATTERN } from '../../config/patterns.js';
 import {
   verifyPlanetChartKey,
   verifySystemChartSignature

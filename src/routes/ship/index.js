@@ -5,22 +5,13 @@ import {
   MAX_TIER,
   clampPassengers,
   computeShipAttributes,
-  defaultComponents,
   upgradeCost,
   hullBudget,
   totalSubsystemPoints
 } from '../../config/components.js';
 import { devPassengersEnabled } from '../../config/dev.js';
-import { H3_PATTERN } from '../../config/missions.js';
-import {
-  DOCKED_ENTITY_ID_PATTERN,
-  NONCE_B64_PATTERN,
-  SIGNATURE_B64_PATTERN,
-  isDockedReceiptFresh,
-  verifyDockedReceipt
-} from '../../lib/docked-receipt.js';
-
-const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
+import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
+import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 // `dockedReceipt` is optional here on purpose: the route answers its absence with the coded 403
 // `docked_receipt_required` rather than a generic schema 400.
@@ -31,24 +22,12 @@ const upgradeSchema = {
     properties: {
       componentType: { type: 'string', enum: COMPONENT_TYPES },
       targetTier: { type: 'integer', minimum: 0, maximum: MAX_TIER },
-      dockedReceipt: {
-        type: 'object',
-        required: ['pilotId', 'dockedEntityId', 'systemH3', 'dockedAtMs', 'issuedAtMs', 'nonce', 'signature'],
-        properties: {
-          pilotId: { type: 'string', minLength: 1, maxLength: 256 },
-          dockedEntityId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
-          systemH3: { type: 'string', pattern: H3_PATTERN },
-          dockedAtMs: uint,
-          issuedAtMs: uint,
-          nonce: { type: 'string', pattern: NONCE_B64_PATTERN },
-          signature: { type: 'string', pattern: SIGNATURE_B64_PATTERN }
-        }
-      }
+      dockedReceipt: dockedReceiptSchema
     }
   }
 };
 
-// Development-only: sets the passenger count directly, since boarding is not a feature yet.
+// Development-only: sets the passenger count directly, as a testing aid outside missions.
 const devPassengersSchema = {
   body: {
     type: 'object',
@@ -58,15 +37,6 @@ const devPassengersSchema = {
   }
 };
 
-function toLoadout(shipId, components, passengersAboard) {
-  const list = COMPONENT_TYPES.map((type) => {
-    const found = components.find((c) => c.type === type);
-    const fallbackTier = ESSENTIAL_COMPONENTS.includes(type) ? MIN_TIER : 0;
-    return { type, tier: found?.tier ?? fallbackTier, healthPct: found?.healthPct ?? 100 };
-  });
-  return { ship_id: shipId, components: list, ship_attributes: computeShipAttributes(list, passengersAboard) };
-}
-
 export default async function shipRoutes(fastify, opts) {
   const prisma = fastify.prisma;
   // In production the test-only passenger route is never registered.
@@ -74,34 +44,9 @@ export default async function shipRoutes(fastify, opts) {
 
   fastify.addHook('onRequest', fastify.authenticate);
 
-  // Runs `fn(tx, ship)` inside one transaction holding a per-player advisory lock, so concurrent
-  // requests cannot create duplicate active ships or interleave a check with its write.
+  // Runs `fn(tx, ship)` inside one transaction holding the per-player lock (see lockActiveShip).
   function withActiveShip(request, fn) {
-    const playerId = request.user.sub;
-    return prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${playerId}))`;
-      const existing = await tx.spaceship.findFirst({
-        where: { playerId, active: true },
-        orderBy: { createdAt: 'asc' },
-        include: { components: true }
-      });
-      const ship = existing ?? await tx.spaceship.create({
-        data: {
-          playerId,
-          callsign: request.user.callsign,
-          components: { create: defaultComponents().map(({ type, tier, healthPct }) => ({ type, tier, healthPct })) }
-        },
-        include: { components: true }
-      });
-      return fn(tx, ship);
-    });
-  }
-
-  // Re-sign the caller's claims with fresh ship attributes so the token RTSE verifies is current.
-  // The expiry is carried over: only a refresh token may extend a login.
-  function reissueToken(request, loadout) {
-    const { iat, iss, ...claims } = request.user;
-    return fastify.signWithExpiry({ ...claims, ship_attributes: loadout.ship_attributes });
+    return prisma.$transaction(async (tx) => fn(tx, await lockActiveShip(tx, request.user)));
   }
 
   const fail = (status, error, extra = {}) => ({ failure: { status, body: { error, ...extra } } });
@@ -127,7 +72,7 @@ export default async function shipRoutes(fastify, opts) {
       });
       if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
       const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard);
-      return { ...loadout, token: reissueToken(request, loadout) };
+      return { ...loadout, token: reissueToken(fastify, request, loadout.ship_attributes) };
     });
   }
 
@@ -144,17 +89,13 @@ export default async function shipRoutes(fastify, opts) {
         code: 'docked_receipt_required'
       });
     }
-    if (dockedReceipt.pilotId !== playerId || !verifyDockedReceipt(dockedReceipt, fastify.claimKey.key)) {
-      return reply.code(403).send({ error: 'The docked receipt is not valid for this pilot.', code: 'docked_receipt_invalid' });
-    }
-    const nowMs = Date.now();
-    request.log.debug({ receiptAgeMs: nowMs - dockedReceipt.issuedAtMs }, 'docked receipt age');
-    if (!isDockedReceiptFresh(dockedReceipt, nowMs)) {
-      return reply.code(403).send({
-        error: 'The docked receipt has expired. Request a new one and retry.',
-        code: 'docked_receipt_expired'
-      });
-    }
+    const refusal = dockedReceiptRefusal(dockedReceipt, {
+      pilotId: playerId,
+      publicKey: fastify.claimKey.key,
+      nowMs: Date.now(),
+      log: request.log
+    });
+    if (refusal) return reply.code(403).send(refusal);
 
     if (ESSENTIAL_COMPONENTS.includes(componentType) && targetTier === 0) {
       return reply.code(400).send({
@@ -229,6 +170,6 @@ export default async function shipRoutes(fastify, opts) {
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard);
-    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(request, loadout) };
+    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(fastify, request, loadout.ship_attributes) };
   });
 }
