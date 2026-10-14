@@ -21,6 +21,8 @@ const keysDir = mkdtempSync(join(tmpdir(), 'eotha-test-keys-'));
 writeFileSync(join(keysDir, 'private.pem'), privateKey.export({ format: 'pem', type: 'pkcs8' }));
 writeFileSync(join(keysDir, 'public.pem'), publicKey.export({ format: 'pem', type: 'spki' }));
 process.env.KEYS_DIR = keysDir;
+// env.js defaults an unset NODE_ENV to production, which would hide the dev-only routes under test.
+process.env.NODE_ENV = 'test';
 
 // The engine holds the private half; the meta service is configured with only the raw public key.
 const claimPair = generateKeyPairSync('ed25519');
