@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import {
   PASSWORD, app, attestationHeaders, call, closeApp, credits, dockedReceipt, json, keysDir, newPilot, setCredits
 } from './helpers.js';
+import env from '../src/config/env.js';
 import { devPassengersEnabled } from '../src/config/dev.js';
 import prismaPlugin from '../src/plugins/prisma.js';
 import securityPlugin from '../src/plugins/security.js';
@@ -311,14 +312,24 @@ describe('ship components over HTTP', () => {
       payload: { passengersAboard: 1 }
     });
 
-    const production = await buildShipApp({ devPassengers: false });
-    const enabled = await buildShipApp({ devPassengers: true });
+    // No override: the gate reads NODE_ENV when the routes register, as it does at startup.
+    const nodeEnv = env.NODE_ENV;
+    let production;
+    let enabled;
+    try {
+      env.NODE_ENV = 'production';
+      production = await buildShipApp({});
+      env.NODE_ENV = 'test';
+      enabled = await buildShipApp({});
+    } finally {
+      env.NODE_ENV = nodeEnv;
+    }
     try {
       assert.equal((await send(production)).statusCode, 404);
       assert.equal((await send(enabled)).statusCode, 200);
     } finally {
-      await production.close();
-      await enabled.close();
+      await production?.close();
+      await enabled?.close();
     }
   });
 
