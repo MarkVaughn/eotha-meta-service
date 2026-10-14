@@ -16,6 +16,10 @@ if (!dbName.endsWith('_test')) {
   );
 }
 
+// The env schema defaults NODE_ENV to production, which would hide the development-only routes
+// (POST /ship/dev/passengers) these tests exercise. CI sets it; a bare `npm test` must not differ.
+process.env.NODE_ENV ||= 'test';
+
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const keysDir = mkdtempSync(join(tmpdir(), 'eotha-test-keys-'));
 writeFileSync(join(keysDir, 'private.pem'), privateKey.export({ format: 'pem', type: 'pkcs8' }));
@@ -122,6 +126,88 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
   ]);
   return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }
+
+const MISSION_TYPE_NUMBERS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2 };
+const OFFER_WINDOW_MS = 30 * 60_000;
+
+/**
+ * A mission offer signed the way the engine signs it (eotha-contracts `MissionOffer.signature`):
+ * Ed25519 over the domain and every field in proto order, strings length-prefixed, integers little
+ * endian, the coordinates as their IEEE-754 bits. As with dockedReceipt, the bytes are assembled
+ * here rather than with src/lib/mission-offer.js. The default is a two-passenger passage offered
+ * now at a fresh dock; its coordinates are ones the JSON column does not keep exactly. `overrides`
+ * replace any field before signing (an `offered_at_ms` alone moves the expiry with it); pass
+ * `signer` to sign with another key. `pilot` is a newPilot() result or a bare player id.
+ */
+export function signedOffer(pilot, overrides = {}, signer = rtseKey) {
+  const offeredAtMs = overrides.offered_at_ms ?? Date.now();
+  const offer = {
+    mission_id: randomUUID(),
+    type: 'MISSION_TYPE_PASSAGE',
+    title: 'Passage to SYS-3082A9 I Station in SYS-3082A9 System',
+    description: 'Ferry 2 passengers from the SYS-308283 System to SYS-3082A9 I Station, 2 systems out.',
+    origin_station_id: randomUUID(),
+    origin_system_h3: '8828308283fffff',
+    destination_station_id: randomUUID(),
+    destination_system_h3: '88283082a9fffff',
+    destination_node_h3: '8c283082a9001ff',
+    destination_lat: 37.716557269075864,
+    destination_lng: -122.41941550000001,
+    distance_hexes: 2,
+    required_berths: 2,
+    duration_limit_ms: 600_000,
+    reward_credits: 2500,
+    reputation_change: 5,
+    faction_id: 'faction-high',
+    expires_at_ms: offeredAtMs + OFFER_WINDOW_MS,
+    offered_at_ms: offeredAtMs,
+    pilot_id: typeof pilot === 'string' ? pilot : pilot.id,
+    ...overrides
+  };
+  const str = (value) => {
+    const bytes = Buffer.from(value, 'utf8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(bytes.length);
+    return Buffer.concat([len, bytes]);
+  };
+  const num = (write, size) => (value) => {
+    const buf = Buffer.alloc(size);
+    buf[write](value);
+    return buf;
+  };
+  const u32 = num('writeUInt32LE', 4);
+  const i32 = num('writeInt32LE', 4);
+  const f64 = num('writeDoubleLE', 8);
+  const u64 = (value) => num('writeBigUInt64LE', 8)(BigInt(value));
+  const payload = Buffer.concat([
+    Buffer.from('EOTHA_MISSION_OFFER_V1', 'ascii'),
+    str(offer.pilot_id),
+    u64(offer.offered_at_ms),
+    str(offer.mission_id),
+    u32(MISSION_TYPE_NUMBERS[offer.type]),
+    str(offer.title),
+    str(offer.description),
+    str(offer.origin_station_id),
+    str(offer.origin_system_h3),
+    str(offer.destination_station_id),
+    str(offer.destination_system_h3),
+    str(offer.destination_node_h3),
+    f64(offer.destination_lat),
+    f64(offer.destination_lng),
+    u32(offer.distance_hexes),
+    u32(offer.required_berths),
+    u64(offer.duration_limit_ms),
+    u64(offer.reward_credits),
+    i32(offer.reputation_change),
+    str(offer.faction_id),
+    u64(offer.expires_at_ms)
+  ]);
+  return { ...offer, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
+}
+
+/** A docked receipt for `pilot` at the dock `offer` was made at (see dockedReceipt). */
+export const receiptAtOrigin = (pilot, offer, overrides = {}) =>
+  dockedReceipt(pilot, { dockedEntityId: offer.origin_station_id, systemH3: offer.origin_system_h3, ...overrides });
 
 export const call = (pilot, method, url, payload) => app.inject({ method, url, headers: pilot.headers, payload });
 

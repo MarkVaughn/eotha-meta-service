@@ -1,25 +1,149 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { sign } from 'node:crypto';
-import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey, setCredits } from './helpers.js';
-import { generateMissionOffers } from '../src/config/missions.js';
-import { generateCellNodes, systemsWithin } from '../src/lib/procedural.js';
+import { createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto';
+import {
+  app,
+  call,
+  closeApp,
+  credits,
+  dockedReceipt,
+  json,
+  loginKey,
+  newPilot,
+  receiptAtOrigin,
+  rtseKey,
+  setCredits,
+  signedOffer
+} from './helpers.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
+import { canonicalMissionOfferPayload, verifyMissionOffer } from '../src/lib/mission-offer.js';
 
-// The nearest station to the starter spawn (San Francisco): the engine puts none in the spawn system.
-const SYSTEM = '8828308285fffff';
-const [{ id: STATION }, { id: OTHER_STATION } = {}] = generateCellNodes(SYSTEM).filter((node) => node.isStation);
-// A second station elsewhere, for per-station behavior.
-const ELSEWHERE = { system: '88195da49bfffff', station: generateCellNodes('88195da49bfffff').find((node) => node.isStation).id };
+// The fixed vector from eotha-contracts `scripts/check-mission-offer-vector.js`: Ed25519 seed [7; 32],
+// the seed the RTSE verifier tests use.
+const VECTOR_SIGNATURE =
+  '2Zz1XMEu1YphTWnrV6Q8Q+T7vL/xK9svJUul8aedRqKQjUIk9/XYlvqUdeHfzhCZn7KO0vDjk6lbViu7WX7zAg==';
+const VECTOR_PREFIX = '454f5448415f4d495353494f4e5f4f464645525f5631' + '07000000' + '70696c6f742d31' + 'c0164230a1010000';
+const vectorOffer = () => ({
+  pilot_id: 'pilot-1',
+  offered_at_ms: 1791811000000,
+  mission_id: '07070707-0707-4707-8707-070707070707',
+  type: 'MISSION_TYPE_PASSAGE',
+  title: 'Passage to SYS-3082A9 I Station in SYS-3082A9 System',
+  description: 'Ferry 2 passengers.',
+  origin_station_id: '2fe1f208-c003-44c5-929e-1b020d5a2e47',
+  origin_system_h3: '8828308283fffff',
+  destination_station_id: '3536a1db-5599-4b6f-bde9-d48524d31061',
+  destination_system_h3: '88283082a9fffff',
+  destination_node_h3: '8c283082a9001ff',
+  destination_lat: 37.78125,
+  destination_lng: -122.40625,
+  distance_hexes: 2,
+  required_berths: 2,
+  duration_limit_ms: 600000,
+  reward_credits: 2500,
+  reputation_change: 5,
+  faction_id: 'faction-high',
+  expires_at_ms: 1791812800000,
+  signature: VECTOR_SIGNATURE
+});
+const vectorKey = createPrivateKey({
+  key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, 7)]),
+  format: 'der',
+  type: 'pkcs8'
+});
 
-async function firstOffer(pilot, station = STATION) {
-  const res = json(await call(pilot, 'GET', `/game/missions/available?stationId=${station}&systemH3=${SYSTEM}`));
-  return res.offers[0];
+// The next double above `x` (one ulp up).
+function nextUp(x) {
+  const buf = Buffer.alloc(8);
+  buf.writeDoubleLE(x);
+  buf.writeBigUInt64LE(buf.readBigUInt64LE() + 1n);
+  return buf.readDoubleLE();
 }
 
-async function accept(pilot, offer) {
-  return call(pilot, 'POST', '/game/missions/accept', { missionId: offer.mission_id, offer });
+describe('mission offer verifier', () => {
+  test('canonical payload and signature match the eotha-contracts vector', () => {
+    const payload = canonicalMissionOfferPayload(vectorOffer());
+    assert.equal(payload.length, 369);
+    assert.equal(payload.subarray(0, VECTOR_PREFIX.length / 2).toString('hex'), VECTOR_PREFIX);
+    assert.equal(sign(null, payload, vectorKey).toString('base64'), VECTOR_SIGNATURE);
+    assert.equal(verifyMissionOffer(vectorOffer(), createPublicKey(vectorKey)), true);
+    // The JSON a client relays carries the same bits.
+    assert.equal(verifyMissionOffer(JSON.parse(JSON.stringify(vectorOffer())), createPublicKey(vectorKey)), true);
+  });
+
+  test('changing any signed field breaks verification, a coordinate by one ulp included', () => {
+    const publicKey = createPublicKey(vectorKey);
+    const changes = {
+      pilot_id: 'pilot-2',
+      offered_at_ms: 1791811000001,
+      mission_id: '07070707-0707-4707-8707-070707070708',
+      type: 'MISSION_TYPE_RESEARCH',
+      title: 'Passage elsewhere',
+      description: 'Ferry 3 passengers.',
+      origin_station_id: '2fe1f208-c003-44c5-929e-1b020d5a2e48',
+      origin_system_h3: '8828308285fffff',
+      destination_station_id: '3536a1db-5599-4b6f-bde9-d48524d31062',
+      destination_system_h3: '88283082abfffff',
+      destination_node_h3: '8c283082a9003ff',
+      destination_lat: nextUp(37.78125),
+      destination_lng: nextUp(-122.40625),
+      distance_hexes: 3,
+      required_berths: 1,
+      duration_limit_ms: 600001,
+      reward_credits: 2501,
+      reputation_change: 6,
+      faction_id: 'faction-low',
+      expires_at_ms: 1791812800001
+    };
+    assert.deepEqual(Object.keys(changes).sort(), Object.keys(vectorOffer()).filter((k) => k !== 'signature').sort());
+    for (const [field, value] of Object.entries(changes)) {
+      assert.equal(verifyMissionOffer({ ...vectorOffer(), [field]: value }, publicKey), false, field);
+    }
+  });
+
+  test('never throws on malformed input', () => {
+    const publicKey = createPublicKey(vectorKey);
+    const good = vectorOffer();
+    for (const bad of [
+      undefined, null, {}, { ...good, signature: undefined }, { ...good, signature: 'AAAA' },
+      { ...good, type: 'MISSION_TYPE_UNSPECIFIED' }, { ...good, type: 7 }, { ...good, title: undefined },
+      { ...good, destination_lat: '37.78125' }, { ...good, distance_hexes: -1 }, { ...good, expires_at_ms: 'soon' },
+      { ...good, reputation_change: 2 ** 31 }
+    ]) {
+      assert.equal(verifyMissionOffer(bad, publicKey), false);
+    }
+    assert.equal(verifyMissionOffer(good, null), false);
+  });
+
+  test('an offer signed by the login key never verifies against the claim key', () => {
+    assert.equal(verifyMissionOffer(signedOffer('pilot-1', {}, loginKey), app.claimKey.key), false);
+  });
+
+  test('the test helper signs exactly what the verifier checks', () => {
+    assert.equal(verifyMissionOffer(signedOffer('pilot-1'), app.claimKey.key), true);
+    assert.equal(verifyMissionOffer(signedOffer('pilot-1', { type: 'MISSION_TYPE_RESEARCH', required_berths: 0 }), app.claimKey.key), true);
+  });
+});
+
+// `offer` defaults to a fresh two-passenger passage for `pilot`, `receipt` to one at its origin.
+const accept = (pilot, offer = signedOffer(pilot), receipt = receiptAtOrigin(pilot, offer)) =>
+  call(pilot, 'POST', '/game/missions/accept', receipt === null ? { offer } : { offer, dockedReceipt: receipt });
+
+async function acceptOk(pilot, offer = signedOffer(pilot)) {
+  const res = await accept(pilot, offer);
+  assert.equal(res.statusCode, 200, res.body);
+  return json(res).active;
 }
+
+const activeMission = async (pilot) => json(await call(pilot, 'GET', '/game/missions/active')).active;
+const aboard = async (pilot) => json(await call(pilot, 'GET', '/ship/loadout')).ship_attributes.passengers_aboard;
+const tokenAboard = (res) => app.jwt.verify(json(res).token).ship_attributes.passengers_aboard;
+const cooldown = async (pilot, originId) => json(await call(pilot, 'GET', `/game/missions/cooldown?originId=${originId}`));
+// The stored count, which the attributes would clamp into range on the way out.
+const storedAboard = async (pilot) =>
+  (await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } })).passengersAboard;
+const setAboard = (pilot, passengersAboard) =>
+  app.prisma.spaceship.updateMany({ where: { playerId: pilot.id }, data: { passengersAboard } });
 
 function signedClaim(pilot, active, overrides = {}, key = rtseKey) {
   const claim = {
@@ -37,137 +161,344 @@ function signedClaim(pilot, active, overrides = {}, key = rtseKey) {
   return claim;
 }
 
-describe('authoritative missions', () => {
+const complete = (pilot, claim) => call(pilot, 'POST', '/game/missions/complete', { claim });
+
+describe('engine-signed missions', () => {
   before(async () => { await app.ready(); });
   after(async () => { await closeApp(); });
 
   test('requires authentication', async () => {
-    const res = await app.inject({ method: 'GET', url: `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}` });
-    assert.equal(res.statusCode, 401);
+    const offer = signedOffer(randomUUID());
+    assert.equal((await app.inject({ method: 'GET', url: `/game/missions/cooldown?originId=${offer.origin_station_id}` })).statusCode, 401);
+    assert.equal((await app.inject({ method: 'POST', url: '/game/missions/accept', payload: { offer } })).statusCode, 401);
   });
 
-  test('lists proto-shaped offers limited by passenger berths', async () => {
+  test('the service no longer builds boards: GET /game/missions/available is gone', async () => {
     const pilot = await newPilot();
-    const res = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`));
-    assert.equal(res.passenger_capacity, 2); // Tier 1 life support
-    assert.ok(res.offers.length > 0);
-    assert.equal(res.cooldown.active, false);
-    for (const o of res.offers) {
-      assert.ok(o.required_berths <= 2);
-      assert.match(o.mission_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-      assert.match(o.destination_system_h3, /^[0-9a-f]{15}$/);
-      assert.match(o.destination_node_h3, /^[0-9a-f]{15}$/);
-      assert.ok(o.distance_hexes >= 1 && o.distance_hexes <= 3);
-      assert.equal(o.origin_station_id, STATION);
-      assert.ok(o.expires_at_ms > Date.now());
-      assert.ok(['MISSION_TYPE_PASSAGE', 'MISSION_TYPE_RESEARCH'].includes(o.type));
-    }
-    // Deterministic within an offer window.
-    // Only the expiry follows the time of the request, as in the engine: it is one window after it.
-    const again = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`));
-    const withoutExpiry = (offers) => offers.map(({ expires_at_ms, ...rest }) => rest);
-    assert.deepEqual(withoutExpiry(again.offers), withoutExpiry(res.offers));
-    for (const o of res.offers) assert.ok(o.expires_at_ms > Date.now() + 29 * 60_000 && o.expires_at_ms <= Date.now() + 30 * 60_000);
+    const res = await call(pilot, 'GET', '/game/missions/available?stationId=2fe1f208-c003-44c5-929e-1b020d5a2e47&systemH3=8828308283fffff');
+    assert.equal(res.statusCode, 404);
   });
 
-  test('rejects malformed query parameters', async () => {
-    const pilot = await newPilot();
-    for (const q of ['systemH3=nothex', `stationId=${STATION}`, `stationId=${STATION}&systemH3=8c283082e1801ff`, `stationId=bad%20id&systemH3=${SYSTEM}`]) {
-      assert.equal((await call(pilot, 'GET', `/game/missions/available?${q}`)).statusCode, 400);
-    }
+  describe('accept', () => {
+    test('stores the engine offer, boards its passengers and reissues the token', async () => {
+      const pilot = await newPilot();
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
+      const offer = signedOffer(pilot);
+
+      const res = await accept(pilot, offer);
+      assert.equal(res.statusCode, 200, res.body);
+      const { active } = json(res);
+      assert.equal(active.mission_id, offer.mission_id);
+      assert.equal(active.player_ship_id, pilot.id);
+      assert.deepEqual(active.offer, offer);
+      assert.ok(active.accepted_at_ms >= offer.offered_at_ms && active.accepted_at_ms <= Date.now());
+      assert.equal(active.deadline_ms, active.accepted_at_ms + offer.duration_limit_ms);
+      assert.equal(active.is_completed, false);
+
+      // Boarded in the database and in the token the engine reads.
+      assert.equal(tokenAboard(res), 2);
+      assert.equal(await aboard(pilot), 2);
+
+      // The stored offer comes back bit for bit, coordinates and signature included: the engine
+      // verifies its own signature over it when the pilot claims the mission.
+      const stored = await activeMission(pilot);
+      assert.deepEqual(stored, active);
+      assert.equal(verifyMissionOffer(stored.offer, app.claimKey.key), true);
+
+      // One mission at a time.
+      const second = await accept(pilot, signedOffer(pilot, { required_berths: 0 }));
+      assert.equal(second.statusCode, 409);
+      assert.equal(json(second).code, 'mission_active');
+    });
+
+    test('the stored coordinates are exact where the JSON column alone would move them', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      await acceptOk(pilot, offer);
+      const row = await app.prisma.playerMission.findUnique({ where: { playerId: pilot.id } });
+      // The precondition: the column moved these coordinates.
+      assert.notEqual(row.offer.destination_lat, offer.destination_lat);
+      assert.notEqual(row.offer.destination_lng, offer.destination_lng);
+      assert.deepEqual(row.offer.exact_destination, [String(offer.destination_lat), String(offer.destination_lng)]);
+      assert.equal((await activeMission(pilot)).offer.destination_lat, offer.destination_lat);
+      assert.equal((await activeMission(pilot)).offer.destination_lng, offer.destination_lng);
+    });
+
+    test('proto-JSON offers are accepted: zero fields omitted, 64-bit integers as strings', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot, { type: 'MISSION_TYPE_RESEARCH', required_berths: 0, reputation_change: 0 });
+      const { required_berths, reputation_change, ...wire } = offer;
+      for (const field of ['offered_at_ms', 'expires_at_ms', 'duration_limit_ms', 'reward_credits']) wire[field] = String(offer[field]);
+
+      const active = await acceptOk(pilot, wire);
+      assert.deepEqual(active.offer, offer);
+      assert.equal(await aboard(pilot), 0); // a survey boards no one
+    });
+
+    test('fields the engine did not sign are dropped, not stored', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      const active = await acceptOk(pilot, { ...offer, bonus_credits: 1_000_000 });
+      assert.equal('bonus_credits' in active.offer, false);
+      assert.equal('bonus_credits' in (await activeMission(pilot)).offer, false);
+    });
+
+    test('a tampered offer is refused with mission_offer_invalid and changes nothing', async () => {
+      const pilot = await newPilot();
+      for (const change of [{ reward_credits: 1_000_000 }, { required_berths: 1 }, { duration_limit_ms: 6_000_000 }, { destination_lat: 'next ulp' }]) {
+        const offer = signedOffer(pilot);
+        if (change.destination_lat) change.destination_lat = nextUp(offer.destination_lat);
+        const res = await accept(pilot, { ...offer, ...change });
+        assert.equal(res.statusCode, 403, JSON.stringify(change));
+        assert.equal(json(res).code, 'mission_offer_invalid');
+      }
+      const garbage = await accept(pilot, { ...signedOffer(pilot), signature: Buffer.alloc(64, 7).toString('base64') });
+      assert.equal(json(garbage).code, 'mission_offer_invalid');
+      assert.equal(await activeMission(pilot), null);
+      assert.equal(await aboard(pilot), 0);
+    });
+
+    test("another pilot's genuine offer is refused with mission_offer_invalid", async () => {
+      const pilot = await newPilot('Taker');
+      const other = await newPilot('Owner');
+      const offer = signedOffer(other);
+      const res = await accept(pilot, offer, receiptAtOrigin(pilot, offer));
+      assert.equal(res.statusCode, 403);
+      assert.equal(json(res).code, 'mission_offer_invalid');
+      // Relabelling it breaks the signature instead.
+      const relabelled = await accept(pilot, { ...offer, pilot_id: pilot.id }, receiptAtOrigin(pilot, offer));
+      assert.equal(json(relabelled).code, 'mission_offer_invalid');
+      assert.equal(await activeMission(pilot), null);
+    });
+
+    test('an offer signed by the login key is refused; only the claim key signs offers', async () => {
+      const pilot = await newPilot();
+      const res = await accept(pilot, signedOffer(pilot, {}, loginKey));
+      assert.equal(res.statusCode, 403);
+      assert.equal(json(res).code, 'mission_offer_invalid');
+    });
+
+    test('an expired offer is refused with 410 mission_offer_expired', async () => {
+      const pilot = await newPilot();
+      const stale = signedOffer(pilot, { offered_at_ms: Date.now() - 31 * 60_000 });
+      const res = await accept(pilot, stale);
+      assert.equal(res.statusCode, 410);
+      assert.equal(json(res).code, 'mission_offer_expired');
+      assert.equal(await activeMission(pilot), null);
+    });
+
+    test('an offer from up to 5 s in the future is accepted, no earlier than it was made; beyond that it is refused', async () => {
+      const pilot = await newPilot();
+      const tooFar = signedOffer(pilot, { offered_at_ms: Date.now() + 10_000 });
+      const refused = await accept(pilot, tooFar);
+      assert.equal(refused.statusCode, 410);
+      assert.equal(json(refused).code, 'mission_offer_expired');
+
+      const ahead = signedOffer(pilot, { offered_at_ms: Date.now() + 3_000 });
+      const active = await acceptOk(pilot, ahead);
+      // The engine refuses a claim for a mission accepted before its offer was made.
+      assert.equal(active.accepted_at_ms, ahead.offered_at_ms);
+    });
+
+    test('a missing receipt is refused with docked_receipt_required', async () => {
+      const pilot = await newPilot();
+      const res = await accept(pilot, signedOffer(pilot), null);
+      assert.equal(res.statusCode, 403);
+      assert.equal(json(res).code, 'docked_receipt_required');
+    });
+
+    test('a receipt at a different dock is refused with not_docked_at_origin', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      const elsewhere = await accept(pilot, offer, receiptAtOrigin(pilot, offer, { dockedEntityId: randomUUID() }));
+      assert.equal(elsewhere.statusCode, 403);
+      assert.equal(json(elsewhere).code, 'not_docked_at_origin');
+      // The same dock id named in another system is another dock.
+      const otherSystem = await accept(pilot, offer, receiptAtOrigin(pilot, offer, { systemH3: '8828308285fffff' }));
+      assert.equal(json(otherSystem).code, 'not_docked_at_origin');
+      assert.equal(await activeMission(pilot), null);
+      // Docked at the origin, the same offer goes through.
+      await acceptOk(pilot, offer);
+    });
+
+    test('a stale receipt is refused with docked_receipt_expired', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      const issuedAtMs = Date.now() - 31_000;
+      const res = await accept(pilot, offer, receiptAtOrigin(pilot, offer, { issuedAtMs, dockedAtMs: issuedAtMs - 1_000 }));
+      assert.equal(res.statusCode, 403);
+      assert.equal(json(res).code, 'docked_receipt_expired');
+      assert.equal(await activeMission(pilot), null);
+    });
+
+    test("a receipt for another pilot, or a tampered one, is refused with docked_receipt_invalid", async () => {
+      const pilot = await newPilot();
+      const other = await newPilot('Other');
+      const offer = signedOffer(pilot);
+      const theirs = await accept(pilot, offer, receiptAtOrigin(other, offer));
+      assert.equal(theirs.statusCode, 403);
+      assert.equal(json(theirs).code, 'docked_receipt_invalid');
+      const tampered = { ...receiptAtOrigin(pilot, offer, { dockedEntityId: randomUUID() }), dockedEntityId: offer.origin_station_id };
+      assert.equal(json(await accept(pilot, offer, tampered)).code, 'docked_receipt_invalid');
+    });
+
+    test('the offer is judged before the receipt, and its signature before its expiry', async () => {
+      const pilot = await newPilot();
+      const forgedAndStale = { ...signedOffer(pilot, { offered_at_ms: Date.now() - 31 * 60_000 }), reward_credits: 9 };
+      assert.equal(json(await accept(pilot, forgedAndStale, null)).code, 'mission_offer_invalid');
+      const stale = signedOffer(pilot, { offered_at_ms: Date.now() - 31 * 60_000 });
+      assert.equal(json(await accept(pilot, stale, dockedReceipt(pilot))).code, 'mission_offer_expired');
+    });
+
+    test('too few free berths is refused with insufficient_berths; passengers already aboard count', async () => {
+      const pilot = await newPilot();
+      // Tier 1 life support has 2 berths.
+      const big = await accept(pilot, signedOffer(pilot, { required_berths: 3 }));
+      assert.equal(big.statusCode, 400);
+      assert.equal(json(big).code, 'insufficient_berths');
+      assert.equal(json(big).available_berths, 2);
+
+      await call(pilot, 'GET', '/ship/loadout'); // creates the ship row
+      await setAboard(pilot, 1);
+      const full = await accept(pilot, signedOffer(pilot, { required_berths: 2 }));
+      assert.equal(full.statusCode, 400);
+      assert.equal(json(full).code, 'insufficient_berths');
+      assert.equal(json(full).available_berths, 1);
+      assert.equal(await activeMission(pilot), null);
+      assert.equal(await aboard(pilot), 1);
+
+      // One free berth still takes a one-passenger passage, and boards on top of who is aboard.
+      const res = await accept(pilot, signedOffer(pilot, { required_berths: 1 }));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(tokenAboard(res), 2);
+      assert.equal(await aboard(pilot), 2);
+    });
+
+    test('the origin is on cooldown after a completion there; other docks are not', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      const active = await acceptOk(pilot, offer);
+      assert.equal((await complete(pilot, signedClaim(pilot, active))).statusCode, 200);
+
+      const again = await accept(pilot, signedOffer(pilot, { origin_station_id: offer.origin_station_id }));
+      assert.equal(again.statusCode, 409);
+      assert.equal(json(again).code, 'origin_on_cooldown');
+      assert.ok(json(again).remaining_ms > 9 * 60_000 && json(again).remaining_ms <= 10 * 60_000);
+
+      await acceptOk(pilot, signedOffer(pilot));
+    });
+
+    test('a mission already completed cannot be accepted again, even offered at another dock', async () => {
+      const pilot = await newPilot();
+      const active = await acceptOk(pilot);
+      assert.equal((await complete(pilot, signedClaim(pilot, active))).statusCode, 200);
+
+      const res = await accept(pilot, signedOffer(pilot, { mission_id: active.mission_id }));
+      assert.equal(res.statusCode, 409);
+      assert.equal(json(res).code, 'mission_already_completed');
+      assert.equal(await activeMission(pilot), null);
+    });
+
+    test('malformed offers are schema errors', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      for (const bad of [
+        { ...offer, type: 'MISSION_TYPE_UNSPECIFIED' },
+        { ...offer, mission_id: 'm1:legacy' },
+        { ...offer, origin_station_id: 'station-alpha' },
+        { ...offer, signature: 'AAAA' },
+        (({ signature, ...rest }) => rest)(offer),
+        (({ pilot_id, ...rest }) => rest)(offer)
+      ]) {
+        assert.equal((await accept(pilot, bad, receiptAtOrigin(pilot, offer))).statusCode, 400);
+      }
+      assert.equal((await call(pilot, 'POST', '/game/missions/accept', {})).statusCode, 400);
+    });
+
+    test('without a claim key the route refuses with 503 CLAIM_KEY_NOT_CONFIGURED', async () => {
+      const pilot = await newPilot();
+      const configured = app.claimKey;
+      app.claimKey = null;
+      try {
+        const res = await accept(pilot);
+        assert.equal(res.statusCode, 503);
+        assert.equal(json(res).error, 'CLAIM_KEY_NOT_CONFIGURED');
+      } finally {
+        app.claimKey = configured;
+      }
+      assert.equal(await activeMission(pilot), null);
+    });
+
+    test('concurrent accepts take one mission and board once', async () => {
+      const pilot = await newPilot();
+      const offers = [1, 2, 3].map(() => signedOffer(pilot, { required_berths: 1 }));
+      const results = await Promise.all(offers.map((offer) => accept(pilot, offer)));
+      assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
+      assert.equal(await aboard(pilot), 1);
+    });
   });
 
-  test('refuses a station the engine does not know in that system', async () => {
-    const pilot = await newPilot();
-    // Not an id at all, a station of another system, and a resource node of this system.
-    const node = generateCellNodes(SYSTEM).find((n) => !n.isStation);
-    const unknown = ['station-alpha', ELSEWHERE.station, node?.id].filter(Boolean);
-    for (const stationId of unknown) {
-      const res = await call(pilot, 'GET', `/game/missions/available?stationId=${stationId}&systemH3=${SYSTEM}`);
-      assert.equal(res.statusCode, 400, stationId);
-    }
+  describe('cooldown', () => {
+    test('reports the per-origin cooldown after a completion', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      assert.deepEqual(await cooldown(pilot, offer.origin_station_id), { active: false, remaining_ms: 0, available_at_ms: 0 });
+
+      const active = await acceptOk(pilot, offer);
+      assert.equal((await complete(pilot, signedClaim(pilot, active))).statusCode, 200);
+      const after = await cooldown(pilot, offer.origin_station_id);
+      assert.equal(after.active, true);
+      assert.ok(after.remaining_ms > 9 * 60_000 && after.remaining_ms <= 10 * 60_000);
+      assert.ok(Math.abs(after.available_at_ms - (Date.now() + after.remaining_ms)) < 5_000);
+
+      assert.equal((await cooldown(pilot, randomUUID())).active, false);
+    });
+
+    test('takes a dock id only', async () => {
+      const pilot = await newPilot();
+      for (const q of ['', '?originId=station-alpha', '?originId=2FE1F208-C003-44C5-929E-1B020D5A2E47']) {
+        assert.equal((await call(pilot, 'GET', `/game/missions/cooldown${q}`)).statusCode, 400, q);
+      }
+    });
   });
 
-  test('accepts a mission once, rejects duplicates, serves and abandons it', async () => {
-    const pilot = await newPilot();
-    assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
-    assert.equal((await call(pilot, 'POST', '/game/missions/abandon')).statusCode, 404);
+  describe('abandon', () => {
+    test('unboards the passengers, reissues the token, pays nothing and starts no cooldown', async () => {
+      const pilot = await newPilot();
+      assert.equal((await call(pilot, 'POST', '/game/missions/abandon')).statusCode, 404);
+      const offer = signedOffer(pilot);
+      await acceptOk(pilot, offer);
+      assert.equal(await aboard(pilot), 2);
 
-    const offers = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`)).offers;
-    const res = await accept(pilot, offers[0]);
-    assert.equal(res.statusCode, 200);
-    const active = json(res);
-    assert.equal(active.mission_id, offers[0].mission_id);
-    assert.equal(active.player_ship_id, pilot.id);
-    assert.equal(active.deadline_ms, active.accepted_at_ms + offers[0].duration_limit_ms);
+      const res = await call(pilot, 'POST', '/game/missions/abandon');
+      assert.equal(res.statusCode, 200);
+      assert.equal(json(res).abandoned, true);
+      assert.equal(json(res).mission_id, offer.mission_id);
+      assert.equal(tokenAboard(res), 0);
+      assert.equal(await aboard(pilot), 0);
+      assert.equal(await activeMission(pilot), null);
+      assert.equal(await credits(pilot), 0);
+      assert.equal((await cooldown(pilot, offer.origin_station_id)).active, false);
+      assert.equal((await call(pilot, 'POST', '/game/missions/abandon')).statusCode, 404);
+    });
 
-    // The stored offer comes back bit for bit (coordinates included): the engine compares them exactly.
-    const stored = json(await call(pilot, 'GET', '/game/missions/active')).active;
-    assert.deepEqual(stored, active);
+    test('unboards only that mission\'s passengers, and never below zero', async () => {
+      const pilot = await newPilot();
+      await call(pilot, 'GET', '/ship/loadout');
+      await setAboard(pilot, 1);
+      await acceptOk(pilot, signedOffer(pilot, { required_berths: 1 }));
+      assert.equal(await aboard(pilot), 2);
+      assert.equal(tokenAboard(await call(pilot, 'POST', '/game/missions/abandon')), 1);
 
-    const other = offers[1] ?? offers[0];
-    assert.equal((await accept(pilot, other)).statusCode, 409);
-
-    const abandon = await call(pilot, 'POST', '/game/missions/abandon');
-    assert.equal(abandon.statusCode, 200);
-    assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
-    // Abandoning grants no payout and starts no cooldown.
-    assert.equal(await credits(pilot), 0);
-    assert.equal(json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`)).cooldown.active, false);
+      await setAboard(pilot, 0);
+      await acceptOk(pilot, signedOffer(pilot, { required_berths: 2 }));
+      await setAboard(pilot, 1);
+      assert.equal(tokenAboard(await call(pilot, 'POST', '/game/missions/abandon')), 0);
+      assert.equal(await storedAboard(pilot), 0);
+    });
   });
 
-  test('rejects forged, oversized, and expired offers', async () => {
-    const pilot = await newPilot();
-    const offer = await firstOffer(pilot);
-
-    const forged = { ...offer, reward_credits: 1_000_000 };
-    assert.equal((await accept(pilot, forged)).statusCode, 400);
-    assert.equal((await call(pilot, 'POST', '/game/missions/accept', { missionId: 'garbage', offer })).statusCode, 400);
-
-    // A berth count above capacity is rejected even though the engine would generate the offer
-    // for a bigger ship.
-    // Whether a station's board holds one depends on the 30-minute window, so look across nearby stations.
-    const nowMs = Date.now();
-    const big = systemsWithin(SYSTEM, 3)
-      .flatMap(({ cell }) => generateCellNodes(cell).filter((n) => n.isStation).map((n) => ({ cell, id: n.id })))
-      .flatMap(({ cell, id }) => generateMissionOffers({ stationId: id, systemH3: cell, availableBerths: 4, nowMs }))
-      .find((o) => o.required_berths > 2);
-    assert.ok(big, 'expected at least one high-berth offer');
-    assert.equal((await accept(pilot, big)).statusCode, 400);
-
-    // An offer for a window that has ended is refused as expired, not as forged.
-    const stale = generateMissionOffers({ stationId: STATION, systemH3: SYSTEM, availableBerths: 2, nowMs: Date.now() - 31 * 60_000 })[0];
-    assert.equal((await accept(pilot, stale)).statusCode, 410);
-
-    // A real offer under another offer's id, or with its window moved, is forged.
-    const [first, second] = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`)).offers;
-    assert.equal((await call(pilot, 'POST', '/game/missions/accept', { missionId: second?.mission_id ?? 'x', offer: first })).statusCode, 400);
-    assert.equal((await accept(pilot, { ...first, expires_at_ms: first.expires_at_ms + 120_000 })).statusCode, 400);
-    assert.equal((await accept(pilot, { ...first, origin_station_id: ELSEWHERE.station })).statusCode, 400);
-
-    assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
-  });
-
-  test('accepts an offer made by a replica whose clock runs ahead, within the skew tolerance only', async () => {
-    const pilot = await newPilot();
-    const madeAt = (offsetMs) => generateMissionOffers({ stationId: STATION, systemH3: SYSTEM, availableBerths: 2, nowMs: Date.now() + offsetMs })[0];
-
-    const tooFar = madeAt(120_000);
-    assert.equal((await accept(pilot, tooFar)).statusCode, 400);
-
-    const ahead = madeAt(30_000);
-    const res = await accept(pilot, ahead);
-    assert.equal(res.statusCode, 200);
-    // The engine refuses a claim for a mission accepted before its offer was made.
-    assert.ok(json(res).accepted_at_ms >= ahead.expires_at_ms - 30 * 60_000);
-    await call(pilot, 'POST', '/game/missions/abandon');
-
-    // The tolerance does not extend expiry: an offer past its expiry is still refused as expired.
-    const expired = madeAt(-31 * 60_000);
-    assert.equal((await accept(pilot, expired)).statusCode, 410);
-  });
-
-  describe('missions stored before the engine-aligned format', () => {
+  describe('missions stored before offers were signed', () => {
     const legacyOffer = (extra = {}) => ({
       mission_id: 'm1:station-alpha:8828308281fffff:497562:0',
       type: 'MISSION_TYPE_PASSAGE',
@@ -202,188 +533,209 @@ describe('authoritative missions', () => {
 
       // Reported once; afterwards there is simply no mission.
       assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
-      assert.equal((await accept(pilot, await firstOffer(pilot))).statusCode, 200);
+      await acceptOk(pilot);
     });
 
-    test('are also recognised by a missing exact destination alone, or a legacy id alone', async () => {
-      const noExact = await newPilot();
+    test('are recognised by a missing signature alone, a missing exact destination alone, or a legacy id alone', async () => {
+      // The last format: engine-derived UUID and exact coordinates, but unsigned.
+      const unsigned = await newPilot();
       const uuid = '4a5d3a52-6f0c-4b0e-8a64-0c9a3a0f1b11';
-      await seed(noExact, uuid, legacyOffer({ mission_id: uuid }));
+      await seed(unsigned, uuid, legacyOffer({ mission_id: uuid, exact_destination: ['37.77', '-122.41'] }));
+      assert.equal(json(await call(unsigned, 'GET', '/game/missions/active')).cancelled_mission.mission_id, uuid);
+
+      const signature = Buffer.alloc(64, 7).toString('base64');
+      const noExact = await newPilot();
+      await seed(noExact, uuid, legacyOffer({ mission_id: uuid, signature }));
       assert.equal(json(await call(noExact, 'GET', '/game/missions/active')).cancelled_mission.mission_id, uuid);
 
       const legacyId = await newPilot();
-      const offer = legacyOffer({ exact_destination: ['37.77', '-122.41'] });
+      const offer = legacyOffer({ exact_destination: ['37.77', '-122.41'], signature });
       await seed(legacyId, offer.mission_id, offer);
       assert.equal(json(await call(legacyId, 'GET', '/game/missions/active')).cancelled_mission.mission_id, offer.mission_id);
     });
 
-    test('block neither accepting nor the other mission endpoints, and cannot be completed', async () => {
+    test('block neither accepting nor abandoning, unboard no one, and cannot be completed', async () => {
       const pilot = await newPilot();
       const offer = legacyOffer();
       await seed(pilot, offer.mission_id, offer);
-      // Accepting first sweeps the stale row away instead of answering "already active".
-      assert.equal((await accept(pilot, await firstOffer(pilot))).statusCode, 200);
+      // Accepting sweeps the stale row away instead of answering "already active".
+      await acceptOk(pilot);
       assert.equal(await rows(pilot), 1);
+      assert.equal(await aboard(pilot), 2);
 
       const other = await newPilot();
+      await call(other, 'GET', '/ship/loadout');
+      await setAboard(other, 1);
       await seed(other, offer.mission_id, offer);
       assert.equal((await call(other, 'POST', '/game/missions/abandon')).statusCode, 404);
       assert.equal(await rows(other), 0);
+      assert.equal(await aboard(other), 1); // the legacy accept never boarded anyone
+
+      const stale = await newPilot();
+      await seed(stale, offer.mission_id, offer);
+      const claim = signedClaim(stale, { mission_id: offer.mission_id, accepted_at_ms: Date.now() - 60_000, offer: { ...offer, reward_credits: 150 } });
+      assert.equal((await complete(stale, claim)).statusCode, 404);
+      assert.equal(await credits(stale), 0);
     });
 
     test('a current mission is left alone', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active });
     });
   });
 
   describe('completion', () => {
-    test('valid signed claim pays out, sets cooldown, clears mission, and cannot be replayed', async () => {
+    test('valid signed claim pays out, sets cooldown, unboards, reissues the token, and cannot be replayed', async () => {
       const pilot = await newPilot();
-      const offer = await firstOffer(pilot);
-      const active = json(await accept(pilot, offer));
+      const offer = signedOffer(pilot);
+      const active = await acceptOk(pilot, offer);
+      assert.equal(await aboard(pilot), 2);
       const claim = signedClaim(pilot, active);
 
-      const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
+      const res = await complete(pilot, claim);
       assert.equal(res.statusCode, 200);
-      assert.deepEqual(json(res), { success: true, credits: claim.rewardCredits, payout: claim.rewardCredits });
+      const { token, ...body } = json(res);
+      assert.deepEqual(body, { success: true, credits: claim.rewardCredits, payout: claim.rewardCredits });
+      assert.equal(app.jwt.verify(token).ship_attributes.passengers_aboard, 0);
+      assert.equal(await aboard(pilot), 0);
 
       assert.equal(await credits(pilot), claim.rewardCredits);
-      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
-
-      const after = json(await call(pilot, 'GET', `/game/missions/available?stationId=${STATION}&systemH3=${SYSTEM}`));
-      assert.equal(after.cooldown.active, true);
-      assert.deepEqual(after.offers, []);
-      assert.equal((await accept(pilot, offer)).statusCode, 409); // cooldown
+      assert.equal(await activeMission(pilot), null);
+      assert.equal((await cooldown(pilot, offer.origin_station_id)).active, true);
 
       // Replayed claim: no active mission, so no second payout.
-      const replay = await call(pilot, 'POST', '/game/missions/complete', { claim });
+      const replay = await complete(pilot, claim);
       assert.equal(replay.statusCode, 404);
       assert.equal(await credits(pilot), claim.rewardCredits);
+    });
 
-      // Cooldown is per station: another station is unaffected.
-      const elsewhere = json(await call(pilot, 'GET', `/game/missions/available?stationId=${ELSEWHERE.station}&systemH3=${ELSEWHERE.system}`));
-      assert.equal(elsewhere.cooldown.active, false);
-      assert.ok(elsewhere.offers.length > 0);
+    test('unboards only the mission\'s passengers, and never below zero', async () => {
+      const pilot = await newPilot();
+      await call(pilot, 'GET', '/ship/loadout');
+      await setAboard(pilot, 1);
+      const one = await acceptOk(pilot, signedOffer(pilot, { required_berths: 1 }));
+      assert.equal(tokenAboard(await complete(pilot, signedClaim(pilot, one))), 1);
+
+      const two = await acceptOk(pilot, signedOffer(pilot, { required_berths: 1 }));
+      await setAboard(pilot, 0);
+      assert.equal(tokenAboard(await complete(pilot, signedClaim(pilot, two))), 0);
+      assert.equal(await storedAboard(pilot), 0);
     });
 
     test('invalid signature is rejected and grants nothing', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       const claim = signedClaim(pilot, active);
 
       const tampered = { ...claim, rewardCredits: claim.rewardCredits + 1 }; // signature no longer covers this
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: tampered })).statusCode, 403);
+      assert.equal((await complete(pilot, tampered)).statusCode, 403);
       const garbage = { ...claim, signature: Buffer.alloc(64, 7).toString('base64') };
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: garbage })).statusCode, 403);
+      assert.equal((await complete(pilot, garbage)).statusCode, 403);
       const short = { ...claim, signature: 'AAAA' };
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: short })).statusCode, 403);
+      assert.equal((await complete(pilot, short)).statusCode, 403);
 
       assert.equal(await credits(pilot), 0);
-      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+      assert.ok(await activeMission(pilot));
+      assert.equal(await aboard(pilot), 2);
       // The genuine claim still works afterwards.
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
+      assert.equal((await complete(pilot, claim)).statusCode, 200);
     });
 
     test('a claim signed with the login key is rejected; only the claim key verifies engine claims', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
 
       const forged = signedClaim(pilot, active, {}, loginKey);
-      const res = await call(pilot, 'POST', '/game/missions/complete', { claim: forged });
-      assert.equal(res.statusCode, 403);
+      assert.equal((await complete(pilot, forged)).statusCode, 403);
       assert.equal(await credits(pilot), 0);
-      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+      assert.ok(await activeMission(pilot));
 
-      const genuine = signedClaim(pilot, active);
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: genuine })).statusCode, 200);
+      assert.equal((await complete(pilot, signedClaim(pilot, active))).statusCode, 200);
     });
 
     test('refuses with a stable error when no claim key is configured', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       const claim = signedClaim(pilot, active);
 
       const configured = app.claimKey;
       app.claimKey = null;
       try {
-        const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
+        const res = await complete(pilot, claim);
         assert.equal(res.statusCode, 503);
         assert.equal(json(res).error, 'CLAIM_KEY_NOT_CONFIGURED');
       } finally {
         app.claimKey = configured;
       }
       assert.equal(await credits(pilot), 0);
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
+      assert.equal((await complete(pilot, claim)).statusCode, 200);
     });
 
     test('claim past the deadline is rejected even with a valid signature', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       const claim = signedClaim(pilot, active, { completedAtMs: active.deadline_ms + 1 });
-      const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
-      assert.equal(res.statusCode, 400);
+      assert.equal((await complete(pilot, claim)).statusCode, 400);
       assert.equal(await credits(pilot), 0);
-      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+      assert.ok(await activeMission(pilot));
     });
 
     test('reward above the 125% bonus cap is rejected; the cap itself is paid', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       const cap = Math.floor(active.offer.reward_credits * 1.25);
 
       const over = signedClaim(pilot, active, { rewardCredits: cap + 1 });
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: over })).statusCode, 400);
+      assert.equal((await complete(pilot, over)).statusCode, 400);
       assert.equal(await credits(pilot), 0);
-      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+      assert.ok(await activeMission(pilot));
 
-      const atCap = signedClaim(pilot, active, { rewardCredits: cap });
-      const res = await call(pilot, 'POST', '/game/missions/complete', { claim: atCap });
+      const res = await complete(pilot, signedClaim(pilot, active, { rewardCredits: cap }));
       assert.equal(res.statusCode, 200);
       assert.equal(json(res).payout, cap);
     });
 
     test('future completedAtMs is rejected; small clock skew is tolerated', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
 
       const future = signedClaim(pilot, active, { completedAtMs: Date.now() + 120_000 });
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: future })).statusCode, 400);
+      assert.equal((await complete(pilot, future)).statusCode, 400);
       assert.equal(await credits(pilot), 0);
-      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+      assert.ok(await activeMission(pilot));
 
       const skewed = signedClaim(pilot, active, { completedAtMs: Date.now() + 30_000 });
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: skewed })).statusCode, 200);
+      assert.equal((await complete(pilot, skewed)).statusCode, 200);
     });
 
     test('payout that would overflow the credit balance is rejected and the mission stays active', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       const claim = signedClaim(pilot, active);
 
       await setCredits(pilot, 2_147_483_647 - claim.rewardCredits + 1);
-      const res = await call(pilot, 'POST', '/game/missions/complete', { claim });
-      assert.equal(res.statusCode, 409);
+      assert.equal((await complete(pilot, claim)).statusCode, 409);
       assert.equal(await credits(pilot), 2_147_483_647 - claim.rewardCredits + 1);
-      assert.ok(json(await call(pilot, 'GET', '/game/missions/active')).active);
+      assert.ok(await activeMission(pilot));
+      assert.equal(await aboard(pilot), 2); // rolled back with the rest
 
       // Exactly reaching the maximum is allowed.
       await setCredits(pilot, 2_147_483_647 - claim.rewardCredits);
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim })).statusCode, 200);
+      assert.equal((await complete(pilot, claim)).statusCode, 200);
       assert.equal(await credits(pilot), 2_147_483_647);
     });
 
     test('a claim for another pilot is rejected', async () => {
       const pilot = await newPilot('Owner');
       const thief = await newPilot('Thief');
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      const active = await acceptOk(pilot);
       const claim = signedClaim(pilot, active);
 
-      assert.equal((await call(thief, 'POST', '/game/missions/complete', { claim })).statusCode, 403);
+      assert.equal((await complete(thief, claim)).statusCode, 403);
       // Thief re-labels the claim as their own: valid shape, but signature covers the owner's id.
       const relabelled = { ...claim, playerShipId: thief.id };
-      assert.equal((await call(thief, 'POST', '/game/missions/complete', { claim: relabelled })).statusCode, 404);
+      assert.equal((await complete(thief, relabelled)).statusCode, 404);
 
       assert.equal(await credits(thief), 0);
       assert.equal(await credits(pilot), 0);
@@ -391,22 +743,25 @@ describe('authoritative missions', () => {
 
     test('claims must match the active mission', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
-      const nothing = await call(pilot, 'POST', '/game/missions/complete', { claim: signedClaim(pilot, { ...active, mission_id: 'm1:other:x:1:0' }) });
+      const active = await acceptOk(pilot);
+      const nothing = await complete(pilot, signedClaim(pilot, { ...active, mission_id: randomUUID() }));
       assert.equal(nothing.statusCode, 404);
       const wrongAccepted = signedClaim(pilot, active, { acceptedAtMs: active.accepted_at_ms - 1 });
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: wrongAccepted })).statusCode, 400);
-      const wrongDest = signedClaim(pilot, active, { destinationStationId: 'station-elsewhere' });
-      assert.equal((await call(pilot, 'POST', '/game/missions/complete', { claim: wrongDest })).statusCode, 400);
+      assert.equal((await complete(pilot, wrongAccepted)).statusCode, 400);
+      const wrongDest = signedClaim(pilot, active, { destinationStationId: randomUUID() });
+      assert.equal((await complete(pilot, wrongDest)).statusCode, 400);
     });
 
-    test('concurrent completions pay out once', async () => {
+    test('concurrent completions pay out and unboard once', async () => {
       const pilot = await newPilot();
-      const active = json(await accept(pilot, await firstOffer(pilot)));
+      await call(pilot, 'GET', '/ship/loadout');
+      await setAboard(pilot, 1);
+      const active = await acceptOk(pilot, signedOffer(pilot, { required_berths: 1 }));
       const claim = signedClaim(pilot, active);
-      const results = await Promise.all([1, 2, 3].map(() => call(pilot, 'POST', '/game/missions/complete', { claim })));
+      const results = await Promise.all([1, 2, 3].map(() => complete(pilot, claim)));
       assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
       assert.equal(await credits(pilot), claim.rewardCredits);
+      assert.equal(await aboard(pilot), 1);
     });
   });
 });

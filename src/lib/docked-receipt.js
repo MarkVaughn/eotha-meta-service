@@ -1,5 +1,6 @@
 import { verify } from 'node:crypto';
 import { DOCKED_RECEIPT_MAX_SKEW_MS, DOCKED_RECEIPT_TTL_MS } from '../config/docking.js';
+import { H3_PATTERN } from '../config/patterns.js';
 
 export const DOCKED_RECEIPT_DOMAIN = Buffer.from('EOTHA_DOCKED_RECEIPT_V1', 'utf8'); // 23 bytes
 
@@ -65,4 +66,34 @@ export function isDockedReceiptFresh(
   if (receipt.dockedAtMs > receipt.issuedAtMs) return false;
   if (receipt.issuedAtMs > nowMs + maxSkewMs) return false;
   return nowMs - receipt.issuedAtMs <= ttlMs;
+}
+
+const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
+
+// The `dockedReceipt` of a request body.
+export const dockedReceiptSchema = {
+  type: 'object',
+  required: ['pilotId', 'dockedEntityId', 'systemH3', 'dockedAtMs', 'issuedAtMs', 'nonce', 'signature'],
+  properties: {
+    pilotId: { type: 'string', minLength: 1, maxLength: 256 },
+    dockedEntityId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
+    systemH3: { type: 'string', pattern: H3_PATTERN },
+    dockedAtMs: uint,
+    issuedAtMs: uint,
+    nonce: { type: 'string', pattern: NONCE_B64_PATTERN },
+    signature: { type: 'string', pattern: SIGNATURE_B64_PATTERN }
+  }
+};
+
+// Why a present `receipt` does not prove that `pilotId` is docked at `nowMs`, as the `{ error, code }`
+// body of a 403, or null when it does.
+export function dockedReceiptRefusal(receipt, { pilotId, publicKey, nowMs, log }) {
+  if (receipt.pilotId !== pilotId || !verifyDockedReceipt(receipt, publicKey)) {
+    return { error: 'The docked receipt is not valid for this pilot.', code: 'docked_receipt_invalid' };
+  }
+  log?.debug({ receiptAgeMs: nowMs - receipt.issuedAtMs }, 'docked receipt age');
+  if (!isDockedReceiptFresh(receipt, nowMs)) {
+    return { error: 'The docked receipt has expired. Request a new one and retry.', code: 'docked_receipt_expired' };
+  }
+  return null;
 }

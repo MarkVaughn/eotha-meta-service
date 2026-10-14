@@ -9,7 +9,7 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 - **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing. A pilot created by dev login (and an existing dev pilot that has never been granted, holds 0 credits and has no upgraded components) receives `DEV_STARTING_CREDITS` (default 20,000) exactly once, recorded in `Player.devCreditsGrantedAt`, so ship upgrades can be bought; later logins never add more, and guests, linked and registered accounts never get it.
 - **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`.
 - **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
-- **Separate engine claim key**: Engine-signed claims (mission completion, planet and system charts, docked receipts) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
+- **Separate engine claim key**: Engine-signed claims (mission offers and completion, planet and system charts, docked receipts) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
 - **Password Hashing**: argon2id. Legacy unsalted SHA-256 hashes still verify and are upgraded to argon2id on the next successful login.
 - **Geospatial Space Harbors**: Spatial anchor persistence for players using PostGIS and Uber H3 hexagonal spatial indexing.
 - **Session Allocation**: Coordinates player assignment to internal RTSE simulation cluster instances.
@@ -36,18 +36,18 @@ eotha-meta-service/
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
 │   │   ├── env.js              # Environment validation via Zod
-│   │   └── missions.js         # Mission offers, derived exactly as the RTSE derives them
+│   │   ├── missions.js         # Mission player rules (cooldown, payout cap, offer clock skew)
+│   │   └── patterns.js         # Shapes of engine identifiers (H3 cells, station ids, UUIDs)
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
 │   │   ├── claim-key.js        # Loads the public key engine-signed claims verify against
-│   │   ├── crmath.js           # Correctly rounded sin/cos/asin/atan2 (matches the RTSE's libm)
 │   │   ├── docked-receipt.js   # Verifies the engine's signed docked receipts
-│   │   ├── fma.js              # Exactly rounded fused multiply-add
-│   │   ├── h3geo.js            # Bit-compatible port of h3o's cell center and vertex arithmetic
 │   │   ├── identity.js         # Guest -> linked player conversion
-│   │   ├── procedural.js       # Port of the RTSE's procedural stations, nodes and names
-│   │   └── refresh-tokens.js   # Refresh rotation with reuse detection
+│   │   ├── mission-claim.js    # Verifies the engine's signed mission completion claims
+│   │   ├── mission-offer.js    # Verifies the engine's signed mission offers
+│   │   ├── refresh-tokens.js   # Refresh rotation with reuse detection
+│   │   └── ship.js             # Active ship under the player lock, loadout, token reissue
 │   ├── plugins/
 │   │   ├── attestation.js      # requireAttestation preHandler
 │   │   ├── claim-key.js        # Decorates the claim verification key, requireClaimKey preHandler
@@ -64,7 +64,6 @@ eotha-meta-service/
 │   │       └── schema.js       # Session route schemas
 │   └── app.js                  # Fastify server entry point
 ├── tests/
-│   ├── fixtures/               # Offers and nodes the RTSE itself produced, and the Rust exporter
 │   ├── helpers.js              # Test DB guard, throwaway keys, pilot factory
 │   └── *.test.js               # Automated test suite (real PostgreSQL)
 ├── .env.example                # Sample environment configuration
@@ -175,18 +174,20 @@ npm test
 - `GET /ship/loadout` (Protected)
   - The active ship's components and `ship_attributes`, including `passengers_aboard` (see [Passengers aboard](#passengers-aboard)).
 - `POST /ship/dev/passengers` (Protected, **development only**)
-  - Body `{ passengersAboard }`. A testing aid, not a game feature: boarding is not built yet, so this sets the active ship's passenger count directly. It is registered only when `NODE_ENV` is not `production` (a production server answers `404`). A count above the ship's `passenger_capacity` is refused with `400 passengers_exceed_capacity`; on success it returns the loadout and a re-signed `token` carrying the new count.
+  - Body `{ passengersAboard }`. A testing aid, not a game feature (passengers board when a mission is accepted): this sets the active ship's passenger count directly. It is registered only when `NODE_ENV` is not `production` (a production server answers `404`). A count above the ship's `passenger_capacity` is refused with `400 passengers_exceed_capacity`; on success it returns the loadout and a re-signed `token` carrying the new count.
 
 ### Missions
 All Protected. See [Mission offers](#mission-offers).
-- `GET /game/missions/available?stationId=...&systemH3=...`
-  - The board at a station: `stationId` is the station's RTSE id (a UUID) and `systemH3` the Resolution 8 cell it sits in (`400` for anything else). Returns `{ offers, cooldown, passenger_capacity }`; offers fit the ship's passenger berths.
+- `GET /game/missions/cooldown?originId=<dock uuid>`
+  - `{ active, remaining_ms, available_at_ms }`: whether the pilot's per-origin cooldown after a completion at that dock is still running. The board itself comes from the engine (`ClientFrame.mission_board_request`); this service builds none.
 - `POST /game/missions/accept`
-  - Body `{ missionId, offer }`. The offer must be exactly one this service derives for the window it names (`400` otherwise, `410` once expired, `409` if a mission is active or the station cooling down).
-- `GET /game/missions/active`, `POST /game/missions/abandon`
-  - `active` is `null` when there is no mission. A mission stored before offers followed the engine (legacy id or no exact destination) can never be claimed, so it is deleted on first read and the response is `{ active: null, cancelled_mission: { mission_id, reason: "format_changed", message } }`; nothing was charged.
+  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers. Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_active`, `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed` and `400 insufficient_berths` (with `available_berths`). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
+- `GET /game/missions/active`
+  - `{ active }`, `null` when there is no mission. A mission stored before offers were engine-signed (legacy id, no exact destination, or no signature) can never be claimed, so it is deleted on first read and the response is `{ active: null, cancelled_mission: { mission_id, reason: "format_changed", message } }`; nothing was charged.
+- `POST /game/missions/abandon`
+  - `{ abandoned, mission_id, token }`. No payout and no cooldown; the mission's passengers disembark wherever the ship is.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
+  - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -209,22 +210,26 @@ Forwarded headers (`x-forwarded-proto`, `x-forwarded-host`) and the `Host` heade
 
 ## Mission offers
 
-The RTSE re-derives an accepted offer from the procedural content it names and signs a completion claim only for offers it would itself have generated, so the meta-service derives offers by the engine's rules (`src/config/missions.js`, `src/lib/procedural.js`; the engine's `simulation/missions/generator.rs` is authoritative): a station is identified by its RTSE UUID, a mission id is a UUID hashed from the destination's rank in the 30-minute window and the origin station, a passage of `d` systems with `b` passengers pays `1000 + 500d + 250b` credits with `300 000 d` ms allowed, destinations lie 1-3 systems out, and offers expire 30 minutes after the request. `accept` tolerates up to 60 s (`MAX_FUTURE_SKEW_MS`) of replica clock skew for an offer made slightly in the future; expiry is not widened. Passage and research offers both count as transport missions; travel is real flight at the ship's speed.
+The engine is the only source of world data, so it alone decides which docks offer work and what: destinations, payout, time limit, berths, wording, mission id and expiry. While the pilot is docked it answers `ClientFrame.mission_board_request` with `MissionOffer`s it signs with its claim key (`EOTHA_MISSION_OFFER_V1`, layout in eotha-contracts `rtse/v1/mission.proto`), each bound to the pilot (`pilot_id`) and stamped `offered_at_ms`. The client relays one, with a fresh docked receipt, to `POST /game/missions/accept`. This service keeps no copy of the world: it checks identifiers for syntax only, and checks signatures and its own player rules.
 
-Offers are a pure function of (system, origin station, passenger berths, window), so `accept` regenerates what the client presents rather than storing boards. A ship is only ever offered passage for as many passengers as it has berths (1 to `min(berths, 4)`), so a Tier 1 ship (2 berths) is never shown a mission it cannot take.
+`accept` checks, in order:
+1. The offer's signature verifies against `CLAIM_PUBLIC_KEY` (`src/lib/mission-offer.js`) and `pilot_id` is the caller. Every field is signed, the coordinates as their exact IEEE-754 bits.
+2. `offered_at_ms` is no more than 5 s ahead of this server's clock (`MAX_OFFER_FUTURE_SKEW_MS`) and `expires_at_ms` has not passed.
+3. The docked receipt is valid, fresh and for the caller (as for upgrades, see [Docked upgrades](#docked-upgrades)), and its `dockedEntityId` and `systemH3` are the offer's `origin_station_id` and `origin_system_h3`.
+4. Under the player's lock: no mission is active, the origin is not cooling down, the mission was never completed, and the ship has `floor(passenger_capacity) - passengers_aboard` free berths for `required_berths`.
 
-What the meta-service chooses to *show* among the engine's valid offers differs from the engine's top three in two ways, both so that every shown offer authenticates and no pilot sees an empty board:
-- A destination whose coordinates cannot be reproduced bit for bit is passed over for the next one. The engine compares an offer's destination latitude and longitude for exact equality, and its libm and ours can disagree in the last bit when a result is within about 0.01 ulp of a rounding tie (`MIN_ROUNDING_MARGIN` leaves a wide safety factor); pentagon systems and systems on an icosahedron face edge are never used. A survey of a node that shares its node cell with an earlier research-grade node of the same system is skipped as well, because the engine would authenticate it as that earlier node.
-- If the engine's rule leaves a ship with berths nothing to carry passengers to (no usable station within 3 systems), it is shown surveys instead of an empty board.
+It then stores the offer (`accepted_at_ms` is never earlier than `offered_at_ms`) and boards its passengers. The offer is proto-JSON: snake_case fields, `type` as its enum name, `signature` as standard base64; zero-valued fields may be omitted and 64-bit integers may be strings. Fields the engine did not sign are dropped.
 
-`tests/fixtures/rtse-mission-vectors.json` holds nodes and offers generated by the engine itself (`tests/fixtures/rtse-mission-vectors.rs` regenerates it in an `eotha-rtse` checkout); `tests/mission-vectors.test.js` asserts this service reproduces them.
+The engine verifies its own signature again when the pilot claims the mission, so `GET /game/missions/active` hands the offer back bit-exact. The JSON column moves some doubles by an ulp, so the coordinates are also stored as text (`exact_destination`) and restored from it.
+
+A completion is settled from the engine-signed `MissionCompletionClaim` as before. Payout is capped at 125 % of the signed `reward_credits`, each (player, mission) is paid once, and a completion starts a 10-minute cooldown at the origin dock (`MISSION_COOLDOWN_MS`).
 
 ## Passengers aboard
 Taking off takes 0.5 s longer per passenger, so the real-time engine needs the ship's manifest. Each ship stores its count in `Spaceship.passengersAboard` (integer, default `0`) and it travels as `ship_attributes.passengers_aboard` (`ShipAttributes.passengers_aboard`, field 19, in eotha-contracts `common/v1/ship.proto`): in the signed access token, in the `ship` of a dev-login response and in `GET /ship/loadout`, and it is recomputed whenever the token is minted or reissued.
 
 The count never exceeds `ship_attributes.passenger_capacity` (from the LIFE_SUPPORT tier): the attributes clamp it on every read, and `POST /ship/upgrade` writes the clamped count back if a component change leaves it above the new capacity.
 
-How passengers board is a later feature. Until then `POST /ship/dev/passengers` sets the count for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
+Passengers board when a passage mission is accepted (`passengers_aboard += required_berths`) and disembark when it is completed or abandoned (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
 
 ## Docked upgrades
 
@@ -293,12 +298,12 @@ Whichever way the account row is created, the `databaseHooks.account.create.afte
 
 ### Engine claim key
 
-The RTSE signs mission completion claims, planet charts, system charts and docked receipts with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
+The RTSE signs mission offers, mission completion claims, planet charts, system charts and docked receipts with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
 
 - `CLAIM_PUBLIC_KEY`: the raw 32-byte Ed25519 public key as 64 hex characters.
 - `CLAIM_PUBLIC_KEY_FILE`: optional path to a file holding the same hex or a PEM public key. If both are set they must name the same key, otherwise startup fails. An unreadable or malformed key also fails startup; a blank variable counts as unset.
 - Startup logs `Engine claims are verified with Ed25519 key sha256:<16 hex>`, the fingerprint of the key in use, and never any key material.
-- With neither set, startup logs a warning and `POST /game/missions/complete`, `POST /game/charts/register-planet` `POST /game/charts/claim-system` and `POST /ship/upgrade` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
+- With neither set, startup logs a warning and `POST /game/missions/accept`, `POST /game/missions/complete`, `POST /game/charts/register-planet` `POST /game/charts/claim-system` and `POST /ship/upgrade` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
 - System charts are verified under `EOTHA_SYSTEM_CHART_V2`: `POST /game/charts/claim-system` requires `systemKey.systemDigest` (base64 of the 32-byte SHA-256 of the system's planet survey hashes, in planet id order) beside the signed fields, and the signature must cover it. V1 keys without a digest are refused.
 - `keys/public.pem` is the login key and is never used to verify claims, so a claim signed with the login key is refused with `403`.
 
