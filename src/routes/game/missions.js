@@ -1,9 +1,11 @@
 import { computeShipAttributes } from '../../config/components.js';
 import {
+  ABANDON_TERMS,
   MAX_OFFER_FUTURE_SKEW_MS,
   MAX_REWARD_CREDITS,
   MISSION_COOLDOWN_MS,
   MISSION_LIMITS,
+  lateCutoffMs,
   underMissionLimit
 } from '../../config/missions.js';
 import { CARGO_MAX_LOTS } from '../../config/cargo.js';
@@ -17,6 +19,7 @@ import {
 } from '../../lib/docked-receipt.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import { MISSION_TYPES, verifyMissionOffer } from '../../lib/mission-offer.js';
+import { adjustReputation, missionFaction, standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
@@ -85,12 +88,13 @@ const acceptSchema = {
   }
 };
 
-// `missionId` names the held mission to abandon; it may be left out while only one is held.
+// `missionId` names the held mission to abandon; it may be left out while only one is held. A
+// `dockedReceipt` says where the ship is docked, which decides a passage's terms (see the route).
 const abandonSchema = {
   body: {
     type: ['object', 'null'],
     additionalProperties: false,
-    properties: { missionId: { type: 'string', pattern: UUID_PATTERN.source } }
+    properties: { missionId: { type: 'string', pattern: UUID_PATTERN.source }, dockedReceipt: dockedReceiptSchema }
   }
 };
 
@@ -182,6 +186,9 @@ function toActiveMission(playerId, offer, acceptedAt) {
   };
 }
 
+// The mission type without its enum prefix, as AbandonedMission stores it.
+const typeName = (offer) => offer.type.replace(/^MISSION_TYPE_/, '');
+
 // Passengers the ship carries once a mission's `berths` disembark (never below zero).
 const unboarded = (ship, berths) => Math.max(0, ship.passengersAboard - berths);
 
@@ -197,9 +204,20 @@ export default async function missionsRoutes(fastify) {
     const row = await db.missionCooldown.findUnique({
       where: { playerId_originStationId: { playerId, originStationId: stationId } }
     });
-    const completedAt = row?.completedAt.getTime();
-    if (completedAt == null) return 0;
-    return Math.max(0, completedAt + MISSION_COOLDOWN_MS - nowMs);
+    if (!row) return 0;
+    const endsAt = row.availableAt?.getTime() ?? row.completedAt.getTime() + MISSION_COOLDOWN_MS;
+    return Math.max(0, endsAt - nowMs);
+  }
+
+  // `tx` is an open transaction holding the pilot's lock. Starts a cooldown of `durationMs` at the
+  // station, never ending one already running there sooner.
+  async function startCooldown(tx, playerId, stationId, nowMs, durationMs) {
+    const availableAt = new Date(nowMs + Math.max(durationMs, await cooldownRemainingMs(tx, playerId, stationId, nowMs)));
+    await tx.missionCooldown.upsert({
+      where: { playerId_originStationId: { playerId, originStationId: stationId } },
+      update: { completedAt: new Date(nowMs), availableAt },
+      create: { playerId, originStationId: stationId, completedAt: new Date(nowMs), availableAt }
+    });
   }
 
   // `db` is the Prisma client or an open transaction. The pilot's mission rows, oldest first, split
@@ -295,6 +313,11 @@ export default async function missionsRoutes(fastify) {
         where: { playerId_missionId: { playerId, missionId: offer.mission_id } }
       });
       if (completed) return fail(409, 'Mission has already been completed.', { code: 'mission_already_completed' });
+      // An abandoned mission stays abandoned, so its offer cannot be taken and dropped again.
+      const abandoned = await tx.abandonedMission.findUnique({
+        where: { playerId_missionId: { playerId, missionId: offer.mission_id } }
+      });
+      if (abandoned) return fail(409, 'This mission was abandoned and cannot be accepted again.', { code: 'mission_abandoned' });
 
       const { passenger_capacity: capacity, passengers_aboard: aboard } = computeShipAttributes(ship.components, ship.passengersAboard);
       const freeBerths = Math.max(0, Math.floor(capacity) - aboard);
@@ -327,14 +350,29 @@ export default async function missionsRoutes(fastify) {
   // `active` (the oldest mission) and `cancelled_mission` are kept for clients that hold one mission.
   fastify.get('/missions/active', async (request) => {
     const { missions, cancelled } = await loadActive(request);
-    const body = { missions, limits: MISSION_LIMITS, active: missions[0] ?? null };
+    const standings = await standingsOf(prisma, request.user.sub);
+    const body = { missions, limits: MISSION_LIMITS, active: missions[0] ?? null, standings };
     return cancelled.length ? { ...body, cancelled_missions: cancelled, cancelled_mission: cancelled[0] } : body;
   });
 
+  // Abandoning costs the sponsoring faction's reputation and starts a cooldown at the origin, by type
+  // (ABANDON_TERMS), docked or not, and pays nothing. A passage is the exception: only cancelling it
+  // while docked at its origin, where the passengers step back off, has those terms. Abandoned
+  // anywhere else its passengers still disembark wherever the ship is, at no cost and with no
+  // cooldown, until the passenger hostage state replaces that.
   fastify.post('/missions/abandon', { schema: abandonSchema }, async (request, reply) => {
     const playerId = request.user.sub;
     const missionId = request.body?.missionId;
-    // No payout and no cooldown; a passage's passengers disembark wherever the ship is.
+    const dockedReceipt = request.body?.dockedReceipt;
+    const nowMs = Date.now();
+
+    // A receipt is checked before any transaction, so a refused one changes nothing.
+    if (dockedReceipt) {
+      if (!fastify.claimKey) return fastify.requireClaimKey(request, reply);
+      const refusal = dockedReceiptRefusal(dockedReceipt, { pilotId: playerId, publicKey: fastify.claimKey.key, nowMs, log: request.log });
+      if (refusal) return reply.code(403).send(refusal);
+    }
+
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const { held, legacy } = await missionRows(tx, playerId);
@@ -344,17 +382,45 @@ export default async function missionsRoutes(fastify) {
       }
       const row = missionId == null ? held[0] : held.find((r) => r.missionId === missionId);
       if (!row) return fail(404, 'No active mission to abandon.');
+      const { offer } = row;
+
+      const atOrigin = dockedReceipt?.dockedEntityId === offer.origin_station_id && dockedReceipt.systemH3 === offer.origin_system_h3;
+      const reason = atOrigin ? 'in_port_origin' : dockedReceipt ? 'in_port_dock' : 'in_flight';
+      const terms = offer.type !== 'MISSION_TYPE_PASSAGE' || atOrigin ? ABANDON_TERMS[offer.type] : { reputation: 0, cooldownMs: 0 };
+      const factionId = missionFaction(offer);
+
       await tx.playerMission.delete({ where: { id: row.id } });
+      await tx.abandonedMission.create({
+        data: {
+          playerId,
+          missionId: row.missionId,
+          originStationId: row.originStationId,
+          factionId,
+          missionType: typeName(offer),
+          reputationLoss: terms.reputation,
+          reason
+        }
+      });
+      await adjustReputation(tx, playerId, factionId, terms.reputation);
+      if (terms.cooldownMs > 0) await startCooldown(tx, playerId, row.originStationId, nowMs, terms.cooldownMs);
       // Only a passage boarded anyone (`required_berths` is 0 for the other types).
-      const passengersAboard = unboarded(ship, row.offer.required_berths);
+      const passengersAboard = unboarded(ship, offer.required_berths);
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-      return { ship, passengersAboard, missionId: row.missionId };
+      return { ship, passengersAboard, missionId: row.missionId, reputationChange: terms.reputation, standings: await standingsOf(tx, playerId) };
     });
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-    return { abandoned: true, mission_id: outcome.missionId, token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
+    // `mission_id`, `outcome` and `reputation_change` are the contract's MissionAbandonResponse.
+    return {
+      abandoned: true,
+      mission_id: outcome.missionId,
+      outcome: 'MISSION_ABANDON_OUTCOME_CANCELLED',
+      reputation_change: outcome.reputationChange,
+      standings: outcome.standings,
+      token: tokenFor(request, outcome.ship, outcome.passengersAboard)
+    };
   });
 
-  // Returns `{ credits, ship, passengersAboard }` (plus the stored `lots` for a gather claim), null
+  // Returns `{ credits, standings, ship, passengersAboard }` (plus the stored `lots` for a gather claim), null
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
   // the payout would overflow credits.
@@ -386,7 +452,10 @@ export default async function missionsRoutes(fastify) {
         }
         const { count } = await tx.playerMission.deleteMany({ where: { playerId, missionId } });
         if (count !== 1) return null;
-        await tx.completedMission.create({ data: { playerId, missionId, rewardCredits: claim.rewardCredits } });
+        const factionId = missionFaction(active.offer);
+        await tx.completedMission.create({
+          data: { playerId, missionId, factionId, rewardCredits: claim.rewardCredits, reputationChange: claim.reputationChange }
+        });
         // Guarded increment; throwing rolls back the mission delete and payout record.
         const { count: credited } = await tx.player.updateMany({
           where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - claim.rewardCredits } },
@@ -394,14 +463,13 @@ export default async function missionsRoutes(fastify) {
         });
         if (credited !== 1) throw OVERFLOW;
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-        await tx.missionCooldown.upsert({
-          where: { playerId_originStationId: { playerId, originStationId: stationId } },
-          update: { completedAt: new Date() },
-          create: { playerId, originStationId: stationId }
-        });
+        // The signed reputation, negative for a late enough completion, goes to the sponsor.
+        await adjustReputation(tx, playerId, factionId, claim.reputationChange);
+        await startCooldown(tx, playerId, stationId, Date.now(), MISSION_COOLDOWN_MS);
         const passengersAboard = unboarded(ship, active.offer.required_berths);
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-        return { credits: player.credits, ship, passengersAboard, ...(lots && { lots }) };
+        const standings = await standingsOf(tx, playerId);
+        return { credits: player.credits, standings, ship, passengersAboard, ...(lots && { lots }) };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -429,9 +497,12 @@ export default async function missionsRoutes(fastify) {
       return reply.code(400).send({ error: 'Claim does not match the active mission.' });
     }
 
-    // 3. Deadline.
-    if (claim.completedAtMs < claim.acceptedAtMs || claim.completedAtMs > active.deadline_ms) {
+    // 3. Deadline. A late claim is paid what the engine decayed and signed, up to the hard cutoff.
+    if (claim.completedAtMs < claim.acceptedAtMs) {
       return reply.code(400).send({ error: 'Claim completed outside the mission window.' });
+    }
+    if (claim.completedAtMs > lateCutoffMs(active.deadline_ms, active.offer.duration_limit_ms)) {
+      return reply.code(400).send({ error: 'Mission has expired beyond the allowable late window.', code: 'mission_expired' });
     }
 
     if (claim.completedAtMs > Date.now() + MAX_FUTURE_SKEW_MS) {
@@ -439,6 +510,10 @@ export default async function missionsRoutes(fastify) {
     }
     if (claim.rewardCredits > Math.floor(active.offer.reward_credits * MAX_BONUS_MULTIPLIER)) {
       return reply.code(400).send({ error: 'Claim reward exceeds the maximum speed bonus.' });
+    }
+    // Lateness only lowers reputation, so a claim never gains more than the offer.
+    if (claim.reputationChange > Math.max(0, active.offer.reputation_change)) {
+      return reply.code(400).send({ error: 'Claim reputation exceeds the offered reputation.' });
     }
 
     // The cargo suffix is required exactly when the stored offer's signed type is GATHER.
@@ -454,7 +529,7 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
-    // 5. Atomic settlement: payout, cooldown, and the passengers disembark.
+    // 5. Atomic settlement: payout, reputation, cooldown, and the passengers disembark.
     const settled = await settle(request, active, claim);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
@@ -463,6 +538,8 @@ export default async function missionsRoutes(fastify) {
       success: true,
       credits: settled.credits,
       payout: claim.rewardCredits,
+      reputation_change: claim.reputationChange,
+      standings: settled.standings,
       ...(settled.lots && { lots: settled.lots }),
       token: tokenFor(request, settled.ship, settled.passengersAboard)
     };

@@ -33,6 +33,8 @@ model Player {
   activeMissions   PlayerMission[]
   missionCooldowns MissionCooldown[]
   completedMissions CompletedMission[]
+  abandonedMissions AbandonedMission[]
+  reputations  PlayerReputation[]
   cargoLeases  CargoLease[]
   cargoSales   CargoSale[]
   planetCharts PlanetChart[]
@@ -122,27 +124,69 @@ model PlayerMission {
   @@unique([playerId, missionId])
 }
 
-// Per-player, per-station cooldown started when a mission from that station completes.
+// Per-player, per-station cooldown started when a mission from that station completes or is
+// abandoned. `completedAt` is when the latest one started; `availableAt` is when it ends, null on rows
+// written before abandons had cooldowns of their own (those end MISSION_COOLDOWN_MS after completedAt).
 model MissionCooldown {
-  id               String   @id @default(uuid()) @db.Uuid
-  playerId         String   @db.Uuid
-  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  id               String    @id @default(uuid()) @db.Uuid
+  playerId         String    @db.Uuid
+  player           Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
   originStationId  String
-  completedAt      DateTime @default(now())
+  completedAt      DateTime  @default(now())
+  availableAt      DateTime?
 
   @@unique([playerId, originStationId])
 }
 
-// Payout ledger; the unique key enforces a single payout per (player, mission).
+// Payout ledger; the unique key enforces a single payout per (player, mission). `reputationChange`
+// is the engine-signed value applied to the sponsoring faction (negative for a late completion).
 model CompletedMission {
-  id            String   @id @default(uuid()) @db.Uuid
-  playerId      String   @db.Uuid
-  player        Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  missionId     String
-  rewardCredits Int
-  completedAt   DateTime @default(now())
+  id               String   @id @default(uuid()) @db.Uuid
+  playerId         String   @db.Uuid
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId        String
+  factionId        String   @default("independent")
+  rewardCredits    Int
+  reputationChange Int      @default(0)
+  completedAt      DateTime @default(now())
 
   @@unique([playerId, missionId])
+  @@index([playerId, completedAt])
+}
+
+// One row per mission abandoned; the unique key means a mission is abandoned (and penalised) once,
+// and an abandoned mission is never accepted again. `reputationLoss` is the delta applied (0 or
+// negative). `reason`: in_port_origin, in_port_dock or in_flight (hostage_returned is reserved for
+// the passenger hostage drop-off).
+model AbandonedMission {
+  id              String   @id @default(uuid()) @db.Uuid
+  playerId        String   @db.Uuid
+  player          Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId       String
+  originStationId String
+  factionId       String
+  missionType     String   // PASSAGE, RESEARCH, GATHER
+  reputationLoss  Int
+  hostageMinutes  Int      @default(0)
+  abandonedAt     DateTime @default(now())
+  reason          String
+
+  @@unique([playerId, missionId])
+  @@index([playerId, abandonedAt])
+}
+
+// The pilot's standing with each faction, bounded to [-1000, 1000] (src/lib/reputation.js). No row
+// means neutral (0).
+model PlayerReputation {
+  id        String   @id @default(uuid()) @db.Uuid
+  playerId  String   @db.Uuid
+  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  factionId String
+  standing  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  // Also serves lookups by player alone (its leading column).
+  @@unique([playerId, factionId])
 }
 
 // One row per cargo lease issued (POST /game/cargo/lease). The pilot's hold is `lots` of the highest

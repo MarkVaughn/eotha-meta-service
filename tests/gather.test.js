@@ -364,4 +364,25 @@ describe('gather missions', () => {
       assert.equal(res.statusCode, 403);
     });
   });
+
+  test('abandoning costs 10 reputation and a 20-minute cooldown at the origin, and the ore stays in the hold', async () => {
+    const pilot = await newPilot();
+    await lease(pilot);
+    const lots = [stored(LEFTOVER)];
+    await app.prisma.cargoLease.updateMany({ where: { playerId: pilot.id }, data: { lots } });
+    const offer = gatherOffer(pilot);
+    const active = await acceptOk(pilot, offer);
+
+    const res = await call(pilot, 'POST', '/game/missions/abandon', { missionId: active.mission_id });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).reputation_change, -10);
+    assert.deepEqual(json(res).standings, { 'faction-high': -10 });
+    assert.deepEqual((await held(pilot)).lots, lots);
+    assert.equal(await credits(pilot), 0);
+    const wait = json(await call(pilot, 'GET', `/game/missions/cooldown?originId=${offer.origin_station_id}`));
+    assert.ok(wait.remaining_ms > 19 * 60_000 && wait.remaining_ms <= 20 * 60_000, JSON.stringify(wait));
+    const row = await app.prisma.abandonedMission.findFirst({ where: { playerId: pilot.id } });
+    assert.equal(row.missionType, 'GATHER');
+    assert.equal(row.reputationLoss, -10);
+  });
 });

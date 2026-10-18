@@ -40,7 +40,7 @@ eotha-meta-service/
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
 │   │   ├── env.js              # Environment validation via Zod
-│   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, payout cap, offer clock skew)
+│   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, abandon terms, late cutoff, payout cap, offer clock skew)
 │   │   └── patterns.js         # Shapes of engine identifiers (H3 cells, station ids, UUIDs)
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
@@ -196,15 +196,15 @@ All Protected. See [Cargo persistence and sales](#cargo-persistence-and-sales).
 ### Missions
 All Protected. See [Mission offers](#mission-offers).
 - `GET /game/missions/cooldown?originId=<dock uuid>`
-  - `{ active, remaining_ms, available_at_ms }`: whether the pilot's per-origin cooldown after a completion at that dock is still running. The board itself comes from the engine (`ClientFrame.mission_board_request`); this service builds none.
+  - `{ active, remaining_ms, available_at_ms }`: whether the pilot's per-origin cooldown after a completion or abandon at that dock is still running. The board itself comes from the engine (`ClientFrame.mission_board_request`); this service builds none.
 - `POST /game/missions/accept`
-  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers. Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_already_active` (this mission is already held), `409 mission_limit_reached` (with `type` and `limit`), `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed` and `400 insufficient_berths` (with `available_berths`). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
+  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers. Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_already_active` (this mission is already held), `409 mission_limit_reached` (with `type` and `limit`), `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed`, `409 mission_abandoned` (the pilot abandoned this mission before) and `400 insufficient_berths` (with `available_berths`). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
 - `GET /game/missions/active`
-  - `{ missions, limits, active }`: every `ActiveMission` the pilot holds, oldest first; the most of each type a pilot may hold (`MISSION_LIMITS`, see [Missions held per type](#missions-held-per-type)); and `active`, the oldest mission or `null`, kept for clients that hold one mission. A mission stored before offers were engine-signed (legacy id, no exact destination, or no signature) can never be claimed, so it is deleted on first read and listed in `cancelled_missions: [{ mission_id, reason: "format_changed", message }]` (the first also as `cancelled_mission`); nothing was charged.
+  - `{ missions, limits, active, standings }`: every `ActiveMission` the pilot holds, oldest first; the most of each type a pilot may hold (`MISSION_LIMITS`, see [Missions held per type](#missions-held-per-type)); `active`, the oldest mission or `null`, kept for clients that hold one mission; and `standings`, the pilot's reputation by faction (see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation)). A mission stored before offers were engine-signed (legacy id, no exact destination, or no signature) can never be claimed, so it is deleted on first read and listed in `cancelled_missions: [{ mission_id, reason: "format_changed", message }]` (the first also as `cancelled_mission`); nothing was charged.
 - `POST /game/missions/abandon`
-  - Body `{ missionId }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `404` when no such mission is held. Returns `{ abandoned, mission_id, token }`. No payout and no cooldown; a passage's passengers disembark wherever the ship is.
+  - Body `{ missionId, dockedReceipt }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `dockedReceipt` is optional and says where the ship is docked; abandoning is allowed docked or in flight. `404` when no such mission is held; a receipt is refused as for upgrades (`403 docked_receipt_invalid` / `docked_receipt_expired`, `503 CLAIM_KEY_NOT_CONFIGURED`) before anything changes. Returns `{ abandoned, mission_id, outcome, reputation_change, standings, token }` (`mission_id`, `outcome` and `reputation_change` as in the contract's `MissionAbandonResponse`). No payout; the reputation penalty and origin cooldown are in [Late completion, abandon and reputation](#late-completion-abandon-and-reputation), and a passage's passengers disembark.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, reputation_change, standings, token }`. A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -243,6 +243,25 @@ A **gather** offer (`MISSION_TYPE_GATHER`: deliver a quantity of a rare ore to a
 
 A completion is settled from the engine-signed `MissionCompletionClaim` as before. Payout is capped at 125 % of the signed `reward_credits`, each (player, mission) is paid once, and a completion starts a 10-minute cooldown at the origin dock (`MISSION_COOLDOWN_MS`).
 
+## Late completion, abandon and reputation
+
+The pilot's **standing** with each faction is a `PlayerReputation` row (one per player and faction), an integer clamped to [-1000, 1000]; no row is neutral (0). A mission's reputation goes to its signed `faction_id`, or to `independent` when the offer has none. Every change is made in the transaction that settles or abandons the mission, under the player's lock, so it commits or rolls back with it.
+
+**Late completion.** A claim completed after `deadline_ms` is not refused. The engine decays its pay and reputation by mission type and signs the result in the unchanged `EOTHA_MISSION_CLAIM_V1` layout, and this service pays the signed `reward_credits` and applies the signed `reputation_change`, which may be negative. It accepts a claim up to the hard cutoff `deadline_ms + min(3 x duration_limit_ms, 24 h)` (`lateCutoffMs` in `src/config/missions.js`) and refuses one beyond it with `400 mission_expired`. A claim never gains more reputation than its offer (`400` otherwise). `CompletedMission` records the faction and the signed `reputationChange`.
+
+**Abandon.** Abandoning pays nothing, costs reputation with the sponsoring faction and starts a cooldown at the mission's origin (`ABANDON_TERMS`). It is allowed while docked, from the port screen, as well as in flight:
+
+| Type | Where | Reputation | Origin cooldown |
+|---|---|---|---|
+| Research | Docked or in flight | -8 | 15 min |
+| Gather | Docked or in flight; the ore stays in the hold | -10 | 20 min |
+| Passage | Docked at its origin (`dockedReceipt` at `origin_station_id` in `origin_system_h3`): the passengers step back off | -2 | 5 min |
+| Passage | In flight or docked elsewhere: the passengers disembark | 0 | none |
+
+An abandon cooldown never ends one already running at that dock sooner. Each abandon is an `AbandonedMission` row (unique per player and mission, with the type, faction, applied `reputationLoss` and `reason`: `in_port_origin`, `in_port_dock` or `in_flight`), and a mission the pilot abandoned is refused on a later accept with `409 mission_abandoned`, so the same offer cannot be taken and dropped again. With the cooldown and the cost of each abandon, accepting and abandoning cannot churn a dock's board for free. A passage abandoned away from its origin will instead keep its passengers aboard in the hostage state of the contract (`MISSION_ABANDON_OUTCOME_HOSTAGE`); until that lands it is cancelled as before, and every abandon answers `MISSION_ABANDON_OUTCOME_CANCELLED`.
+
+`PlayerReputation`, `AbandonedMission`, `CompletedMission.factionId` and `reputationChange` (defaulting to `independent` and `0` on existing rows) and `MissionCooldown.availableAt` (null on existing rows, which keep ending 10 minutes after `completedAt`) are additions only, so existing databases pick them up with `npx prisma db push`.
+
 ## Missions held per type
 
 A pilot holds several missions at once, up to a limit per type in `MISSION_LIMITS` (`src/config/missions.js`):
@@ -253,7 +272,7 @@ A pilot holds several missions at once, up to a limit per type in `MISSION_LIMIT
 | `MISSION_TYPE_RESEARCH` | 3 |
 | `MISSION_TYPE_GATHER` | 1 |
 
-The types are independent, so one passage, three research and one gather mission can be held together. With one passage at a time, that passage owns every passenger aboard. `accept` counts the held missions of the offer's type under the player's lock, so concurrent accepts cannot pass the limit. Each held mission is a `PlayerMission` row, unique per (player, mission); its type is the signed offer's `type`. Complete and abandon address one mission by id. The per-origin cooldown is unchanged.
+The types are independent, so one passage, three research and one gather mission can be held together. With one passage at a time, that passage owns every passenger aboard. `accept` counts the held missions of the offer's type under the player's lock, so concurrent accepts cannot pass the limit. Each held mission is a `PlayerMission` row, unique per (player, mission); its type is the signed offer's `type`. Complete and abandon address one mission by id. The per-origin cooldown is shared by all types.
 
 A database created while a pilot could hold only one mission (`PlayerMission.playerId` unique) needs one step before `db push`, which would otherwise refuse to add the (player, mission) unique index without `--accept-data-loss`:
 ```bash

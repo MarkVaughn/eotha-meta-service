@@ -20,3 +20,25 @@ export const MISSION_LIMITS = Object.freeze({
 // Whether a pilot holding `offers` may take one more of `type`. A type with no limit is never taken.
 export const underMissionLimit = (offers, type) =>
   offers.filter((offer) => offer.type === type).length < (MISSION_LIMITS[type] ?? 0);
+
+// A claim completed after its deadline is still paid, with the pay and reputation the engine decayed
+// and signed, up to this much later: min(3 x the offer's duration limit, 24 h). Beyond it the mission
+// can no longer be completed.
+export const LATE_WINDOW_MULTIPLIER = 3;
+export const MAX_LATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const lateCutoffMs = (deadlineMs, durationLimitMs) =>
+  deadlineMs + Math.min(LATE_WINDOW_MULTIPLIER * durationLimitMs, MAX_LATE_WINDOW_MS);
+
+// What abandoning a mission costs, by type: the reputation applied to the sponsoring faction and the
+// cooldown it starts at the mission's origin, so accepting and abandoning cannot churn a dock's
+// board. A passage cancelled while docked at its origin (the passengers step back off) is the
+// administrative cancel; a passage abandoned anywhere else costs nothing here and starts no cooldown
+// until the passenger hostage state takes it over.
+export const ABANDON_TERMS = Object.freeze({
+  MISSION_TYPE_PASSAGE: Object.freeze({ reputation: -2, cooldownMs: 5 * 60 * 1000 }),
+  MISSION_TYPE_RESEARCH: Object.freeze({ reputation: -8, cooldownMs: 15 * 60 * 1000 }),
+  MISSION_TYPE_GATHER: Object.freeze({ reputation: -10, cooldownMs: 20 * 60 * 1000 })
+});
+
+// The faction an offer without one is credited to.
+export const DEFAULT_FACTION_ID = 'independent';
