@@ -27,7 +27,9 @@ eotha-meta-service/
 │   ├── private.pem             # Ed25519 Private Key (gitignored)
 │   └── public.pem              # Public Key (shared with Rust RTSE)
 ├── prisma/
-│   └── schema.prisma           # Database schema (PostgreSQL + PostGIS)
+│   ├── schema.prisma           # Database schema (PostgreSQL + PostGIS)
+│   └── sql/
+│       └── player-mission-list.sql  # One-off step before db push on a single-mission database
 ├── scripts/
 │   └── generate-keys.js        # Ed25519 keypair generation utility
 ├── src/
@@ -36,7 +38,7 @@ eotha-meta-service/
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
 │   │   ├── env.js              # Environment validation via Zod
-│   │   ├── missions.js         # Mission player rules (cooldown, payout cap, offer clock skew)
+│   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, payout cap, offer clock skew)
 │   │   └── patterns.js         # Shapes of engine identifiers (H3 cells, station ids, UUIDs)
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
@@ -181,13 +183,13 @@ All Protected. See [Mission offers](#mission-offers).
 - `GET /game/missions/cooldown?originId=<dock uuid>`
   - `{ active, remaining_ms, available_at_ms }`: whether the pilot's per-origin cooldown after a completion at that dock is still running. The board itself comes from the engine (`ClientFrame.mission_board_request`); this service builds none.
 - `POST /game/missions/accept`
-  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers. Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_active`, `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed` and `400 insufficient_berths` (with `available_berths`). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
+  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers. Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_already_active` (this mission is already held), `409 mission_limit_reached` (with `type` and `limit`), `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed` and `400 insufficient_berths` (with `available_berths`). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
 - `GET /game/missions/active`
-  - `{ active }`, `null` when there is no mission. A mission stored before offers were engine-signed (legacy id, no exact destination, or no signature) can never be claimed, so it is deleted on first read and the response is `{ active: null, cancelled_mission: { mission_id, reason: "format_changed", message } }`; nothing was charged.
+  - `{ missions, limits, active }`: every `ActiveMission` the pilot holds, oldest first; the most of each type a pilot may hold (`MISSION_LIMITS`, see [Missions held per type](#missions-held-per-type)); and `active`, the oldest mission or `null`, kept for clients that hold one mission. A mission stored before offers were engine-signed (legacy id, no exact destination, or no signature) can never be claimed, so it is deleted on first read and listed in `cancelled_missions: [{ mission_id, reason: "format_changed", message }]` (the first also as `cancelled_mission`); nothing was charged.
 - `POST /game/missions/abandon`
-  - `{ abandoned, mission_id, token }`. No payout and no cooldown; the mission's passengers disembark wherever the ship is.
+  - Body `{ missionId }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `404` when no such mission is held. Returns `{ abandoned, mission_id, token }`. No payout and no cooldown; a passage's passengers disembark wherever the ship is.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim; settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -216,13 +218,32 @@ The engine is the only source of world data, so it alone decides which docks off
 1. The offer's signature verifies against `CLAIM_PUBLIC_KEY` (`src/lib/mission-offer.js`) and `pilot_id` is the caller. Every field is signed, the coordinates as their exact IEEE-754 bits.
 2. `offered_at_ms` is no more than 5 s ahead of this server's clock (`MAX_OFFER_FUTURE_SKEW_MS`) and `expires_at_ms` has not passed.
 3. The docked receipt is valid, fresh and for the caller (as for upgrades, see [Docked upgrades](#docked-upgrades)), and its `dockedEntityId` and `systemH3` are the offer's `origin_station_id` and `origin_system_h3`.
-4. Under the player's lock: no mission is active, the origin is not cooling down, the mission was never completed, and the ship has `floor(passenger_capacity) - passengers_aboard` free berths for `required_berths`.
+4. Under the player's lock: the pilot does not already hold this mission, holds fewer than its type's limit (see [Missions held per type](#missions-held-per-type)), the origin is not cooling down, the mission was never completed, and the ship has `floor(passenger_capacity) - passengers_aboard` free berths for `required_berths`.
 
 It then stores the offer (`accepted_at_ms` is never earlier than `offered_at_ms`) and boards its passengers. The offer is proto-JSON: snake_case fields, `type` as its enum name, `signature` as standard base64; zero-valued fields may be omitted and 64-bit integers may be strings. Fields the engine did not sign are dropped.
 
 The engine verifies its own signature again when the pilot claims the mission, so `GET /game/missions/active` hands the offer back bit-exact. The JSON column moves some doubles by an ulp, so the coordinates are also stored as text (`exact_destination`) and restored from it.
 
 A completion is settled from the engine-signed `MissionCompletionClaim` as before. Payout is capped at 125 % of the signed `reward_credits`, each (player, mission) is paid once, and a completion starts a 10-minute cooldown at the origin dock (`MISSION_COOLDOWN_MS`).
+
+## Missions held per type
+
+A pilot holds several missions at once, up to a limit per type in `MISSION_LIMITS` (`src/config/missions.js`):
+
+| Type | Held at once |
+|---|---|
+| `MISSION_TYPE_PASSAGE` | 1 |
+| `MISSION_TYPE_RESEARCH` | 3 |
+| `MISSION_TYPE_GATHER` | 1 |
+
+The types are independent, so one passage, three research and one gather mission can be held together. With one passage at a time, that passage owns every passenger aboard. `accept` counts the held missions of the offer's type under the player's lock, so concurrent accepts cannot pass the limit. Each held mission is a `PlayerMission` row, unique per (player, mission); its type is the signed offer's `type`. Complete and abandon address one mission by id. The per-origin cooldown is unchanged.
+
+A database created while a pilot could hold only one mission (`PlayerMission.playerId` unique) needs one step before `db push`, which would otherwise refuse to add the (player, mission) unique index without `--accept-data-loss`:
+```bash
+npx prisma db execute --file prisma/sql/player-mission-list.sql --schema prisma/schema.prisma
+npx prisma db push
+```
+The script adds that index, which the existing rows (one per player) already satisfy, so `db push` only drops the old one and every row is kept. It is safe to run again and does nothing on a database without the table.
 
 ## Passengers aboard
 Taking off takes 0.5 s longer per passenger, so the real-time engine needs the ship's manifest. Each ship stores its count in `Spaceship.passengersAboard` (integer, default `0`) and it travels as `ship_attributes.passengers_aboard` (`ShipAttributes.passengers_aboard`, field 19, in eotha-contracts `common/v1/ship.proto`): in the signed access token, in the `ship` of a dev-login response and in `GET /ship/loadout`, and it is recomputed whenever the token is minted or reissued.

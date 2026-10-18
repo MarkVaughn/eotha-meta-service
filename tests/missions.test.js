@@ -17,6 +17,7 @@ import {
 } from './helpers.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 import { canonicalMissionOfferPayload, verifyMissionOffer } from '../src/lib/mission-offer.js';
+import { underMissionLimit } from '../src/config/missions.js';
 
 // The fixed vector from eotha-contracts `scripts/check-mission-offer-vector.js`: Ed25519 seed [7; 32],
 // the seed the RTSE verifier tests use.
@@ -135,7 +136,15 @@ async function acceptOk(pilot, offer = signedOffer(pilot)) {
   return json(res).active;
 }
 
+// Written out rather than imported, so a cap removed or changed in the table fails these tests.
+const LIMITS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 3, MISSION_TYPE_GATHER: 1 };
+const NO_MISSIONS = { missions: [], limits: LIMITS, active: null };
+
 const activeMission = async (pilot) => json(await call(pilot, 'GET', '/game/missions/active')).active;
+const activeIds = async (pilot) => json(await call(pilot, 'GET', '/game/missions/active')).missions.map((m) => m.mission_id);
+const research = (pilot, overrides = {}) => signedOffer(pilot, { type: 'MISSION_TYPE_RESEARCH', required_berths: 0, ...overrides });
+const abandon = (pilot, missionId) =>
+  call(pilot, 'POST', '/game/missions/abandon', missionId === undefined ? undefined : { missionId });
 const aboard = async (pilot) => json(await call(pilot, 'GET', '/ship/loadout')).ship_attributes.passengers_aboard;
 const tokenAboard = (res) => app.jwt.verify(json(res).token).ship_attributes.passengers_aboard;
 const cooldown = async (pilot, originId) => json(await call(pilot, 'GET', `/game/missions/cooldown?originId=${originId}`));
@@ -182,7 +191,7 @@ describe('engine-signed missions', () => {
   describe('accept', () => {
     test('stores the engine offer, boards its passengers and reissues the token', async () => {
       const pilot = await newPilot();
-      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), NO_MISSIONS);
       const offer = signedOffer(pilot);
 
       const res = await accept(pilot, offer);
@@ -204,18 +213,14 @@ describe('engine-signed missions', () => {
       const stored = await activeMission(pilot);
       assert.deepEqual(stored, active);
       assert.equal(verifyMissionOffer(stored.offer, app.claimKey.key), true);
-
-      // One mission at a time.
-      const second = await accept(pilot, signedOffer(pilot, { required_berths: 0 }));
-      assert.equal(second.statusCode, 409);
-      assert.equal(json(second).code, 'mission_active');
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { missions: [active], limits: LIMITS, active });
     });
 
     test('the stored coordinates are exact where the JSON column alone would move them', async () => {
       const pilot = await newPilot();
       const offer = signedOffer(pilot);
       await acceptOk(pilot, offer);
-      const row = await app.prisma.playerMission.findUnique({ where: { playerId: pilot.id } });
+      const row = await app.prisma.playerMission.findFirst({ where: { playerId: pilot.id } });
       // The precondition: the column moved these coordinates.
       assert.notEqual(row.offer.destination_lat, offer.destination_lat);
       assert.notEqual(row.offer.destination_lng, offer.destination_lng);
@@ -438,6 +443,84 @@ describe('engine-signed missions', () => {
     });
   });
 
+  describe('limits per mission type', () => {
+    test('research: three are held at once and a fourth is refused with mission_limit_reached', async () => {
+      const pilot = await newPilot();
+      const held = [];
+      for (let i = 0; i < 3; i++) held.push(await acceptOk(pilot, research(pilot)));
+
+      const fourth = await accept(pilot, research(pilot));
+      assert.equal(fourth.statusCode, 409);
+      assert.deepEqual(
+        (({ error, ...rest }) => rest)(json(fourth)),
+        { code: 'mission_limit_reached', type: 'MISSION_TYPE_RESEARCH', limit: 3 }
+      );
+      // Listed oldest first; `active` is the oldest.
+      const res = json(await call(pilot, 'GET', '/game/missions/active'));
+      assert.deepEqual(res.missions, held);
+      assert.deepEqual(res.active, held[0]);
+      assert.deepEqual(res.limits, LIMITS);
+
+      // Abandoning one frees its place.
+      assert.equal((await abandon(pilot, held[1].mission_id)).statusCode, 200);
+      await acceptOk(pilot, research(pilot));
+    });
+
+    test('passage: a second is refused with mission_limit_reached even when it boards no one', async () => {
+      const pilot = await newPilot();
+      await acceptOk(pilot, signedOffer(pilot, { required_berths: 1 }));
+      const second = await accept(pilot, signedOffer(pilot, { required_berths: 0 }));
+      assert.equal(second.statusCode, 409);
+      assert.equal(json(second).code, 'mission_limit_reached');
+      assert.equal(json(second).type, 'MISSION_TYPE_PASSAGE');
+      assert.equal(json(second).limit, 1);
+      assert.equal(await aboard(pilot), 1);
+      assert.equal((await activeIds(pilot)).length, 1);
+    });
+
+    test('the types are independent: a passage and three research are held together', async () => {
+      const pilot = await newPilot();
+      const passage = await acceptOk(pilot, signedOffer(pilot));
+      const surveys = [];
+      for (let i = 0; i < 3; i++) surveys.push(await acceptOk(pilot, research(pilot)));
+      assert.deepEqual(await activeIds(pilot), [passage, ...surveys].map((m) => m.mission_id));
+      assert.equal(await aboard(pilot), 2);
+      assert.equal(json(await accept(pilot, research(pilot))).code, 'mission_limit_reached');
+      assert.equal(json(await accept(pilot, signedOffer(pilot, { required_berths: 0 }))).code, 'mission_limit_reached');
+    });
+
+    test('gather: one is held at once, independent of the other types', () => {
+      const gather = { type: 'MISSION_TYPE_GATHER' };
+      const others = [{ type: 'MISSION_TYPE_PASSAGE' }, { type: 'MISSION_TYPE_RESEARCH' }, { type: 'MISSION_TYPE_RESEARCH' }];
+      assert.equal(underMissionLimit(others, 'MISSION_TYPE_GATHER'), true);
+      assert.equal(underMissionLimit([...others, gather], 'MISSION_TYPE_GATHER'), false);
+      assert.equal(underMissionLimit([gather], 'MISSION_TYPE_RESEARCH'), true);
+      assert.equal(underMissionLimit([gather], 'MISSION_TYPE_PASSAGE'), true);
+      // A type the table does not list is never taken.
+      assert.equal(underMissionLimit([], 'MISSION_TYPE_UNSPECIFIED'), false);
+    });
+
+    test('the same mission cannot be held twice', async () => {
+      const pilot = await newPilot();
+      const offer = research(pilot);
+      await acceptOk(pilot, offer);
+      const again = await accept(pilot, research(pilot, { mission_id: offer.mission_id }));
+      assert.equal(again.statusCode, 409);
+      assert.equal(json(again).code, 'mission_already_active');
+      assert.equal((await activeIds(pilot)).length, 1);
+    });
+
+    test('concurrent accepts of one type stop at its cap', async () => {
+      const pilot = await newPilot();
+      await acceptOk(pilot, research(pilot));
+      await acceptOk(pilot, research(pilot));
+      const results = await Promise.all([1, 2, 3].map(() => accept(pilot, research(pilot))));
+      assert.equal(results.filter((r) => r.statusCode === 200).length, 1, results.map((r) => r.body).join('\n'));
+      assert.deepEqual(results.filter((r) => r.statusCode !== 200).map((r) => json(r).code), ['mission_limit_reached', 'mission_limit_reached']);
+      assert.equal((await activeIds(pilot)).length, 3);
+    });
+  });
+
   describe('cooldown', () => {
     test('reports the per-origin cooldown after a completion', async () => {
       const pilot = await newPilot();
@@ -496,6 +579,35 @@ describe('engine-signed missions', () => {
       assert.equal(tokenAboard(await call(pilot, 'POST', '/game/missions/abandon')), 0);
       assert.equal(await storedAboard(pilot), 0);
     });
+
+    test('by id while others are held; only the passage unboards anyone', async () => {
+      const pilot = await newPilot();
+      const passage = await acceptOk(pilot, signedOffer(pilot));
+      const survey = await acceptOk(pilot, research(pilot));
+      const other = await acceptOk(pilot, research(pilot));
+
+      const unnamed = await abandon(pilot);
+      assert.equal(unnamed.statusCode, 400);
+      assert.equal(json(unnamed).code, 'mission_id_required');
+      assert.equal((await abandon(pilot, randomUUID())).statusCode, 404);
+      assert.equal((await abandon(pilot, 'not-a-mission-id')).statusCode, 400);
+      assert.equal((await activeIds(pilot)).length, 3);
+
+      const res = await abandon(pilot, survey.mission_id);
+      assert.equal(res.statusCode, 200);
+      assert.equal(json(res).mission_id, survey.mission_id);
+      assert.equal(tokenAboard(res), 2);
+      assert.deepEqual(await activeIds(pilot), [passage.mission_id, other.mission_id]);
+
+      const off = await abandon(pilot, passage.mission_id);
+      assert.equal(json(off).mission_id, passage.mission_id);
+      assert.equal(tokenAboard(off), 0);
+      assert.equal(await aboard(pilot), 0);
+
+      // With one left, the id may be left out again.
+      assert.equal(json(await abandon(pilot)).mission_id, other.mission_id);
+      assert.deepEqual(await activeIds(pilot), []);
+    });
   });
 
   describe('missions stored before offers were signed', () => {
@@ -525,6 +637,8 @@ describe('engine-signed missions', () => {
 
       const res = json(await call(pilot, 'GET', '/game/missions/active'));
       assert.equal(res.active, null);
+      assert.deepEqual(res.missions, []);
+      assert.deepEqual(res.cancelled_missions, [res.cancelled_mission]);
       assert.equal(res.cancelled_mission.mission_id, offer.mission_id);
       assert.equal(res.cancelled_mission.reason, 'format_changed');
       assert.match(res.cancelled_mission.message, /format changed/);
@@ -532,7 +646,7 @@ describe('engine-signed missions', () => {
       assert.equal(await credits(pilot), 0); // nothing was charged at accept, so nothing is refunded
 
       // Reported once; afterwards there is simply no mission.
-      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active: null });
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), NO_MISSIONS);
       await acceptOk(pilot);
     });
 
@@ -581,7 +695,15 @@ describe('engine-signed missions', () => {
     test('a current mission is left alone', async () => {
       const pilot = await newPilot();
       const active = await acceptOk(pilot);
-      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { active });
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { missions: [active], limits: LIMITS, active });
+    });
+
+    test('a refused accept leaves them in place, to be reported', async () => {
+      const pilot = await newPilot();
+      const offer = legacyOffer();
+      await seed(pilot, offer.mission_id, offer);
+      assert.equal(json(await accept(pilot, signedOffer(pilot, { required_berths: 3 }))).code, 'insufficient_berths');
+      assert.equal(json(await call(pilot, 'GET', '/game/missions/active')).cancelled_mission.mission_id, offer.mission_id);
     });
   });
 
@@ -750,6 +872,27 @@ describe('engine-signed missions', () => {
       assert.equal((await complete(pilot, wrongAccepted)).statusCode, 400);
       const wrongDest = signedClaim(pilot, active, { destinationStationId: randomUUID() });
       assert.equal((await complete(pilot, wrongDest)).statusCode, 400);
+    });
+
+    test('settles the mission the claim names while others are held', async () => {
+      const pilot = await newPilot();
+      const passage = await acceptOk(pilot, signedOffer(pilot));
+      const first = await acceptOk(pilot, research(pilot));
+      const second = await acceptOk(pilot, research(pilot));
+
+      const claim = signedClaim(pilot, second);
+      const res = await complete(pilot, claim);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).payout, claim.rewardCredits);
+      assert.equal(tokenAboard(res), 2); // a survey boarded no one, so the passage's passengers stay
+      assert.deepEqual(await activeIds(pilot), [passage.mission_id, first.mission_id]);
+      assert.equal((await complete(pilot, claim)).statusCode, 404);
+
+      const landed = await complete(pilot, signedClaim(pilot, passage));
+      assert.equal(landed.statusCode, 200, landed.body);
+      assert.equal(tokenAboard(landed), 0);
+      assert.deepEqual(await activeIds(pilot), [first.mission_id]);
+      assert.equal(await credits(pilot), claim.rewardCredits + passage.offer.reward_credits + 10);
     });
 
     test('concurrent completions pay out and unboard once', async () => {
