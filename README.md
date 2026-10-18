@@ -204,7 +204,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `POST /game/missions/abandon`
   - Body `{ missionId }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `404` when no such mission is held. Returns `{ abandoned, mission_id, token }`. No payout and no cooldown; a passage's passengers disembark wherever the ship is.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
 
 ### Game Sessions
 - `GET /game/session` (Protected)
