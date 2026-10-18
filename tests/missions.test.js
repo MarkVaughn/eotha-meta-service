@@ -138,7 +138,7 @@ async function acceptOk(pilot, offer = signedOffer(pilot)) {
 
 // Written out rather than imported, so a cap removed or changed in the table fails these tests.
 const LIMITS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 3, MISSION_TYPE_GATHER: 1 };
-const NO_MISSIONS = { missions: [], limits: LIMITS, active: null };
+const NO_MISSIONS = { missions: [], limits: LIMITS, active: null, standings: {} };
 
 const activeMission = async (pilot) => json(await call(pilot, 'GET', '/game/missions/active')).active;
 const activeIds = async (pilot) => json(await call(pilot, 'GET', '/game/missions/active')).missions.map((m) => m.mission_id);
@@ -171,6 +171,21 @@ function signedClaim(pilot, active, overrides = {}, key = rtseKey) {
 }
 
 const complete = (pilot, claim) => call(pilot, 'POST', '/game/missions/complete', { claim });
+
+const standings = async (pilot) => json(await call(pilot, 'GET', '/game/missions/active')).standings;
+const setStanding = (pilot, factionId, standing) =>
+  app.prisma.playerReputation.upsert({
+    where: { playerId_factionId: { playerId: pilot.id, factionId } },
+    update: { standing },
+    create: { playerId: pilot.id, factionId, standing }
+  });
+const abandonRows = (pilot) => app.prisma.abandonedMission.findMany({ where: { playerId: pilot.id } });
+// Moves a held mission's acceptance `agoMs` into the past, so a claim completed by now can be late.
+async function acceptedAgo(pilot, active, agoMs) {
+  const acceptedAt = new Date(Date.now() - agoMs);
+  await app.prisma.playerMission.updateMany({ where: { playerId: pilot.id, missionId: active.mission_id }, data: { acceptedAt } });
+  return { ...active, accepted_at_ms: acceptedAt.getTime(), deadline_ms: acceptedAt.getTime() + active.offer.duration_limit_ms };
+}
 
 describe('engine-signed missions', () => {
   before(async () => { await app.ready(); });
@@ -213,7 +228,7 @@ describe('engine-signed missions', () => {
       const stored = await activeMission(pilot);
       assert.deepEqual(stored, active);
       assert.equal(verifyMissionOffer(stored.offer, app.claimKey.key), true);
-      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { missions: [active], limits: LIMITS, active });
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { missions: [active], limits: LIMITS, active, standings: {} });
     });
 
     test('the stored coordinates are exact where the JSON column alone would move them', async () => {
@@ -695,7 +710,7 @@ describe('engine-signed missions', () => {
     test('a current mission is left alone', async () => {
       const pilot = await newPilot();
       const active = await acceptOk(pilot);
-      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { missions: [active], limits: LIMITS, active });
+      assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')), { missions: [active], limits: LIMITS, active, standings: {} });
     });
 
     test('a refused accept leaves them in place, to be reported', async () => {
@@ -718,7 +733,13 @@ describe('engine-signed missions', () => {
       const res = await complete(pilot, claim);
       assert.equal(res.statusCode, 200);
       const { token, ...body } = json(res);
-      assert.deepEqual(body, { success: true, credits: claim.rewardCredits, payout: claim.rewardCredits });
+      assert.deepEqual(body, {
+        success: true,
+        credits: claim.rewardCredits,
+        payout: claim.rewardCredits,
+        reputation_change: 5,
+        standings: { 'faction-high': 5 }
+      });
       assert.equal(app.jwt.verify(token).ship_attributes.passengers_aboard, 0);
       assert.equal(await aboard(pilot), 0);
 
@@ -794,10 +815,10 @@ describe('engine-signed missions', () => {
       assert.equal((await complete(pilot, claim)).statusCode, 200);
     });
 
-    test('claim past the deadline is rejected even with a valid signature', async () => {
+    test('a claim completed before it was accepted is rejected', async () => {
       const pilot = await newPilot();
       const active = await acceptOk(pilot);
-      const claim = signedClaim(pilot, active, { completedAtMs: active.deadline_ms + 1 });
+      const claim = signedClaim(pilot, active, { completedAtMs: active.accepted_at_ms - 1, durationTakenMs: 0 });
       assert.equal((await complete(pilot, claim)).statusCode, 400);
       assert.equal(await credits(pilot), 0);
       assert.ok(await activeMission(pilot));
@@ -841,6 +862,8 @@ describe('engine-signed missions', () => {
       assert.equal(await credits(pilot), 2_147_483_647 - claim.rewardCredits + 1);
       assert.ok(await activeMission(pilot));
       assert.equal(await aboard(pilot), 2); // rolled back with the rest
+      assert.deepEqual(await standings(pilot), {});
+      assert.equal(await app.prisma.completedMission.count({ where: { playerId: pilot.id } }), 0);
 
       // Exactly reaching the maximum is allowed.
       await setCredits(pilot, 2_147_483_647 - claim.rewardCredits);
@@ -905,6 +928,320 @@ describe('engine-signed missions', () => {
       assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
       assert.equal(await credits(pilot), claim.rewardCredits);
       assert.equal(await aboard(pilot), 1);
+      assert.deepEqual(await standings(pilot), { 'faction-high': 5 });
+    });
+  });
+  describe('late completion', () => {
+    const MIN = 60_000;
+    const HOUR = 60 * MIN;
+
+    test('a late claim pays the signed decayed reward, applies its negative reputation and settles as usual', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot); // a 10-minute passage
+      const late = await acceptedAgo(pilot, await acceptOk(pilot, offer), 25 * MIN);
+      // Completed 15 minutes after the deadline (lateness 1.5): the engine signed the passage floors.
+      const claim = signedClaim(pilot, late, { completedAtMs: late.deadline_ms + 15 * MIN, rewardCredits: 500, reputationChange: -10 });
+
+      const res = await complete(pilot, claim);
+      assert.equal(res.statusCode, 200, res.body);
+      const { token, ...body } = json(res);
+      assert.deepEqual(body, { success: true, credits: 500, payout: 500, reputation_change: -10, standings: { 'faction-high': -10 } });
+      assert.equal(app.jwt.verify(token).ship_attributes.passengers_aboard, 0);
+      assert.equal(await credits(pilot), 500);
+      assert.equal(await activeMission(pilot), null);
+      assert.equal((await cooldown(pilot, offer.origin_station_id)).active, true);
+
+      const row = await app.prisma.completedMission.findFirst({ where: { playerId: pilot.id } });
+      assert.equal(row.missionId, offer.mission_id);
+      assert.equal(row.factionId, 'faction-high');
+      assert.equal(row.rewardCredits, 500);
+      assert.equal(row.reputationChange, -10);
+      const rep = await app.prisma.playerReputation.findMany({ where: { playerId: pilot.id } });
+      assert.deepEqual(rep.map((r) => [r.factionId, r.standing]), [['faction-high', -10]]);
+      assert.equal((await complete(pilot, claim)).statusCode, 404);
+      assert.deepEqual(await standings(pilot), { 'faction-high': -10 });
+    });
+
+    test('the cutoff is the deadline plus three duration limits: at it the claim pays, a millisecond beyond it is refused', async () => {
+      const pilot = await newPilot();
+      const onTime = await acceptedAgo(pilot, await acceptOk(pilot, research(pilot)), 45 * MIN);
+      const beyond = await acceptedAgo(pilot, await acceptOk(pilot, research(pilot)), 45 * MIN);
+      // 10-minute limit: the cutoff is 30 minutes after the deadline.
+      const refused = await complete(pilot, signedClaim(pilot, beyond, { completedAtMs: beyond.deadline_ms + 30 * MIN + 1, rewardCredits: 1000, reputationChange: 0 }));
+      assert.equal(refused.statusCode, 400);
+      assert.equal(json(refused).code, 'mission_expired');
+      assert.equal(await credits(pilot), 0);
+      assert.deepEqual(await standings(pilot), {});
+      assert.equal(await app.prisma.completedMission.count({ where: { playerId: pilot.id } }), 0);
+      assert.equal((await activeIds(pilot)).length, 2);
+
+      const paid = await complete(pilot, signedClaim(pilot, onTime, { completedAtMs: onTime.deadline_ms + 30 * MIN, rewardCredits: 1000, reputationChange: 0 }));
+      assert.equal(paid.statusCode, 200, paid.body);
+      assert.equal(json(paid).payout, 1000);
+      // A zero reputation change leaves the standing neutral and stores no row.
+      assert.deepEqual(json(paid).standings, {});
+      assert.deepEqual(await activeIds(pilot), [beyond.mission_id]);
+    });
+
+    test('the late window is capped at 24 hours for long missions', async () => {
+      const pilot = await newPilot();
+      const limit = 36 * HOUR; // three limits would be 108 hours
+      const offerFor = () => research(pilot, { duration_limit_ms: limit });
+      const atCap = await acceptedAgo(pilot, await acceptOk(pilot, offerFor()), limit + 25 * HOUR);
+      const pastCap = await acceptedAgo(pilot, await acceptOk(pilot, offerFor()), limit + 25 * HOUR);
+
+      const refused = await complete(pilot, signedClaim(pilot, pastCap, { completedAtMs: pastCap.deadline_ms + 24 * HOUR + 1, rewardCredits: 1000, reputationChange: 0 }));
+      assert.equal(refused.statusCode, 400);
+      assert.equal(json(refused).code, 'mission_expired');
+      const paid = await complete(pilot, signedClaim(pilot, atCap, { completedAtMs: atCap.deadline_ms + 24 * HOUR, rewardCredits: 1000, reputationChange: 0 }));
+      assert.equal(paid.statusCode, 200, paid.body);
+    });
+
+    test('a claim gaining more reputation than the offer is rejected and changes nothing', async () => {
+      const pilot = await newPilot();
+      const active = await acceptOk(pilot);
+      const res = await complete(pilot, signedClaim(pilot, active, { reputationChange: 6 }));
+      assert.equal(res.statusCode, 400);
+      assert.equal(await credits(pilot), 0);
+      assert.deepEqual(await standings(pilot), {});
+      assert.ok(await activeMission(pilot));
+    });
+
+    test('standing is clamped to [-1000, 1000]', async () => {
+      const pilot = await newPilot();
+      await setStanding(pilot, 'faction-high', -995);
+      const late = await acceptedAgo(pilot, await acceptOk(pilot), 25 * MIN);
+      const sunk = await complete(pilot, signedClaim(pilot, late, { completedAtMs: late.deadline_ms + 15 * MIN, rewardCredits: 500, reputationChange: -10 }));
+      assert.deepEqual(json(sunk).standings, { 'faction-high': -1000 });
+      // The ledger keeps the signed change, not the clamped one.
+      assert.equal((await app.prisma.completedMission.findFirst({ where: { playerId: pilot.id } })).reputationChange, -10);
+
+      await setStanding(pilot, 'faction-high', 998);
+      const active = await acceptOk(pilot);
+      const raised = await complete(pilot, signedClaim(pilot, active));
+      assert.deepEqual(json(raised).standings, { 'faction-high': 1000 });
+    });
+
+    test('an offer without a faction credits the independent standing', async () => {
+      const pilot = await newPilot();
+      const active = await acceptOk(pilot, signedOffer(pilot, { faction_id: '' }));
+      const res = await complete(pilot, signedClaim(pilot, active));
+      assert.deepEqual(json(res).standings, { independent: 5 });
+      assert.equal((await app.prisma.completedMission.findFirst({ where: { playerId: pilot.id } })).factionId, 'independent');
+    });
+
+    test('concurrent late completions pay and apply reputation once', async () => {
+      const pilot = await newPilot();
+      const late = await acceptedAgo(pilot, await acceptOk(pilot), 25 * MIN);
+      const claim = signedClaim(pilot, late, { completedAtMs: late.deadline_ms + 4 * MIN, rewardCredits: 1700, reputationChange: -1 });
+      const results = await Promise.all([1, 2, 3, 4].map(() => complete(pilot, claim)));
+      assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
+      assert.equal(await credits(pilot), 1700);
+      assert.deepEqual(await standings(pilot), { 'faction-high': -1 });
+      assert.equal(await app.prisma.completedMission.count({ where: { playerId: pilot.id } }), 1);
+    });
+  });
+
+  describe('abandon penalties', () => {
+    const abandonAt = (pilot, missionId, dockedReceipt) => call(pilot, 'POST', '/game/missions/abandon', { missionId, dockedReceipt });
+    const MIN = 60_000;
+
+    test('research costs 8 reputation and starts a 15-minute cooldown at its origin, docked or in flight', async () => {
+      const pilot = await newPilot();
+      const offer = research(pilot);
+      const active = await acceptOk(pilot, offer);
+
+      const res = await abandon(pilot, active.mission_id);
+      assert.equal(res.statusCode, 200, res.body);
+      const { token, ...body } = json(res);
+      assert.deepEqual(body, {
+        abandoned: true,
+        mission_id: offer.mission_id,
+        outcome: 'MISSION_ABANDON_OUTCOME_CANCELLED',
+        reputation_change: -8,
+        standings: { 'faction-high': -8 }
+      });
+      assert.ok(app.jwt.verify(token));
+      assert.equal(await credits(pilot), 0);
+      const wait = await cooldown(pilot, offer.origin_station_id);
+      assert.ok(wait.remaining_ms > 14 * MIN && wait.remaining_ms <= 15 * MIN, JSON.stringify(wait));
+      const [row] = await abandonRows(pilot);
+      assert.equal(row.missionId, offer.mission_id);
+      assert.equal(row.originStationId, offer.origin_station_id);
+      assert.equal(row.factionId, 'faction-high');
+      assert.equal(row.missionType, 'RESEARCH');
+      assert.equal(row.reputationLoss, -8);
+      assert.equal(row.hostageMinutes, 0);
+      assert.equal(row.reason, 'in_flight');
+
+      // Docked anywhere, the terms are the same.
+      const docked = await acceptOk(pilot, research(pilot));
+      const there = await abandonAt(pilot, docked.mission_id, dockedReceipt(pilot));
+      assert.equal(there.statusCode, 200, there.body);
+      assert.equal(json(there).reputation_change, -8);
+      assert.deepEqual(json(there).standings, { 'faction-high': -16 });
+      assert.equal((await abandonRows(pilot)).find((r) => r.missionId === docked.mission_id).reason, 'in_port_dock');
+    });
+
+    test('a passage cancelled while docked at its origin costs 2 reputation and a 5-minute cooldown, and the passengers step off', async () => {
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      const active = await acceptOk(pilot, offer);
+      assert.equal(await aboard(pilot), 2);
+
+      const res = await abandonAt(pilot, active.mission_id, receiptAtOrigin(pilot, offer));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).outcome, 'MISSION_ABANDON_OUTCOME_CANCELLED');
+      assert.equal(json(res).reputation_change, -2);
+      assert.deepEqual(json(res).standings, { 'faction-high': -2 });
+      assert.equal(tokenAboard(res), 0);
+      assert.equal(await aboard(pilot), 0);
+      const wait = await cooldown(pilot, offer.origin_station_id);
+      assert.ok(wait.remaining_ms > 4 * MIN && wait.remaining_ms <= 5 * MIN, JSON.stringify(wait));
+      const [row] = await abandonRows(pilot);
+      assert.equal(row.missionType, 'PASSAGE');
+      assert.equal(row.reason, 'in_port_origin');
+      assert.equal(row.reputationLoss, -2);
+    });
+
+    test('a passage abandoned in flight or at another dock costs nothing yet and starts no cooldown', async () => {
+      // The passenger hostage state takes these over; until then they behave as before.
+      const pilot = await newPilot();
+      const offer = signedOffer(pilot);
+      await acceptOk(pilot, offer);
+      const flight = await abandon(pilot);
+      assert.equal(flight.statusCode, 200);
+      assert.equal(json(flight).reputation_change, 0);
+      assert.deepEqual(json(flight).standings, {});
+      assert.equal(tokenAboard(flight), 0);
+      assert.equal((await cooldown(pilot, offer.origin_station_id)).active, false);
+
+      const elsewhere = signedOffer(pilot);
+      await acceptOk(pilot, elsewhere);
+      // Docked at the same station id but in another system is another dock.
+      const res = await abandonAt(pilot, elsewhere.mission_id, receiptAtOrigin(pilot, elsewhere, { systemH3: '8828308285fffff' }));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).reputation_change, 0);
+      assert.equal(await aboard(pilot), 0);
+      assert.equal((await cooldown(pilot, elsewhere.origin_station_id)).active, false);
+      const rows = await abandonRows(pilot);
+      assert.deepEqual(rows.map((r) => [r.missionId, r.reason, r.reputationLoss]).sort(), [
+        [offer.mission_id, 'in_flight', 0],
+        [elsewhere.mission_id, 'in_port_dock', 0]
+      ].sort());
+      assert.deepEqual(await standings(pilot), {});
+    });
+
+    test('a refused receipt changes nothing', async () => {
+      const pilot = await newPilot();
+      const offer = research(pilot);
+      const active = await acceptOk(pilot, offer);
+      const other = await newPilot('Other');
+      for (const [receipt, code] of [
+        [receiptAtOrigin(other, offer), 'docked_receipt_invalid'],
+        [receiptAtOrigin(pilot, offer, { signature: Buffer.alloc(64, 7).toString('base64') }), 'docked_receipt_invalid'],
+        [receiptAtOrigin(pilot, offer, { issuedAtMs: Date.now() - 10 * MIN, dockedAtMs: Date.now() - 11 * MIN }), 'docked_receipt_expired']
+      ]) {
+        const res = await abandonAt(pilot, active.mission_id, receipt);
+        assert.equal(res.statusCode, 403, res.body);
+        assert.equal(json(res).code, code);
+      }
+      assert.equal((await abandonAt(pilot, active.mission_id, { dockedEntityId: 'nope' })).statusCode, 400);
+
+      const configured = app.claimKey;
+      app.claimKey = null;
+      try {
+        const res = await abandonAt(pilot, active.mission_id, receiptAtOrigin(pilot, offer));
+        assert.equal(res.statusCode, 503);
+        assert.equal(json(res).error, 'CLAIM_KEY_NOT_CONFIGURED');
+      } finally {
+        app.claimKey = configured;
+      }
+      assert.deepEqual(await activeIds(pilot), [active.mission_id]);
+      assert.deepEqual(await abandonRows(pilot), []);
+      assert.deepEqual(await standings(pilot), {});
+      assert.equal((await cooldown(pilot, offer.origin_station_id)).active, false);
+    });
+
+    test('accept-abandon churn: each abandon costs reputation, the origin cools down, and an abandoned mission is never taken again', async () => {
+      const pilot = await newPilot();
+      const offer = research(pilot);
+      const active = await acceptOk(pilot, offer);
+      assert.equal((await abandon(pilot, active.mission_id)).statusCode, 200);
+
+      const again = await accept(pilot, research(pilot, { origin_station_id: offer.origin_station_id }));
+      assert.equal(again.statusCode, 409);
+      assert.equal(json(again).code, 'origin_on_cooldown');
+      // Even once the cooldown has passed, the same offer is refused.
+      await app.prisma.missionCooldown.deleteMany({ where: { playerId: pilot.id } });
+      const same = await accept(pilot, offer);
+      assert.equal(same.statusCode, 409);
+      assert.equal(json(same).code, 'mission_abandoned');
+      assert.deepEqual(await activeIds(pilot), []);
+
+      // Elsewhere, each churned mission costs again.
+      for (let i = 0; i < 3; i += 1) {
+        const churn = await acceptOk(pilot, research(pilot));
+        assert.equal((await abandon(pilot, churn.mission_id)).statusCode, 200);
+      }
+      assert.deepEqual(await standings(pilot), { 'faction-high': -32 });
+      assert.equal((await abandonRows(pilot)).length, 4);
+    });
+
+    test('an abandon cooldown never shortens one already running at the origin', async () => {
+      const pilot = await newPilot();
+      const passage = signedOffer(pilot);
+      const survey = research(pilot, { origin_station_id: passage.origin_station_id, origin_system_h3: passage.origin_system_h3 });
+      const held = await acceptOk(pilot, passage);
+      const done = await acceptOk(pilot, survey);
+      assert.equal((await complete(pilot, signedClaim(pilot, done))).statusCode, 200); // 10 minutes
+      assert.equal((await abandonAt(pilot, held.mission_id, receiptAtOrigin(pilot, passage))).statusCode, 200); // 5 minutes
+      const wait = await cooldown(pilot, passage.origin_station_id);
+      assert.ok(wait.remaining_ms > 9 * MIN, JSON.stringify(wait));
+    });
+
+    test('a cooldown stored before abandons had their own still runs 10 minutes from completion', async () => {
+      const pilot = await newPilot();
+      const stationId = randomUUID();
+      await app.prisma.missionCooldown.create({
+        data: { playerId: pilot.id, originStationId: stationId, completedAt: new Date(Date.now() - 4 * MIN) }
+      });
+      const wait = await cooldown(pilot, stationId);
+      assert.ok(wait.remaining_ms > 5 * MIN && wait.remaining_ms <= 6 * MIN, JSON.stringify(wait));
+    });
+
+    test('the standing floor is -1000', async () => {
+      const pilot = await newPilot();
+      await setStanding(pilot, 'faction-high', -995);
+      const active = await acceptOk(pilot, research(pilot));
+      const res = await abandon(pilot, active.mission_id);
+      assert.equal(json(res).reputation_change, -8);
+      assert.deepEqual(json(res).standings, { 'faction-high': -1000 });
+    });
+
+    test('concurrent abandons of one mission penalise once', async () => {
+      const pilot = await newPilot();
+      const active = await acceptOk(pilot, research(pilot));
+      const results = await Promise.all([1, 2, 3, 4].map(() => abandon(pilot, active.mission_id)));
+      assert.deepEqual(results.map((r) => r.statusCode).sort(), [200, 404, 404, 404]);
+      assert.deepEqual(await standings(pilot), { 'faction-high': -8 });
+      assert.equal((await abandonRows(pilot)).length, 1);
+    });
+
+    test('a concurrent abandon and completion settle the mission one way only', async () => {
+      for (let i = 0; i < 3; i += 1) {
+        const pilot = await newPilot();
+        const active = await acceptOk(pilot, research(pilot));
+        const claim = signedClaim(pilot, active);
+        const [quit, done] = await Promise.all([abandon(pilot, active.mission_id), complete(pilot, claim)]);
+        const abandoned = quit.statusCode === 200;
+        assert.notEqual(abandoned, done.statusCode === 200, `${quit.statusCode} ${done.statusCode}`);
+        assert.equal(await credits(pilot), abandoned ? 0 : claim.rewardCredits);
+        assert.deepEqual(await standings(pilot), { 'faction-high': abandoned ? -8 : 5 });
+        assert.equal((await abandonRows(pilot)).length, abandoned ? 1 : 0);
+        assert.equal(await app.prisma.completedMission.count({ where: { playerId: pilot.id } }), abandoned ? 0 : 1);
+        assert.deepEqual(await activeIds(pilot), []);
+      }
     });
   });
 });
