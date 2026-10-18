@@ -37,8 +37,10 @@ export function toLoadout(shipId, components, passengersAboard) {
 }
 
 // Re-sign the caller's claims with fresh ship attributes so the token RTSE verifies is current.
-// The expiry is carried over: only a refresh token may extend a login.
-export function reissueToken(fastify, request, shipAttributes) {
-  const { iat, iss, ...claims } = request.user;
-  return fastify.signWithExpiry({ ...claims, ship_attributes: shipAttributes });
+// The expiry is carried over: only a refresh token may extend a login. A `cargo` lease claim is
+// never carried over (a reissued token would load a stale hold); only POST /game/cargo/lease adds
+// one, through `extraClaims`.
+export function reissueToken(fastify, request, shipAttributes, extraClaims = {}) {
+  const { iat, iss, cargo, ...claims } = request.user;
+  return fastify.signWithExpiry({ ...claims, ship_attributes: shipAttributes, ...extraClaims });
 }

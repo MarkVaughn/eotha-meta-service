@@ -9,8 +9,9 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 - **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing. A pilot created by dev login (and an existing dev pilot that has never been granted, holds 0 credits and has no upgraded components) receives `DEV_STARTING_CREDITS` (default 20,000) exactly once, recorded in `Player.devCreditsGrantedAt`, so ship upgrades can be bought; later logins never add more, and guests, linked and registered accounts never get it.
 - **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`.
 - **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
-- **Separate engine claim key**: Engine-signed claims (mission offers and completion, planet and system charts, docked receipts) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
+- **Separate engine claim key**: Engine-signed claims (mission offers and completion, planet and system charts, docked receipts, cargo manifests and sale records) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
 - **Password Hashing**: argon2id. Legacy unsalted SHA-256 hashes still verify and are upgraded to argon2id on the next successful login.
+- **Persisted cargo and ore sales**: Each pilot's hold is stored here and handed to the engine in a signed cargo lease; the engine's signed hold snapshots and sale records keep it current and turn a sale into real credits, each sale paid once. See [Cargo persistence and sales](#cargo-persistence-and-sales).
 - **Geospatial Space Harbors**: Spatial anchor persistence for players using PostGIS and Uber H3 hexagonal spatial indexing.
 - **Session Allocation**: Coordinates player assignment to internal RTSE simulation cluster instances.
 
@@ -35,6 +36,7 @@ eotha-meta-service/
 ├── src/
 │   ├── config/
 │   │   ├── auth.js             # Device-id length constants
+│   │   ├── cargo.js            # Cargo lease rules (lot limit, lease retention)
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
 │   │   ├── env.js              # Environment validation via Zod
@@ -43,6 +45,7 @@ eotha-meta-service/
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
+│   │   ├── cargo.js            # Verifies signed cargo manifests and sale records; the cargo fencing rule
 │   │   ├── claim-key.js        # Loads the public key engine-signed claims verify against
 │   │   ├── docked-receipt.js   # Verifies the engine's signed docked receipts
 │   │   ├── identity.js         # Guest -> linked player conversion
@@ -62,6 +65,7 @@ eotha-meta-service/
 │   │   │   ├── index.js        # Guest, Register, Login, Refresh, Logout, Link, and Dev-Login routes
 │   │   │   └── schema.js       # Fastify JSON request/response schemas
 │   │   └── game/
+│   │       ├── cargo.js        # Cargo lease, stored hold, manifest relay and ore sale routes
 │   │       ├── index.js        # Game session allocation routes
 │   │       └── schema.js       # Session route schemas
 │   └── app.js                  # Fastify server entry point
@@ -178,6 +182,17 @@ npm test
 - `POST /ship/dev/passengers` (Protected, **development only**)
   - Body `{ passengersAboard }`. A testing aid, not a game feature (passengers board when a mission is accepted): this sets the active ship's passenger count directly. It is registered only when `NODE_ENV` is not `production` (a production server answers `404`). A count above the ship's `passenger_capacity` is refused with `400 passengers_exceed_capacity`; on success it returns the loadout and a re-signed `token` carrying the new count.
 
+### Cargo
+All Protected. See [Cargo persistence and sales](#cargo-persistence-and-sales).
+- `POST /game/cargo/lease`
+  - No body. Issues a new cargo lease, which fences every earlier one, and returns `{ token, cargo: { lease_id, generation, lots, used_m3 } }`: the stored hold and a re-signed access token carrying it in its `cargo` claim, to connect to the engine with. Call it before every new engine connection.
+- `GET /game/cargo`
+  - `{ lease_id, generation, lots, used_m3 }`: the stored hold, for display while no engine session is connected (`lease_id: null`, `generation: 0` and no lots before the first lease).
+- `POST /game/cargo/manifest`
+  - Body `{ manifest }`: an engine-signed `CargoManifest`. Returns `{ applied }`: `true` when it became the stored hold, `false` for a stale snapshot of the same session (nothing changes). `403 cargo_manifest_invalid` (bad signature, or another pilot's), `409 cargo_superseded`, `409 cargo_lease_unknown`, `503 CLAIM_KEY_NOT_CONFIGURED`.
+- `POST /game/cargo/sell`
+  - Body `{ saleRecord }`: an engine-signed `SaleRecord` (V2). Credits its `totalCredits` once and stores its `remaining` hold, in one transaction. Returns `{ credits, total_credits, lots, replayed }`, `credits` being the new balance and `lots` the stored hold; a replay of the same record answers `200` with the first sale's total, the current balance and `replayed: true`, and pays nothing. `403 sale_record_invalid`, `409 cargo_superseded` (the ore stays in the stored hold), `409 cargo_lease_unknown`, `409 credit_overflow` (nothing changes; the record stays creditable), `409 sale_nonce_conflict` (another pilot's sale already used the nonce), `503 CLAIM_KEY_NOT_CONFIGURED`.
+
 ### Missions
 All Protected. See [Mission offers](#mission-offers).
 - `GET /game/missions/cooldown?originId=<dock uuid>`
@@ -252,6 +267,53 @@ The count never exceeds `ship_attributes.passenger_capacity` (from the LIFE_SUPP
 
 Passengers board when a passage mission is accepted (`passengers_aboard += required_berths`) and disembark when it is completed or abandoned (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
 
+## Cargo persistence and sales
+
+The pilot's hold lives here, not in the engine session, so it survives reconnects, and selling ore at a station pays real credits into `Player.credits`. The engine alone decides what is in the hold, each lot's grade and purity, and what a sale is worth: it signs every change with its claim key, and this service verifies those records and stores the newest hold its fencing rule admits. It never re-prices a sale or computes a hold by subtraction. The contract (`CargoLot`, `CargoManifest`, `SaleRecord` V2 and the `cargo` lease claim) is in eotha-contracts (`rtse/v1/cargo.proto`, `rtse/v1/simulation.proto` and its README, "Cargo lease claim").
+
+**The lease.** Before every new engine connection the client calls `POST /game/cargo/lease`. Under the pilot's lock it adds a `CargoLease` row: the next `generation`, a fresh UUID `id` and a copy of the stored hold. That row is now the pilot's current lease, which fences every earlier one. The response's token is the presented access token re-signed (same `exp`, fresh `ship_attributes`) with one more claim, which the engine loads when a connection begins with it:
+
+```json
+"cargo": { "lease_id": "0b8b1c8e-5b0e-4c6e-9a53-3f4b2f0f6a11", "lots": [{ "resource_type": "TITANIUM", "units_milli": 12500, "grade": 4, "purity_bp": 8000 }] }
+```
+
+Tokens reissued for any other reason (upgrades, missions, dev passengers) drop `cargo`, so a stale hold is never loaded. Leases older than `CARGO_LEASE_RETENTION_MS` (30 days, `src/config/cargo.js`) are pruned when a new one is issued; the newest is always kept.
+
+**The records.** The engine signs a `CargoManifest` (the whole hold, at most every 10 s while it changes and when a docking completes) and, on a sale, a `SaleRecord` whose `remaining` is the whole hold after it. Each carries its position `(lease_id, session_id, seq)`: the lease the session loaded, a random 16-byte id of the engine session, and a `seq` that strictly increases within that session. The client relays them in proto-JSON camelCase, with `leaseId` and `sessionId` as lowercase hyphenated UUID spellings of their 16 bytes, `nonce` and `signature` as standard base64, uint64s as numbers or decimal strings, and lots as `CargoLot` objects (`resourceType` 1 to 32 characters, `grade` 1 to 5, `purityBp` 0 to 10000, at most 32 lots):
+
+```json
+{
+  "saleRecord": {
+    "pilotId": "<JWT sub>",
+    "stationId": "07070707-0707-4707-8707-070707070707",
+    "items": [{ "resourceType": "TITANIUM", "unitsMilli": 12500, "grade": 4, "purityBp": 8000 }],
+    "totalCredits": 720,
+    "soldAtMs": 1791811012345,
+    "nonce": "<base64, 16 bytes>",
+    "leaseId": "0b8b1c8e-5b0e-4c6e-9a53-3f4b2f0f6a11",
+    "sessionId": "5f2c0a9e-1d3b-4c7a-8e6f-0a1b2c3d4e5f",
+    "seq": 8,
+    "remaining": [],
+    "signature": "<base64, 64 bytes>"
+  }
+}
+```
+
+The verifiers (`src/lib/cargo.js`) mirror the signing layouts and fixed vectors of eotha-contracts `scripts/check-cargo-manifest-vector.js` and `scripts/check-sale-record-vector.js`, and `tests/cargo.test.js` asserts this service reproduces both. No record expires on a clock; `issuedAtMs` and `soldAtMs` are informational.
+
+**The rule** (`applyCargoWrite`). Every record passes it inside its transaction, under the pilot's lock:
+
+| Outcome | When | Manifest | Sale |
+|---|---|---|---|
+| applied | The lease is the current one, its session is unbound or this one (the first applied write binds it), and `seq` is above the last applied | Stored: `{ applied: true }` | Credited, and `remaining` stored |
+| in lineage | The lease's bound session is this one and it already applied a `seq` at or above this one | Nothing stored: `{ applied: false }` | Credited, nothing stored: the stored hold already lacks the ore |
+| superseded | Anything else: a newer lease, another session on the lease, or a fenced lease that never reached this `seq` | `409 cargo_superseded` | `409 cargo_superseded`; the ore stays in the stored hold |
+| unknown | The pilot has no lease with that id (another pilot's included) | `409 cargo_lease_unknown` | `409 cargo_lease_unknown` |
+
+A sale is credited at most once, by its nonce (`CargoSale.nonce` is unique); the credit uses the same overflow guard as mission payouts. The client answers a `409 cargo_superseded` by flushing what it still holds, leasing again and reconnecting. A sale that never reached this service leaves the ore in the stored hold, which the next lease restores: the pilot keeps the ore or the credits, never both and never neither.
+
+The hold belongs to the pilot (one active ship). A pilot with no lease has an empty hold, and session-only cargo from before this change is not imported. `CargoLease` and `CargoSale` are new tables, so existing databases pick them up with `npx prisma db push`, which only creates tables, indexes and foreign keys.
+
 ## Docked upgrades
 
 Ship upgrades are offered only while docked, and the client cannot be trusted to say so. The engine therefore signs a short-lived **docked receipt** on request (`DockedReceipt` in eotha-contracts `rtse/v1/simulation.proto`), the client relays it in the `dockedReceipt` field of `POST /ship/upgrade`, and this service verifies it exactly as it verifies chart and mission claims: an Ed25519 signature over a domain-separated, length-prefixed payload, checked against `CLAIM_PUBLIC_KEY` (never the login key). The verifier is `src/lib/docked-receipt.js`; the layout and a fixed test vector are in the contracts repository (`scripts/check-docked-receipt-vector.js`), and `tests/docked-receipt.test.js` asserts this service reproduces it.
@@ -289,7 +351,7 @@ Both constants are in `src/config/docking.js`; the age (`now - issuedAtMs`) is l
 **Better Auth's HTTP handler is not mounted.** Every sign-in goes through the routes above so the attestation check cannot be bypassed; they drive Better Auth in-process. Passwords are verified by `src/lib/password.js` against `Player.passwordHash`, so existing players, their argon2id hashes and the legacy SHA-256 upgrade-on-login keep working unchanged; Better Auth's `emailAndPassword` is not enabled. Better Auth's `jwt` plugin is not used either: it keeps its own generated keys, while the RTSE needs tokens signed by the shared keypair with the existing claims.
 
 **Tokens.**
-- *Access token*: an EdDSA JWT signed with `keys/private.pem` carrying exactly the claims the RTSE validates today (`sub`, `callsign`, `home_h3`, `ship_attributes`, `iat`, `exp`). `ship_attributes.hull_tier` (integer 1 to 5) is the tier of the pilot's HULL component, so the engine reads the hull tier directly instead of deriving it from `max_hull_hp`; it is recomputed with the other attributes whenever the token is minted or reissued (including after `POST /ship/upgrade`), and guests stay at 1 because they cannot upgrade the hull. `ship_attributes.passengers_aboard` is the persisted passenger count, bounded by `passenger_capacity` (see [Passengers aboard](#passengers-aboard)). It is stateless and short-lived (`ACCESS_TOKEN_TTL_SECONDS`, default 15 minutes). The only change to the token is a `kid` header, so the RTSE can keep pinning `keys/public.pem` or later fetch `/.well-known/jwks.json`. `POST /ship/upgrade` re-signs claims but keeps the original `exp`, so only a refresh extends a login.
+- *Access token*: an EdDSA JWT signed with `keys/private.pem` carrying exactly the claims the RTSE validates today (`sub`, `callsign`, `home_h3`, `ship_attributes`, `iat`, `exp`). `ship_attributes.hull_tier` (integer 1 to 5) is the tier of the pilot's HULL component, so the engine reads the hull tier directly instead of deriving it from `max_hull_hp`; it is recomputed with the other attributes whenever the token is minted or reissued (including after `POST /ship/upgrade`), and guests stay at 1 because they cannot upgrade the hull. `ship_attributes.passengers_aboard` is the persisted passenger count, bounded by `passenger_capacity` (see [Passengers aboard](#passengers-aboard)). It is stateless and short-lived (`ACCESS_TOKEN_TTL_SECONDS`, default 15 minutes). The only change to the token is a `kid` header, so the RTSE can keep pinning `keys/public.pem` or later fetch `/.well-known/jwks.json`. `POST /ship/upgrade` re-signs claims but keeps the original `exp`, so only a refresh extends a login. A token from `POST /game/cargo/lease` also carries a `cargo` claim (see [Cargo persistence and sales](#cargo-persistence-and-sales)); no other token does.
 - *Refresh token*: opaque, single-use, stored hashed. Every login creates a Better Auth session; that session's refresh tokens form the token family. Each refresh consumes the presented token and issues its successor. Presenting a consumed token means a copy exists, so the family is revoked and the Better Auth session deleted. A refresh also fails once the session expires (`SESSION_TTL_DAYS`, default 90) or is logged out. Better Auth has no built-in rotation or reuse detection, so this is implemented in `src/lib/refresh-tokens.js`.
 - `/auth/dev-login` keeps minting its 24-hour token, because the dev client has no refresh flow.
 
@@ -319,12 +381,12 @@ Whichever way the account row is created, the `databaseHooks.account.create.afte
 
 ### Engine claim key
 
-The RTSE signs mission offers, mission completion claims, planet charts, system charts and docked receipts with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
+The RTSE signs mission offers, mission completion claims, planet charts, system charts, docked receipts, cargo manifests and sale records with its own Ed25519 key, and this service verifies them. That key pair is **not** the login key: the engine holds the private half (its `RTSE_EXPLORATION_SEED`, 32 bytes as hex) and this service is given only the public half.
 
 - `CLAIM_PUBLIC_KEY`: the raw 32-byte Ed25519 public key as 64 hex characters.
 - `CLAIM_PUBLIC_KEY_FILE`: optional path to a file holding the same hex or a PEM public key. If both are set they must name the same key, otherwise startup fails. An unreadable or malformed key also fails startup; a blank variable counts as unset.
 - Startup logs `Engine claims are verified with Ed25519 key sha256:<16 hex>`, the fingerprint of the key in use, and never any key material.
-- With neither set, startup logs a warning and `POST /game/missions/accept`, `POST /game/missions/complete`, `POST /game/charts/register-planet` `POST /game/charts/claim-system` and `POST /ship/upgrade` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
+- With neither set, startup logs a warning and `POST /game/missions/accept`, `POST /game/missions/complete`, `POST /game/charts/register-planet` `POST /game/charts/claim-system`, `POST /game/cargo/manifest`, `POST /game/cargo/sell` and `POST /ship/upgrade` answer `503 { "error": "CLAIM_KEY_NOT_CONFIGURED" }` instead of rejecting every claim as a bad signature.
 - System charts are verified under `EOTHA_SYSTEM_CHART_V2`: `POST /game/charts/claim-system` requires `systemKey.systemDigest` (base64 of the 32-byte SHA-256 of the system's planet survey hashes, in planet id order) beside the signed fields, and the signature must cover it. V1 keys without a digest are refused.
 - `keys/public.pem` is the login key and is never used to verify claims, so a claim signed with the login key is refused with `403`.
 

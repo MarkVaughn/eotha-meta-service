@@ -18,7 +18,7 @@ async function claimKeyPlugin(fastify, opts) {
     fastify.log.info(`Engine claims are verified with Ed25519 key sha256:${claimKey.fingerprint}.`);
   } else {
     fastify.log.warn(
-      'CLAIM_PUBLIC_KEY is not set: mission completion, chart claims and ship upgrades are refused with 503 CLAIM_KEY_NOT_CONFIGURED.'
+      'CLAIM_PUBLIC_KEY is not set: mission completion, chart claims, cargo manifests and sales, and ship upgrades are refused with 503 CLAIM_KEY_NOT_CONFIGURED.'
     );
   }
 
