@@ -36,7 +36,7 @@ eotha-meta-service/
 ├── src/
 │   ├── config/
 │   │   ├── auth.js             # Device-id length constants
-│   │   ├── cargo.js            # Cargo lease rules (lot limit, lease retention)
+│   │   ├── cargo.js            # Cargo lease rules (lot limit)
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
 │   │   ├── env.js              # Environment validation via Zod
@@ -277,7 +277,7 @@ The pilot's hold lives here, not in the engine session, so it survives reconnect
 "cargo": { "lease_id": "0b8b1c8e-5b0e-4c6e-9a53-3f4b2f0f6a11", "lots": [{ "resource_type": "TITANIUM", "units_milli": 12500, "grade": 4, "purity_bp": 8000 }] }
 ```
 
-Tokens reissued for any other reason (upgrades, missions, dev passengers) drop `cargo`, so a stale hold is never loaded. Leases older than `CARGO_LEASE_RETENTION_MS` (30 days, `src/config/cargo.js`) are pruned when a new one is issued; the newest is always kept.
+Tokens reissued for any other reason (upgrades, missions, dev passengers) drop `cargo`, so a stale hold is never loaded.
 
 **The records.** The engine signs a `CargoManifest` (the whole hold, at most every 10 s while it changes and when a docking completes) and, on a sale, a `SaleRecord` whose `remaining` is the whole hold after it. Each carries its position `(lease_id, session_id, seq)`: the lease the session loaded, a random 16-byte id of the engine session, and a `seq` that strictly increases within that session. The client relays them in proto-JSON camelCase, with `leaseId` and `sessionId` as lowercase hyphenated UUID spellings of their 16 bytes, `nonce` and `signature` as standard base64, uint64s as numbers or decimal strings, and lots as `CargoLot` objects (`resourceType` 1 to 32 characters, `grade` 1 to 5, `purityBp` 0 to 10000, at most 32 lots):
 

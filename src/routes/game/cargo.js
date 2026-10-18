@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { CARGO_LEASE_RETENTION_MS } from '../../config/cargo.js';
 import { MAX_REWARD_CREDITS } from '../../config/missions.js';
 import {
   CARGO_WRITE,
@@ -62,9 +61,6 @@ export default async function cargoRoutes(fastify) {
           generation: (previous?.generation ?? 0) + 1,
           lots: previous?.lots ?? []
         }
-      });
-      await tx.cargoLease.deleteMany({
-        where: { playerId, id: { not: lease.id }, issuedAt: { lt: new Date(Date.now() - CARGO_LEASE_RETENTION_MS) } }
       });
       return { ship, lease };
     });

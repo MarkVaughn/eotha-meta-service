@@ -233,16 +233,6 @@ describe('cargo persistence and sales', () => {
       assert.deepEqual((await hold(pilot)).lots, [stored(ORE), stored(ROCK)]);
     });
 
-    test('prunes leases older than the retention window, keeping the newest', async () => {
-      const pilot = await newPilot();
-      const old = (await lease(pilot)).cargo;
-      const recent = (await lease(pilot)).cargo;
-      await app.prisma.cargoLease.update({ where: { id: old.lease_id }, data: { issuedAt: new Date(Date.now() - 31 * 86_400_000) } });
-      const newest = (await lease(pilot)).cargo;
-      const ids = (await app.prisma.cargoLease.findMany({ where: { playerId: pilot.id } })).map((row) => row.id).sort();
-      assert.deepEqual(ids, [recent.lease_id, newest.lease_id].sort());
-    });
-
     test('tokens reissued for other reasons never carry the lease', async () => {
       const pilot = await newPilot();
       const { token } = await lease(pilot);
@@ -361,6 +351,23 @@ describe('cargo persistence and sales', () => {
       assert.equal(res.statusCode, 200, res.body);
       assert.deepEqual(json(res), { credits: 61, total_credits: 61, lots: [stored(ROCK)], replayed: false });
       assert.deepEqual((await hold(pilot)).lots, [stored(ROCK)]);
+    });
+
+    test('a sale from a long-past lease still pays after newer leases are issued', async () => {
+      const pilot = await newPilot();
+      const { lease_id: leaseId } = (await lease(pilot)).cargo;
+      const session = randomUUID();
+      await relay(pilot, manifestFor(pilot, leaseId, session, 1, [ORE]));
+      const sale = saleFor(pilot, leaseId, session, 2, [ORE]);
+      assert.deepEqual(json(await relay(pilot, manifestFor(pilot, leaseId, session, 3, [ROCK]))), { applied: true });
+      await app.prisma.cargoLease.update({ where: { id: leaseId }, data: { issuedAt: new Date(Date.now() - 31 * 86_400_000) } });
+      await lease(pilot);
+      await lease(pilot);
+
+      const res = await sell(pilot, sale);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.deepEqual(json(res), { credits: 61, total_credits: 61, lots: [stored(ROCK)], replayed: false });
+      assert.equal(await credits(pilot), 61);
     });
 
     test('a replay answers with the first sale and credits once', async () => {
