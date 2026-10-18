@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { MAX_REWARD_CREDITS } from '../../config/missions.js';
 import {
+  CARGO_REFUSALS,
   CARGO_WRITE,
   applyCargoWrite,
   cargoManifestSchema,
@@ -22,15 +23,6 @@ const sellSchema = {
 };
 
 const OVERFLOW = Symbol('credit-overflow');
-
-// The client answers either 409 by flushing what it still holds, leasing again and reconnecting.
-const REFUSALS = {
-  [CARGO_WRITE.UNKNOWN]: { error: 'The cargo record names no lease of this pilot.', code: 'cargo_lease_unknown' },
-  [CARGO_WRITE.SUPERSEDED]: {
-    error: 'The cargo record was superseded by a newer lease or session; the stored hold is unchanged.',
-    code: 'cargo_superseded'
-  }
-};
 
 const holdView = (lease) => {
   const lots = lease?.lots ?? [];
@@ -82,7 +74,7 @@ export default async function cargoRoutes(fastify) {
       await lockActiveShip(tx, request.user);
       return applyCargoWrite(tx, request.user.sub, writeOf(manifest, toStoredLots(manifest.lots)));
     });
-    if (REFUSALS[outcome]) return reply.code(409).send(REFUSALS[outcome]);
+    if (CARGO_REFUSALS[outcome]) return reply.code(409).send(CARGO_REFUSALS[outcome]);
     return { applied: outcome === CARGO_WRITE.APPLIED };
   });
 
@@ -107,7 +99,7 @@ export default async function cargoRoutes(fastify) {
         }
         if (!sale) {
           const { outcome: write } = await applyCargoWrite(tx, playerId, writeOf(saleRecord, toStoredLots(saleRecord.remaining)));
-          if (REFUSALS[write]) return { refusal: REFUSALS[write] };
+          if (CARGO_REFUSALS[write]) return { refusal: CARGO_REFUSALS[write] };
           // Guarded increment; throwing rolls back the stored hold with it, so the record stays
           // creditable once the balance allows.
           const { count } = await tx.player.updateMany({

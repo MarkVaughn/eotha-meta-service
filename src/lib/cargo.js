@@ -13,6 +13,16 @@ export const CARGO_WRITE = Object.freeze({
   UNKNOWN: 'unknown' // no lease of this pilot's has that id
 });
 
+// The 409 a cargo record that cannot be credited is answered with. The client flushes what it still
+// holds, leases again and reconnects.
+export const CARGO_REFUSALS = Object.freeze({
+  [CARGO_WRITE.UNKNOWN]: { error: 'The cargo record names no lease of this pilot.', code: 'cargo_lease_unknown' },
+  [CARGO_WRITE.SUPERSEDED]: {
+    error: 'The cargo record was superseded by a newer lease or session; the stored hold is unchanged.',
+    code: 'cargo_superseded'
+  }
+});
+
 function lenPrefixed(value) {
   const bytes = Buffer.from(value, 'utf8');
   const len = Buffer.alloc(4);

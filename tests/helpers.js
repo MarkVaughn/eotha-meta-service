@@ -129,7 +129,7 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
   return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }
 
-const MISSION_TYPE_NUMBERS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2 };
+const MISSION_TYPE_NUMBERS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2, MISSION_TYPE_GATHER: 3 };
 const OFFER_WINDOW_MS = 30 * 60_000;
 
 /**
@@ -202,7 +202,14 @@ export function signedOffer(pilot, overrides = {}, signer = rtseKey) {
     u64(offer.reward_credits),
     i32(offer.reputation_change),
     str(offer.faction_id),
-    u64(offer.expires_at_ms)
+    u64(offer.expires_at_ms),
+    // Only a gather offer signs the suffix.
+    ...(offer.type === 'MISSION_TYPE_GATHER'
+      ? [
+          str(offer.resource_type), u32(offer.min_grade), u32(offer.quantity_m3), str(offer.source_body_id),
+          str(offer.source_system_h3), str(offer.source_node_h3), f64(offer.source_lat), f64(offer.source_lng)
+        ]
+      : [])
   ]);
   return { ...offer, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }
