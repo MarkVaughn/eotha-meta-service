@@ -33,6 +33,8 @@ model Player {
   activeMissions   PlayerMission[]
   missionCooldowns MissionCooldown[]
   completedMissions CompletedMission[]
+  cargoLeases  CargoLease[]
+  cargoSales   CargoSale[]
   planetCharts PlanetChart[]
   systemCharts SystemChart[]
   authSessions AuthSession[]
@@ -141,6 +143,41 @@ model CompletedMission {
   completedAt   DateTime @default(now())
 
   @@unique([playerId, missionId])
+}
+
+// One row per cargo lease issued (POST /game/cargo/lease). The pilot's hold is `lots` of the highest
+// generation; no row means an empty hold. A lease keeps the engine session bound to it by its first
+// applied write and the last seq applied, so records of that lineage can still be credited after a
+// newer lease fences it (src/lib/cargo.js, applyCargoWrite).
+model CargoLease {
+  id         String   @id @db.Uuid  // lease_id, signed into the token and into every engine record
+  playerId   String   @db.Uuid
+  player     Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  generation Int      // 1, 2, 3 ... per player; the highest is current
+  sessionId  Bytes?   // 16-byte engine session id bound by the first applied write
+  lastSeq    BigInt   @default(0)
+  lots       Json     // [{ resource_type, units_milli, grade, purity_bp }] as of lastSeq (or as issued)
+  issuedAt   DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([playerId, generation])
+}
+
+// A credited sale. The engine's nonce is unique, so a replay answers with the first result.
+model CargoSale {
+  id           String   @id @default(uuid()) @db.Uuid
+  playerId     String   @db.Uuid
+  player       Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  nonce        Bytes    @unique // SaleRecord.nonce (16 bytes)
+  leaseId      String   @db.Uuid
+  seq          BigInt
+  stationId    String
+  items        Json     // sold lots, as signed (stored form)
+  totalCredits Int
+  soldAtMs     BigInt
+  creditedAt   DateTime @default(now())
+
+  @@index([playerId, creditedAt])
 }
 
 model PlanetChart {
