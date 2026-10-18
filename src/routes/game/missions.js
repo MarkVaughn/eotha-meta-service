@@ -6,7 +6,9 @@ import {
   MISSION_LIMITS,
   underMissionLimit
 } from '../../config/missions.js';
+import { CARGO_MAX_LOTS } from '../../config/cargo.js';
 import { H3_PATTERN, UUID_PATTERN } from '../../config/patterns.js';
+import { CARGO_REFUSALS, applyCargoWrite, cargoLotSchema, toStoredLots } from '../../lib/cargo.js';
 import {
   DOCKED_ENTITY_ID_PATTERN,
   SIGNATURE_B64_PATTERN,
@@ -59,7 +61,17 @@ const offerSchema = {
     expires_at_ms: uint,
     offered_at_ms: uint,
     pilot_id: { type: 'string', minLength: 1, maxLength: 256 },
-    signature: { type: 'string', pattern: SIGNATURE_B64_PATTERN }
+    signature: { type: 'string', pattern: SIGNATURE_B64_PATTERN },
+    // GATHER only: the engine signs them for that type alone, so they are left out otherwise, and an
+    // offer of that type missing one never verifies.
+    resource_type: { type: 'string', maxLength: 256 },
+    min_grade: uint32,
+    quantity_m3: uint32,
+    source_body_id: { type: 'string', maxLength: 256 },
+    source_system_h3: { type: 'string', maxLength: 256 },
+    source_node_h3: { type: 'string', maxLength: 256 },
+    source_lat: { type: 'number' },
+    source_lng: { type: 'number' }
   }
 };
 
@@ -108,7 +120,13 @@ const completeSchema = {
           durationTakenMs: uint,
           rewardCredits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS },
           reputationChange: int32,
-          signature: { type: 'string', minLength: 1, maxLength: 512 }
+          signature: { type: 'string', minLength: 1, maxLength: 512 },
+          // The cargo suffix of a GATHER claim, and of no other (see `settle`): the engine's position
+          // in the pilot's cargo history and the whole hold after the delivered ore left it.
+          leaseId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
+          sessionId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
+          cargoSeq: uint,
+          remaining: { type: 'array', maxItems: CARGO_MAX_LOTS, items: cargoLotSchema }
         }
       }
     }
@@ -117,17 +135,23 @@ const completeSchema = {
 
 // The JSON column does not keep every double exactly (it moved four in five destination
 // coordinates by an ulp), and the offer's signature covers the coordinates' exact bits, so they
-// are stored as text beside the offer and restored on the way out.
+// are stored as text beside the offer and restored on the way out. A gather offer's source
+// coordinates are signed doubles too.
 const toStoredOffer = (offer) => ({
   ...offer,
-  exact_destination: [String(offer.destination_lat), String(offer.destination_lng)]
+  exact_destination: [String(offer.destination_lat), String(offer.destination_lng)],
+  ...(isGather(offer) && { exact_source: [String(offer.source_lat), String(offer.source_lng)] })
 });
 
 function fromStoredOffer(stored) {
-  const { exact_destination: exact, ...offer } = stored;
+  const { exact_destination: exact, exact_source: source, ...offer } = stored;
   if (Array.isArray(exact)) {
     offer.destination_lat = Number(exact[0]);
     offer.destination_lng = Number(exact[1]);
+  }
+  if (Array.isArray(source)) {
+    offer.source_lat = Number(source[0]);
+    offer.source_lng = Number(source[1]);
   }
   return offer;
 }
@@ -160,6 +184,9 @@ function toActiveMission(playerId, offer, acceptedAt) {
 
 // Passengers the ship carries once a mission's `berths` disembark (never below zero).
 const unboarded = (ship, berths) => Math.max(0, ship.passengersAboard - berths);
+
+const isGather = (offer) => offer.type === 'MISSION_TYPE_GATHER';
+const CARGO_SUFFIX = ['leaseId', 'sessionId', 'cargoSeq', 'remaining'];
 
 export default async function missionsRoutes(fastify) {
   const prisma = fastify.prisma;
@@ -327,8 +354,10 @@ export default async function missionsRoutes(fastify) {
     return { abandoned: true, mission_id: outcome.missionId, token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
-  // Returns `{ credits, ship, passengersAboard }`, null if the mission was already settled, or
-  // OVERFLOW (mission left active, nothing changed) if the payout would overflow credits.
+  // Returns `{ credits, ship, passengersAboard }` (plus the stored `lots` for a gather claim), null
+  // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
+  // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
+  // the payout would overflow credits.
   async function settle(request, active, claim) {
     const playerId = request.user.sub;
     const stationId = active.offer.origin_station_id;
@@ -337,6 +366,24 @@ export default async function missionsRoutes(fastify) {
     try {
       return await prisma.$transaction(async (tx) => {
         const ship = await lockActiveShip(tx, request.user);
+        // A gather claim also carries the pilot's hold after the delivered ore left it. It is stored
+        // only for a mission that is still held and unpaid, so a refused claim stores nothing, and
+        // under the cargo fencing rule that governs manifests and sales: a superseded claim pays
+        // nothing and leaves the ore in the stored hold.
+        let lots;
+        if (isGather(active.offer)) {
+          const done = await tx.completedMission.findUnique({ where: { playerId_missionId: { playerId, missionId } } });
+          const held = await tx.playerMission.findFirst({ where: { playerId, missionId } });
+          if (done || !held) return null;
+          const write = await applyCargoWrite(tx, playerId, {
+            leaseId: claim.leaseId,
+            sessionId: claim.sessionId,
+            seq: claim.cargoSeq,
+            lots: toStoredLots(claim.remaining ?? [])
+          });
+          if (CARGO_REFUSALS[write.outcome]) return { refusal: CARGO_REFUSALS[write.outcome] };
+          ({ lots } = write.lease);
+        }
         const { count } = await tx.playerMission.deleteMany({ where: { playerId, missionId } });
         if (count !== 1) return null;
         await tx.completedMission.create({ data: { playerId, missionId, rewardCredits: claim.rewardCredits } });
@@ -354,7 +401,7 @@ export default async function missionsRoutes(fastify) {
         });
         const passengersAboard = unboarded(ship, active.offer.required_berths);
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-        return { credits: player.credits, ship, passengersAboard };
+        return { credits: player.credits, ship, passengersAboard, ...(lots && { lots }) };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -394,8 +441,16 @@ export default async function missionsRoutes(fastify) {
       return reply.code(400).send({ error: 'Claim reward exceeds the maximum speed bonus.' });
     }
 
+    // The cargo suffix is required exactly when the stored offer's signed type is GATHER.
+    const gather = isGather(active.offer);
+    if (gather ? CARGO_SUFFIX.slice(0, 3).some((field) => claim[field] === undefined) : CARGO_SUFFIX.some((field) => claim[field] !== undefined)) {
+      return reply.code(400).send({
+        error: gather ? 'A gather claim must carry the cargo record.' : 'Only a gather claim carries a cargo record.'
+      });
+    }
+
     // 4. Canonical Ed25519 signature by the engine's claim key.
-    if (!verifyClaimSignature(claim, fastify.claimKey.key)) {
+    if (!verifyClaimSignature(claim, fastify.claimKey.key, gather)) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
@@ -403,10 +458,12 @@ export default async function missionsRoutes(fastify) {
     const settled = await settle(request, active, claim);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
+    if (settled.refusal) return reply.code(409).send(settled.refusal);
     return {
       success: true,
       credits: settled.credits,
       payout: claim.rewardCredits,
+      ...(settled.lots && { lots: settled.lots }),
       token: tokenFor(request, settled.ship, settled.passengersAboard)
     };
   });

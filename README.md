@@ -204,7 +204,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `POST /game/missions/abandon`
   - Body `{ missionId }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `404` when no such mission is held. Returns `{ abandoned, mission_id, token }`. No payout and no cooldown; a passage's passengers disembark wherever the ship is.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it.
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, token }`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -239,6 +239,8 @@ It then stores the offer (`accepted_at_ms` is never earlier than `offered_at_ms`
 
 The engine verifies its own signature again when the pilot claims the mission, so `GET /game/missions/active` hands the offer back bit-exact. The JSON column moves some doubles by an ulp, so the coordinates are also stored as text (`exact_destination`) and restored from it.
 
+A **gather** offer (`MISSION_TYPE_GATHER`: deliver a quantity of a rare ore to another dock) carries eight more signed fields, `resource_type`, `min_grade`, `quantity_m3`, `source_body_id`, `source_system_h3`, `source_node_h3`, `source_lat` and `source_lng`, appended to the payload for that type only; passage and research payloads are unchanged. The source coordinates are stored as text too (`exact_source`) and restored like the destination's. An offer of that type missing one of them never verifies.
+
 A completion is settled from the engine-signed `MissionCompletionClaim` as before. Payout is capped at 125 % of the signed `reward_credits`, each (player, mission) is paid once, and a completion starts a 10-minute cooldown at the origin dock (`MISSION_COOLDOWN_MS`).
 
 ## Missions held per type
@@ -259,6 +261,10 @@ npx prisma db execute --file prisma/sql/player-mission-list.sql --schema prisma/
 npx prisma db push
 ```
 The script adds that index, which the existing rows (one per player) already satisfy, so `db push` only drops the old one and every row is kept. It is safe to run again and does nothing on a database without the table.
+
+### Gather completion
+
+A gather claim also signs the pilot's cargo position and hold: `leaseId` and `sessionId` (lowercase hyphenated UUIDs of the 16 bytes), `cargoSeq` and `remaining` (the whole hold after the delivered ore left it, as `CargoLot`s; omitted when empty). The suffix is required exactly when the stored offer's signed `type` is GATHER and refused (400) on any other. In `POST /game/missions/complete`, after the mission and `CompletedMission` checks and in the same transaction as the payout, the claim goes through the cargo fencing rule (see [Cargo persistence and sales](#cargo-persistence-and-sales)): applied or already in the lineage, it pays, stores `remaining` as the hold and ends the mission; superseded (409 `cargo_superseded`) or naming no lease of the pilot's (409 `cargo_lease_unknown`), it changes nothing and the ore stays in the stored hold. A payout that would overflow the balance rolls the hold write back too. The response adds `lots`, the stored hold.
 
 ## Passengers aboard
 Taking off takes 0.5 s longer per passenger, so the real-time engine needs the ship's manifest. Each ship stores its count in `Spaceship.passengersAboard` (integer, default `0`) and it travels as `ship_attributes.passengers_aboard` (`ShipAttributes.passengers_aboard`, field 19, in eotha-contracts `common/v1/ship.proto`): in the signed access token, in the `ship` of a dev-login response and in `GET /ship/loadout`, and it is recomputed whenever the token is minted or reissued.

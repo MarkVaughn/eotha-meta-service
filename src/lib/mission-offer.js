@@ -3,7 +3,7 @@ import { verify } from 'node:crypto';
 export const MISSION_OFFER_DOMAIN = Buffer.from('EOTHA_MISSION_OFFER_V1', 'utf8'); // 22 bytes
 
 // `MissionType` numbers (eotha-contracts `rtse/v1/mission.proto`); the payload signs the number.
-export const MISSION_TYPES = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2 };
+export const MISSION_TYPES = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2, MISSION_TYPE_GATHER: 3 };
 
 function lenPrefixed(value) {
   const bytes = Buffer.from(value, 'utf8');
@@ -45,7 +45,7 @@ function f64(value) {
 export function canonicalMissionOfferPayload(offer) {
   const type = MISSION_TYPES[offer.type];
   if (type === undefined) throw new Error('type must be a MissionType name.');
-  return Buffer.concat([
+  const v1 = [
     MISSION_OFFER_DOMAIN,
     lenPrefixed(offer.pilot_id),
     u64(offer.offered_at_ms),
@@ -67,7 +67,21 @@ export function canonicalMissionOfferPayload(offer) {
     i32(offer.reputation_change),
     lenPrefixed(offer.faction_id),
     u64(offer.expires_at_ms)
-  ]);
+  ];
+  // Only GATHER appends the suffix, so passage and research payloads are unchanged.
+  const gather = offer.type === 'MISSION_TYPE_GATHER'
+    ? [
+        lenPrefixed(offer.resource_type),
+        u32(offer.min_grade),
+        u32(offer.quantity_m3),
+        lenPrefixed(offer.source_body_id),
+        lenPrefixed(offer.source_system_h3),
+        lenPrefixed(offer.source_node_h3),
+        f64(offer.source_lat),
+        f64(offer.source_lng)
+      ]
+    : [];
+  return Buffer.concat([...v1, ...gather]);
 }
 
 // `offer.signature` is the base64-encoded 64-byte Ed25519 signature. Never throws.
