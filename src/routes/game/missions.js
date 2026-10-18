@@ -1,5 +1,11 @@
 import { computeShipAttributes } from '../../config/components.js';
-import { MAX_OFFER_FUTURE_SKEW_MS, MAX_REWARD_CREDITS, MISSION_COOLDOWN_MS } from '../../config/missions.js';
+import {
+  MAX_OFFER_FUTURE_SKEW_MS,
+  MAX_REWARD_CREDITS,
+  MISSION_COOLDOWN_MS,
+  MISSION_LIMITS,
+  underMissionLimit
+} from '../../config/missions.js';
 import { H3_PATTERN, UUID_PATTERN } from '../../config/patterns.js';
 import {
   DOCKED_ENTITY_ID_PATTERN,
@@ -67,6 +73,15 @@ const acceptSchema = {
   }
 };
 
+// `missionId` names the held mission to abandon; it may be left out while only one is held.
+const abandonSchema = {
+  body: {
+    type: ['object', 'null'],
+    additionalProperties: false,
+    properties: { missionId: { type: 'string', pattern: UUID_PATTERN.source } }
+  }
+};
+
 // Speed bonuses may raise a payout to at most 125% of the offered reward.
 const MAX_BONUS_MULTIPLIER = 1.25;
 // Tolerated RTSE/meta clock skew for completion timestamps.
@@ -120,9 +135,10 @@ function fromStoredOffer(stored) {
 const LEGACY_MESSAGE = 'Your previous mission was cancelled because the mission format changed. Nothing was charged; accept a new mission.';
 
 // A mission stored before offers were signed by the engine (legacy id, no exact coordinates, or no
-// signature) can never be claimed: the engine would not recognise its offer. It is removed on first
-// sight, so the pilot can take a fresh offer; accepting it charged nothing and boarded no one, so
-// there is nothing to refund or unboard.
+// signature) can never be claimed: the engine would not recognise its offer. It is removed when the
+// pilot's missions are next listed, abandoned or completed, or an accept succeeds, and never counts
+// against a limit; accepting it charged nothing and boarded no one, so there is nothing to refund or
+// unboard.
 const isLegacyRow = (row) =>
   !UUID_PATTERN.test(row.missionId)
   || !Array.isArray(row.offer?.exact_destination)
@@ -159,18 +175,26 @@ export default async function missionsRoutes(fastify) {
     return Math.max(0, completedAt + MISSION_COOLDOWN_MS - nowMs);
   }
 
-  async function loadActive(request) {
-    const playerId = request.user.sub;
-    const row = await prisma.playerMission.findUnique({ where: { playerId } });
-    if (!row) return { active: null };
-    if (isLegacyRow(row)) {
-      await prisma.playerMission.deleteMany({ where: { id: row.id } });
-      return { active: null, cancelled: { mission_id: row.missionId, reason: 'format_changed', message: LEGACY_MESSAGE } };
-    }
-    return { active: toActiveMission(playerId, fromStoredOffer(row.offer), row.acceptedAt) };
+  // `db` is the Prisma client or an open transaction. The pilot's mission rows, oldest first, split
+  // into the missions held and the legacy rows.
+  async function missionRows(db, playerId) {
+    const rows = await db.playerMission.findMany({ where: { playerId }, orderBy: [{ acceptedAt: 'asc' }, { id: 'asc' }] });
+    return { held: rows.filter((row) => !isLegacyRow(row)), legacy: rows.filter(isLegacyRow) };
   }
 
-  const getActive = async (request) => (await loadActive(request)).active;
+  const deleteRows = (db, rows) =>
+    rows.length ? db.playerMission.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } }) : null;
+
+  // The pilot's active missions, oldest first, and the legacy ones this read cancelled.
+  async function loadActive(request) {
+    const playerId = request.user.sub;
+    const { held, legacy } = await missionRows(prisma, playerId);
+    await deleteRows(prisma, legacy);
+    return {
+      missions: held.map((row) => toActiveMission(playerId, fromStoredOffer(row.offer), row.acceptedAt)),
+      cancelled: legacy.map((row) => ({ mission_id: row.missionId, reason: 'format_changed', message: LEGACY_MESSAGE }))
+    };
+  }
 
   const fail = (status, error, extra = {}) => ({ failure: { status, body: { error, ...extra } } });
   const conflict = (reply, error) => reply.code(409).send({ error });
@@ -225,9 +249,18 @@ export default async function missionsRoutes(fastify) {
     // The player rules, the mission and the boarding commit or roll back together.
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
-      const current = await tx.playerMission.findUnique({ where: { playerId } });
-      if (current && !isLegacyRow(current)) {
-        return fail(409, 'A mission is already active. Complete or abandon it first.', { code: 'mission_active' });
+      // The lock serialises this count with every other accept of the pilot's.
+      const { held, legacy } = await missionRows(tx, playerId);
+      if (held.some((row) => row.missionId === offer.mission_id)) {
+        return fail(409, 'This mission is already active.', { code: 'mission_already_active' });
+      }
+      if (!underMissionLimit(held.map((row) => row.offer), offer.type)) {
+        const limit = MISSION_LIMITS[offer.type];
+        return fail(409, `At most ${limit} missions of this type can be held at once. Complete or abandon one first.`, {
+          code: 'mission_limit_reached',
+          type: offer.type,
+          limit
+        });
       }
       const remainingMs = await cooldownRemainingMs(tx, playerId, offer.origin_station_id, nowMs);
       if (remainingMs > 0) return fail(409, 'Station is on cooldown.', { code: 'origin_on_cooldown', remaining_ms: remainingMs });
@@ -245,7 +278,7 @@ export default async function missionsRoutes(fastify) {
         });
       }
 
-      if (current) await tx.playerMission.delete({ where: { id: current.id } });
+      await deleteRows(tx, legacy);
       await tx.playerMission.create({
         data: {
           playerId,
@@ -264,25 +297,33 @@ export default async function missionsRoutes(fastify) {
     return { active: toActiveMission(playerId, offer, acceptedAt), token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
+  // `active` (the oldest mission) and `cancelled_mission` are kept for clients that hold one mission.
   fastify.get('/missions/active', async (request) => {
-    const { active, cancelled } = await loadActive(request);
-    return cancelled ? { active, cancelled_mission: cancelled } : { active };
+    const { missions, cancelled } = await loadActive(request);
+    const body = { missions, limits: MISSION_LIMITS, active: missions[0] ?? null };
+    return cancelled.length ? { ...body, cancelled_missions: cancelled, cancelled_mission: cancelled[0] } : body;
   });
 
-  fastify.post('/missions/abandon', async (request, reply) => {
+  fastify.post('/missions/abandon', { schema: abandonSchema }, async (request, reply) => {
     const playerId = request.user.sub;
-    // No payout and no cooldown; the mission's passengers disembark wherever the ship is.
+    const missionId = request.body?.missionId;
+    // No payout and no cooldown; a passage's passengers disembark wherever the ship is.
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
-      const row = await tx.playerMission.findUnique({ where: { playerId } });
-      if (!row) return null;
+      const { held, legacy } = await missionRows(tx, playerId);
+      await deleteRows(tx, legacy);
+      if (missionId == null && held.length > 1) {
+        return fail(400, 'More than one mission is active; name the one to abandon.', { code: 'mission_id_required' });
+      }
+      const row = missionId == null ? held[0] : held.find((r) => r.missionId === missionId);
+      if (!row) return fail(404, 'No active mission to abandon.');
       await tx.playerMission.delete({ where: { id: row.id } });
-      if (isLegacyRow(row)) return null;
+      // Only a passage boarded anyone (`required_berths` is 0 for the other types).
       const passengersAboard = unboarded(ship, row.offer.required_berths);
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       return { ship, passengersAboard, missionId: row.missionId };
     });
-    if (!outcome) return reply.code(404).send({ error: 'No active mission to abandon.' });
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     return { abandoned: true, mission_id: outcome.missionId, token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
@@ -330,9 +371,9 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Claim does not belong to the authenticated pilot.' });
     }
 
-    // 2. The pilot must hold exactly this mission, accepted at the time the RTSE saw.
-    const active = await getActive(request);
-    if (!active || active.mission_id !== claim.missionId) {
+    // 2. The pilot must hold this mission, accepted at the time the RTSE saw.
+    const active = (await loadActive(request)).missions.find((mission) => mission.mission_id === claim.missionId);
+    if (!active) {
       return reply.code(404).send({ error: 'No matching active mission.' });
     }
     if (claim.acceptedAtMs !== active.accepted_at_ms
