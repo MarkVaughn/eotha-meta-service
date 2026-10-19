@@ -738,7 +738,11 @@ describe('engine-signed missions', () => {
         credits: claim.rewardCredits,
         payout: claim.rewardCredits,
         reputation_change: 5,
-        standings: { 'faction-high': 5 }
+        standings: { 'faction-high': 5 },
+        // The claim earned the speed bonus (paid above the offer): (100 + 40 x 2 + 10 x 2) x 1.25.
+        xpGained: 250,
+        currentLevel: 2,
+        traitPointsAvailable: 1
       });
       assert.equal(app.jwt.verify(token).ship_attributes.passengers_aboard, 0);
       assert.equal(await aboard(pilot), 0);
@@ -945,7 +949,10 @@ describe('engine-signed missions', () => {
       const res = await complete(pilot, claim);
       assert.equal(res.statusCode, 200, res.body);
       const { token, ...body } = json(res);
-      assert.deepEqual(body, { success: true, credits: 500, payout: 500, reputation_change: -10, standings: { 'faction-high': -10 } });
+      assert.deepEqual(body, {
+        success: true, credits: 500, payout: 500, reputation_change: -10, standings: { 'faction-high': -10 },
+        xpGained: 200, currentLevel: 2, traitPointsAvailable: 1
+      });
       assert.equal(app.jwt.verify(token).ship_attributes.passengers_aboard, 0);
       assert.equal(await credits(pilot), 500);
       assert.equal(await activeMission(pilot), null);

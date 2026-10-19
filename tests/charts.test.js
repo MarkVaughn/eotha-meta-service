@@ -29,6 +29,9 @@ function planetKey(pilot, planetId = 'planet-1', bytes = surveyBytes(), complete
 }
 
 // Request body for register-planet.
+// The pilot's stored captain XP (0 before the captain exists).
+const captainXp = async (pilot) => (await app.prisma.captain.findUnique({ where: { playerId: pilot.id } }))?.xp ?? 0;
+
 const register = (pilot, key, bytes = surveyBytes()) =>
   call(pilot, 'POST', '/game/charts/register-planet', { chartKey: key, surveyBytesBase64: bytes.toString('base64') });
 
@@ -151,7 +154,7 @@ describe('cartography', () => {
     const pilot = await newPilot('Cartographer');
     const res = await register(pilot, planetKey(pilot));
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(json(res), { registered: true, planetId: 'planet-1' });
+    assert.deepEqual(json(res), { registered: true, planetId: 'planet-1', xpGained: 35, currentLevel: 1, traitPointsAvailable: 0 });
 
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.planetCharts.length, 1);
@@ -203,6 +206,8 @@ describe('cartography', () => {
 
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.planetCharts.length, 0);
+    assert.equal(await captainXp(pilot), 0);
+    assert.equal(await captainXp(other), 0);
   });
 
   test('rejects signed bytes that are not a valid PlanetarySurvey', async () => {
@@ -232,6 +237,17 @@ describe('cartography', () => {
     res = await register(pilot, planetKey(pilot, 'planet-r', surveyBytes(), t0 + 2));
     assert.equal(res.statusCode, 409);
     assert.equal(json(res).error, 'CHART_ALREADY_SOLD');
+
+    // Captain XP was earned once, by the first registration; replays and newer keys earn none.
+    assert.equal(await captainXp(pilot), 35);
+  });
+
+  test('concurrent registrations of one planet award its captain XP once', async () => {
+    const pilot = await newPilot('Racer');
+    const keys = [0, 1, 2].map((i) => planetKey(pilot, 'planet-race', surveyBytes(), Date.now() - 1000 + i));
+    const results = await Promise.all(keys.map((key) => register(pilot, key)));
+    assert.equal(results.filter((r) => json(r).xpGained === 35).length, 1);
+    assert.equal(await captainXp(pilot), 35);
   });
 
   test('claims a system chart and rejects tampering', async () => {
@@ -241,7 +257,7 @@ describe('cartography', () => {
     assert.equal(res.statusCode, 403);
     res = await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: key });
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(json(res), { claimed: true, systemH3: SYSTEM });
+    assert.deepEqual(json(res), { claimed: true, systemH3: SYSTEM, xpGained: 150, currentLevel: 1, traitPointsAvailable: 0 });
     const inv = json(await call(pilot, 'GET', '/game/charts/inventory'));
     assert.equal(inv.systemCharts[0].totalBodiesCharted, 7);
     assert.equal(inv.systemCharts[0].systemDigest, systemDigest.toString('base64'));
@@ -250,6 +266,14 @@ describe('cartography', () => {
     res = await call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) });
     assert.equal(res.statusCode, 409);
     assert.deepEqual(json(res), { error: 'SYSTEM_ALREADY_CLAIMED' });
+    assert.equal(await captainXp(pilot), 150);
+  });
+
+  test('concurrent claims of one system award its captain XP once', async () => {
+    const pilot = await newPilot('SystemRacer');
+    const results = await Promise.all([0, 1, 2].map(() => call(pilot, 'POST', '/game/charts/claim-system', { systemKey: systemKey(pilot) })));
+    assert.deepEqual(results.map((r) => r.statusCode).sort(), [200, 409, 409]);
+    assert.equal(await captainXp(pilot), 150);
   });
 
   test('rejects V1 system chart keys and keys whose digest does not match the signature', async () => {

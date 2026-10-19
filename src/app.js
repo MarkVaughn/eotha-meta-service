@@ -13,6 +13,7 @@ import tradeRoutes from './routes/game/trade.js';
 import missionsRoutes from './routes/game/missions.js';
 import chartsRoutes from './routes/game/charts.js';
 import cargoRoutes from './routes/game/cargo.js';
+import captainRoutes from './routes/game/captain.js';
 import shipRoutes from './routes/ship/index.js';
 
 const fastify = Fastify({
@@ -40,6 +41,7 @@ await fastify.register(tradeRoutes, { prefix: '/game' });
 await fastify.register(missionsRoutes, { prefix: '/game' });
 await fastify.register(chartsRoutes, { prefix: '/game' });
 await fastify.register(cargoRoutes, { prefix: '/game' });
+await fastify.register(captainRoutes, { prefix: '/game' });
 await fastify.register(shipRoutes, { prefix: '/ship' });
 
 // Health check endpoint

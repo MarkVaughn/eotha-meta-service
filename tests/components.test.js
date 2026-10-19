@@ -56,6 +56,7 @@ describe('computeShipAttributes', () => {
       comms_range_m: 25000, max_speed_mps: 343,
       passenger_capacity: 50,
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
+      docking_time_mult: 1, extraction_rate_mult: 1, tuning_tolerance_hz: 100,
       passengers_aboard: 0
     });
   });

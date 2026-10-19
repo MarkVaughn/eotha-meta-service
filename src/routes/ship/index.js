@@ -53,14 +53,14 @@ export default async function shipRoutes(fastify, opts) {
 
   fastify.get('/loadout', async (request) => {
     const ship = await withActiveShip(request, async (tx, active) => active);
-    return toLoadout(ship.id, ship.components, ship.passengersAboard);
+    return toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits);
   });
 
   if (devPassengers) {
     fastify.post('/dev/passengers', { schema: devPassengersSchema }, async (request, reply) => {
       const { passengersAboard } = request.body;
       const outcome = await withActiveShip(request, async (tx, ship) => {
-        const capacity = computeShipAttributes(ship.components).passenger_capacity;
+        const capacity = computeShipAttributes(ship.components, 0, ship.traits).passenger_capacity;
         if (passengersAboard > capacity) {
           return fail(400, `Passengers aboard cannot exceed the passenger capacity of ${capacity}.`, {
             code: 'passengers_exceed_capacity',
@@ -68,10 +68,10 @@ export default async function shipRoutes(fastify, opts) {
           });
         }
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-        return { shipId: ship.id, components: ship.components, passengersAboard };
+        return { shipId: ship.id, components: ship.components, passengersAboard, traits: ship.traits };
       });
       if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-      const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard);
+      const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits);
       return { ...loadout, token: reissueToken(fastify, request, loadout.ship_attributes) };
     });
   }
@@ -119,13 +119,13 @@ export default async function shipRoutes(fastify, opts) {
       const currentPoints = totalSubsystemPoints(ship.components);
 
       if (componentType === 'HULL') {
-        const budget = hullBudget(targetTier);
+        const budget = hullBudget(targetTier, ship.traits);
         if (currentPoints > budget) {
           return fail(400, `Upgrade exceeds Hull Tier ${targetTier} budget of ${budget} points (requested: ${currentPoints}).`);
         }
       } else {
         const projectedPoints = currentPoints - currentComponentTier + targetTier;
-        const budget = hullBudget(currentHullTier);
+        const budget = hullBudget(currentHullTier, ship.traits);
         if (projectedPoints > budget) {
           return fail(400, `Upgrade exceeds Hull Tier ${currentHullTier} budget of ${budget} points (requested: ${projectedPoints}).`);
         }
@@ -158,18 +158,18 @@ export default async function shipRoutes(fastify, opts) {
 
       // A component change can lower the passenger capacity; persist the clamped count with it.
       const components = await tx.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } });
-      const capacity = computeShipAttributes(components).passenger_capacity;
+      const capacity = computeShipAttributes(components, 0, ship.traits).passenger_capacity;
       const passengersAboard = clampPassengers(ship.passengersAboard, capacity);
       if (passengersAboard !== ship.passengersAboard) {
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       }
 
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { shipId: ship.id, components, passengersAboard, cost, credits: player.credits };
+      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, cost, credits: player.credits };
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-    const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard);
+    const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits);
     return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(fastify, request, loadout.ship_attributes) };
   });
 }
