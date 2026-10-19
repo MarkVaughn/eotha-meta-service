@@ -192,7 +192,8 @@ function toActiveMission(playerId, offer, acceptedAt) {
 // The mission type without its enum prefix, as AbandonedMission stores it.
 const typeName = (offer) => offer.type.replace(/^MISSION_TYPE_/, '');
 
-// Passengers the ship carries once a mission's `berths` disembark (never below zero).
+// Passengers the ship carries once a mission's `berths` disembark (never below zero). A passage
+// boards its party and a survey its one surveyor; a gather boards no one.
 const unboarded = (ship, berths) => Math.max(0, ship.passengersAboard - berths);
 
 const isGather = (offer) => offer.type === 'MISSION_TYPE_GATHER';
@@ -360,7 +361,8 @@ export default async function missionsRoutes(fastify) {
   });
 
   // Abandoning costs the sponsoring faction's reputation and starts a cooldown at the origin, by type
-  // (ABANDON_TERMS), docked or not, and pays nothing. A passage is the exception: only cancelling it
+  // (ABANDON_TERMS), docked or not, and pays nothing, and the mission's berths (a survey's surveyor
+  // too) empty. A passage is the exception: only cancelling it
   // while docked at its origin, where the passengers step back off, has those terms. Abandoned
   // anywhere else its passengers still disembark wherever the ship is, at no cost and with no
   // cooldown, until the passenger hostage state replaces that.
@@ -410,7 +412,7 @@ export default async function missionsRoutes(fastify) {
         missionId: row.missionId
       });
       if (terms.cooldownMs > 0) await startCooldown(tx, playerId, row.originStationId, nowMs, terms.cooldownMs);
-      // Only a passage boarded anyone (`required_berths` is 0 for the other types).
+      // The mission's own passengers step off: a passage's party, or a survey's one surveyor.
       const passengersAboard = unboarded(ship, offer.required_berths);
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       return {

@@ -14,7 +14,7 @@ export const MAX_ACTIVE_LEGACY_DOCTRINES = 2;
 export const MAX_CAPTAIN_XP = 2_147_483_647;
 
 // Captain XP per verified claim. A mission's XP is set by its signed offer, never by the client:
-// passage 100 + 40 x hexes + 10 x berths, research 120 + 50 x hexes, gather 150 + 60 x route hexes
+// passage 100 + 40 x hexes + 10 x berths, research 120 + 50 x hexes (its one surveyor earns no berth XP), gather 150 + 60 x route hexes
 // (origin to source plus source to destination), times SPEED_BONUS_XP_MULT when the claim earned
 // the engine's speed bonus. Charts award a flat amount the first time each is registered or claimed.
 export const MISSION_XP = Object.freeze({

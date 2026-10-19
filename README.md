@@ -310,7 +310,7 @@ A pilot holds several missions at once, up to a limit per type in `MISSION_LIMIT
 | `MISSION_TYPE_RESEARCH` | 3 |
 | `MISSION_TYPE_GATHER` | 1 |
 
-The types are independent, so one passage, three research and one gather mission can be held together. With one passage at a time, that passage owns every passenger aboard. `accept` counts the held missions of the offer's type under the player's lock, so concurrent accepts cannot pass the limit. Each held mission is a `PlayerMission` row, unique per (player, mission); its type is the signed offer's `type`. Complete and abandon address one mission by id. The per-origin cooldown is shared by all types.
+The types are independent, so one passage, three research and one gather mission can be held together. With one passage at a time, that passage owns its passengers; a held survey adds its one surveyor. `accept` counts the held missions of the offer's type under the player's lock, so concurrent accepts cannot pass the limit. Each held mission is a `PlayerMission` row, unique per (player, mission); its type is the signed offer's `type`. Complete and abandon address one mission by id. The per-origin cooldown is shared by all types.
 
 A database created while a pilot could hold only one mission (`PlayerMission.playerId` unique) needs one step before `db push`, which would otherwise refuse to add the (player, mission) unique index without `--accept-data-loss`:
 ```bash
@@ -328,7 +328,7 @@ Taking off takes 0.5 s longer per passenger, so the real-time engine needs the s
 
 The count never exceeds `ship_attributes.passenger_capacity` (from the LIFE_SUPPORT tier): the attributes clamp it on every read, and `POST /ship/upgrade` writes the clamped count back if a component change leaves it above the new capacity.
 
-Passengers board when a passage mission is accepted (`passengers_aboard += required_berths`) and disembark when it is completed or abandoned (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
+Passengers board when a passage or research mission is accepted (`passengers_aboard += required_berths`; a survey carries one surveyor, a gather none, and each counts against berth capacity like any passenger) and disembark when it is completed or abandoned (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
 
 ## Cargo persistence and sales
 
