@@ -4,6 +4,7 @@ import { DEV_LOGIN_EMAIL_DOMAIN, DEV_STARTING_CREDITS } from '../../config/dev.j
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
 import { captainTraits, ensureCaptain } from '../../lib/captain.js';
 import { convertGuest } from '../../lib/identity.js';
+import { factionsClaim } from '../../lib/reputation.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
 import { gatewayWsUrl } from '../../lib/gateway-url.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
@@ -18,8 +19,9 @@ export default async function authRoutes(fastify, opts) {
   const devLoginEnabled = opts.devLogin ?? env.NODE_ENV === 'development';
 
   // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet), with the captain's
-  // traits folded in; a pilot without a captain gets its Level 1 starter here. The claims are
-  // exactly what the RTSE validates; `ttlSeconds` only overrides the default token lifetime.
+  // traits folded in, and the pilot's factions claim; a pilot without a captain gets its Level 1
+  // starter here. The claims are exactly what the RTSE validates; `ttlSeconds` only overrides the
+  // default token lifetime.
   async function signSession(player, { ttlSeconds } = {}) {
     const ship = await prisma.spaceship.findFirst({
       where: { playerId: player.id, active: true },
@@ -35,7 +37,8 @@ export default async function authRoutes(fastify, opts) {
       sub: player.id,
       callsign: player.callsign,
       home_h3: player.harbor?.h3Index || "881f1d4887fffff",
-      ship_attributes: shipAttributes
+      ship_attributes: shipAttributes,
+      factions: await factionsClaim(prisma, player.id)
     };
     const token = ttlSeconds
       ? fastify.signWithExpiry({ ...claims, exp: Math.floor(Date.now() / 1000) + ttlSeconds })

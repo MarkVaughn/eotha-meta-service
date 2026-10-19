@@ -35,6 +35,10 @@ model Player {
   completedMissions CompletedMission[]
   abandonedMissions AbandonedMission[]
   reputations  PlayerReputation[]
+  reputationLedger ReputationLedger[]
+  // The faction whose colors the pilot flies (src/config/factions.js FACTION_IDS), or null. Set while
+  // docked by POST /game/factions/colors; cleared when the standing with it falls below 500.
+  activeColorsFactionId String?
   cargoLeases  CargoLease[]
   cargoSales   CargoSale[]
   planetCharts PlanetChart[]
@@ -163,7 +167,8 @@ model MissionCooldown {
 }
 
 // Payout ledger; the unique key enforces a single payout per (player, mission). `reputationChange`
-// is the engine-signed value applied to the sponsoring faction (negative for a late completion).
+// is the engine-signed value for the sponsoring faction (negative for a late completion); the change
+// applied, with any Flying Colors bonus and caps, is in ReputationLedger.
 model CompletedMission {
   id               String   @id @default(uuid()) @db.Uuid
   playerId         String   @db.Uuid
@@ -199,8 +204,9 @@ model AbandonedMission {
   @@index([playerId, abandonedAt])
 }
 
-// The pilot's standing with each faction, bounded to [-1000, 1000] (src/lib/reputation.js). No row
-// means neutral (0).
+// The pilot's standing with each faction, bounded to [-1000, 1000] (src/lib/reputation.js), and
+// with alpha, beta and gamma also under the rival and single-Paragon caps (src/config/factions.js).
+// No row means neutral (0).
 model PlayerReputation {
   id        String   @id @default(uuid()) @db.Uuid
   playerId  String   @db.Uuid
@@ -211,6 +217,27 @@ model PlayerReputation {
 
   // Also serves lookups by player alone (its leading column).
   @@unique([playerId, factionId])
+}
+
+// Append-only audit of every standing change (src/lib/reputation.js). `factionId` is the faction the
+// event was for and `factionDelta` its change; `alphaDelta`, `betaDelta` and `gammaDelta` are the
+// changes to the three factions, including those their caps made. `reason`: MISSION_COMPLETED,
+// MISSION_ABANDONED or RENOUNCE_PARAGON. `bribePaidCredits` is reserved for customs bribes.
+model ReputationLedger {
+  id               String   @id @default(uuid()) @db.Uuid
+  playerId         String   @db.Uuid
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId        String?
+  reason           String
+  factionId        String?
+  factionDelta     Int      @default(0)
+  alphaDelta       Int      @default(0)
+  betaDelta        Int      @default(0)
+  gammaDelta       Int      @default(0)
+  bribePaidCredits Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  @@index([playerId, createdAt])
 }
 
 // One row per cargo lease issued (POST /game/cargo/lease). The pilot's hold is `lots` of the highest

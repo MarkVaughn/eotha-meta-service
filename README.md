@@ -41,6 +41,7 @@ eotha-meta-service/
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
 │   │   ├── env.js              # Environment validation via Zod
+│   │   ├── factions.js         # Faction ids, standing caps (clampStandingsWithCaps), Flying Colors rules
 │   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, abandon terms, late cutoff, payout cap, offer clock skew)
 │   │   └── patterns.js         # Shapes of engine identifiers (H3 cells, station ids, UUIDs)
 │   ├── lib/
@@ -54,6 +55,7 @@ eotha-meta-service/
 │   │   ├── mission-claim.js    # Verifies the engine's signed mission completion claims
 │   │   ├── mission-offer.js    # Verifies the engine's signed mission offers
 │   │   ├── refresh-tokens.js   # Refresh rotation with reuse detection
+│   │   ├── reputation.js       # Standings under the caps, the reputation ledger, the factions claim
 │   │   └── ship.js             # Active ship under the player lock, loadout, token reissue
 │   ├── plugins/
 │   │   ├── attestation.js      # requireAttestation preHandler
@@ -69,6 +71,7 @@ eotha-meta-service/
 │   │   └── game/
 │   │       ├── captain.js      # Captain view and docked trait unlocks
 │   │       ├── cargo.js        # Cargo lease, stored hold, manifest relay and ore sale routes
+│   │       ├── factions.js     # Docked Flying Colors toggle and Paragon renouncement
 │   │       ├── index.js        # Game session allocation routes
 │   │       └── schema.js       # Session route schemas
 │   └── app.js                  # Fastify server entry point
@@ -207,7 +210,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `POST /game/missions/abandon`
   - Body `{ missionId, dockedReceipt }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `dockedReceipt` is optional and says where the ship is docked; abandoning is allowed docked or in flight. `404` when no such mission is held; a receipt is refused as for upgrades (`403 docked_receipt_invalid` / `docked_receipt_expired`, `503 CLAIM_KEY_NOT_CONFIGURED`) before anything changes. Returns `{ abandoned, mission_id, outcome, reputation_change, standings, token }` (`mission_id`, `outcome` and `reputation_change` as in the contract's `MissionAbandonResponse`). No payout; the reputation penalty and origin cooldown are in [Late completion, abandon and reputation](#late-completion-abandon-and-reputation), and a passage's passengers disembark.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation, starts the origin's cooldown, awards captain XP and disembarks the mission's passengers. Returns `{ success, credits, payout, reputation_change, standings, xpGained, currentLevel, traitPointsAvailable, token }` (see [Captain progression](#captain-progression)). A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation (with any [Flying Colors](#factions-1) bonus, which `reputation_change` includes), starts the origin's cooldown, awards captain XP and disembarks the mission's passengers. Returns `{ success, credits, payout, reputation_change, standings, xpGained, currentLevel, traitPointsAvailable, token }` (see [Captain progression](#captain-progression)). A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
 
 ### Captain
 All Protected. See [Captain progression](#captain-progression).
@@ -215,6 +218,13 @@ All Protected. See [Captain progression](#captain-progression).
   - `{ captain: { name, level, xp, xpForLevel, xpForNextLevel, unlockedTraits, traitPoints, traitPointsAvailable, missionsCompleted } }` (`xpForNextLevel` is `null` at Level 10).
 - `POST /game/captain/trait`
   - Body `{ traitId, dockedReceipt, stationId? }`. Spends one trait point on `traitId` while docked. Returns `{ captain, ship_attributes, token }`, the token re-signed with the new attributes. Refusals answer `{ error: <code>, message, ... }`: `403 docked_receipt_required` (no receipt, or an expired one), `403 docked_receipt_invalid`, `403 docked_receipt_wrong_station` (`stationId` sent and not the receipt's `dockedEntityId`), `409 trait_already_unlocked`, `400 prerequisite_not_met` (with `requiredPointsInBranch` and `currentPoints`), `409 no_trait_points` (with `traitPointsAvailable`), a schema `400` for an unknown trait, and `503 CLAIM_KEY_NOT_CONFIGURED`.
+
+### Factions
+All Protected. See [Factions](#factions-1).
+- `POST /game/factions/colors`
+  - Body `{ factionId, dockedReceipt }`, `factionId` one of `alpha`, `beta`, `gamma`, or `null` to stop. Flies that faction's colors while docked; needs a standing of at least 500 with it. Returns `{ success, active_colors, factions, token }`, the token carrying the new `factions` claim. Refusals answer `{ error: <code>, message, ... }`: `403 docked_receipt_required` (no receipt, or an expired one), `403 docked_receipt_invalid`, `403 insufficient_reputation` (with `required: 500` and `current`), a schema `400` for any other faction or a missing `factionId`, and `503 CLAIM_KEY_NOT_CONFIGURED`.
+- `POST /game/factions/renounce-paragon`
+  - Body `{ currentParagonFactionId, dockedReceipt }`. While docked, lowers the pilot's Paragon standing (800 or more) with that faction to 799, freeing another faction to reach Paragon. Returns `{ success, <factionId>Score, factions, token }` (`gammaScore: 799` for `gamma`). Refusals as for colors, plus `409 not_paragon` (with `current`) when the standing is below 800.
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -255,7 +265,7 @@ A completion is settled from the engine-signed `MissionCompletionClaim` as befor
 
 ## Late completion, abandon and reputation
 
-The pilot's **standing** with each faction is a `PlayerReputation` row (one per player and faction), an integer clamped to [-1000, 1000]; no row is neutral (0). A mission's reputation goes to its signed `faction_id`, or to `independent` when the offer has none. Every change is made in the transaction that settles or abandons the mission, under the player's lock, so it commits or rolls back with it.
+The pilot's **standing** with each faction is a `PlayerReputation` row (one per player and faction), an integer clamped to [-1000, 1000]; no row is neutral (0). A mission's reputation goes to its signed `faction_id`, or to `independent` when the offer has none. Every change is made in the transaction that settles or abandons the mission, under the player's lock, so it commits or rolls back with it. Standings with `alpha`, `beta` and `gamma` are also capped (see [Factions](#factions-1)).
 
 **Late completion.** A claim completed after `deadline_ms` is not refused. The engine decays its pay and reputation by mission type and signs the result in the unchanged `EOTHA_MISSION_CLAIM_V1` layout, and this service pays the signed `reward_credits` and applies the signed `reputation_change`, which may be negative. It accepts a claim up to the hard cutoff `deadline_ms + min(3 x duration_limit_ms, 24 h)` (`lateCutoffMs` in `src/config/missions.js`) and refuses one beyond it with `400 mission_expired`. A claim never gains more reputation than its offer (`400` otherwise). `CompletedMission` records the faction and the signed `reputationChange`.
 
@@ -271,6 +281,24 @@ The pilot's **standing** with each faction is a `PlayerReputation` row (one per 
 An abandon cooldown never ends one already running at that dock sooner. Each abandon is an `AbandonedMission` row (unique per player and mission, with the type, faction, applied `reputationLoss` and `reason`: `in_port_origin`, `in_port_dock` or `in_flight`), and a mission the pilot abandoned is refused on a later accept with `409 mission_abandoned`, so the same offer cannot be taken and dropped again. With the cooldown and the cost of each abandon, accepting and abandoning cannot churn a dock's board for free. A passage abandoned away from its origin will instead keep its passengers aboard in the hostage state of the contract (`MISSION_ABANDON_OUTCOME_HOSTAGE`); until that lands it is cancelled as before, and every abandon answers `MISSION_ABANDON_OUTCOME_CANCELLED`.
 
 `PlayerReputation`, `AbandonedMission`, `CompletedMission.factionId` and `reputationChange` (defaulting to `independent` and `0` on existing rows) and `MissionCooldown.availableAt` (null on existing rows, which keep ending 10 minutes after `completedAt`) are additions only, so existing databases pick them up with `npx prisma db push`.
+
+## Factions
+
+The three factions are `alpha`, `beta` and `gamma` (`FACTION_IDS` in `src/config/factions.js`). Every change to a standing with one of them is applied through `clampStandingsWithCaps(alpha, beta, gamma, previous)` together with the other two, in the same transaction under the pilot's lock:
+
+1. Each standing is bounded to [-1000, 1000].
+2. **Single Paragon**: at most one faction stands at 800 or above; while one does, the others are capped at 799.
+3. **Rival cap**: `alpha` and `beta` are rivals. While one stands at 450 or above, the other is capped at 449. `gamma` has no rival.
+
+When two factions contest a status, the one that already held it keeps it, so it is the rising standing that is capped. Standings with any other faction (`independent`, say) are only bounded.
+
+**Flying Colors.** With a standing of 500 or more with a faction, a docked pilot may fly its colors (`POST /game/factions/colors`, stored as `Player.activeColorsFactionId`). A mission for that faction then gains 1.20 times its signed reputation, rounded (`withColorsBonus`; a loss is not multiplied), and `reputation_change` in the completion response is the change with that bonus. A standing change that leaves the flown faction below 500 stops flying its colors.
+
+**Ledger.** Every standing change appends a `ReputationLedger` row: the `reason` (`MISSION_COMPLETED`, `MISSION_ABANDONED` or `RENOUNCE_PARAGON`), the `missionId`, the faction the event was for and its `factionDelta`, and the `alphaDelta`, `betaDelta` and `gammaDelta` the caps produced. Rows are never updated.
+
+**Token.** Every access token, minted or reissued, carries `factions: { alpha, beta, gamma, active_colors }`: the three standings (0 without a row) and the flown faction or `null`.
+
+`Player.activeColorsFactionId` (null on existing rows) and `ReputationLedger` are additions only, so existing databases pick them up with `npx prisma db push`; existing standings are capped the next time one of them changes.
 
 ## Missions held per type
 
@@ -421,7 +449,7 @@ Those three responses add `xpGained`, `currentLevel` and `traitPointsAvailable` 
 **Better Auth's HTTP handler is not mounted.** Every sign-in goes through the routes above so the attestation check cannot be bypassed; they drive Better Auth in-process. Passwords are verified by `src/lib/password.js` against `Player.passwordHash`, so existing players, their argon2id hashes and the legacy SHA-256 upgrade-on-login keep working unchanged; Better Auth's `emailAndPassword` is not enabled. Better Auth's `jwt` plugin is not used either: it keeps its own generated keys, while the RTSE needs tokens signed by the shared keypair with the existing claims.
 
 **Tokens.**
-- *Access token*: an EdDSA JWT signed with `keys/private.pem` carrying exactly the claims the RTSE validates today (`sub`, `callsign`, `home_h3`, `ship_attributes`, `iat`, `exp`). `ship_attributes.hull_tier` (integer 1 to 5) is the tier of the pilot's HULL component, so the engine reads the hull tier directly instead of deriving it from `max_hull_hp`; it is recomputed with the other attributes whenever the token is minted or reissued (including after `POST /ship/upgrade`), and guests stay at 1 because they cannot upgrade the hull. `ship_attributes.passengers_aboard` is the persisted passenger count, bounded by `passenger_capacity` (see [Passengers aboard](#passengers-aboard)). It is stateless and short-lived (`ACCESS_TOKEN_TTL_SECONDS`, default 15 minutes). The only change to the token is a `kid` header, so the RTSE can keep pinning `keys/public.pem` or later fetch `/.well-known/jwks.json`. `POST /ship/upgrade` re-signs claims but keeps the original `exp`, so only a refresh extends a login. A token from `POST /game/cargo/lease` also carries a `cargo` claim (see [Cargo persistence and sales](#cargo-persistence-and-sales)); no other token does.
+- *Access token*: an EdDSA JWT signed with `keys/private.pem` carrying exactly the claims the RTSE validates today (`sub`, `callsign`, `home_h3`, `ship_attributes`, `factions`, `iat`, `exp`; see [Factions](#factions-1) for `factions`). `ship_attributes.hull_tier` (integer 1 to 5) is the tier of the pilot's HULL component, so the engine reads the hull tier directly instead of deriving it from `max_hull_hp`; it is recomputed with the other attributes whenever the token is minted or reissued (including after `POST /ship/upgrade`), and guests stay at 1 because they cannot upgrade the hull. `ship_attributes.passengers_aboard` is the persisted passenger count, bounded by `passenger_capacity` (see [Passengers aboard](#passengers-aboard)). It is stateless and short-lived (`ACCESS_TOKEN_TTL_SECONDS`, default 15 minutes). The only change to the token is a `kid` header, so the RTSE can keep pinning `keys/public.pem` or later fetch `/.well-known/jwks.json`. `POST /ship/upgrade` re-signs claims but keeps the original `exp`, so only a refresh extends a login. A token from `POST /game/cargo/lease` also carries a `cargo` claim (see [Cargo persistence and sales](#cargo-persistence-and-sales)); no other token does.
 - *Refresh token*: opaque, single-use, stored hashed. Every login creates a Better Auth session; that session's refresh tokens form the token family. Each refresh consumes the presented token and issues its successor. Presenting a consumed token means a copy exists, so the family is revoked and the Better Auth session deleted. A refresh also fails once the session expires (`SESSION_TTL_DAYS`, default 90) or is logged out. Better Auth has no built-in rotation or reuse detection, so this is implemented in `src/lib/refresh-tokens.js`.
 - `/auth/dev-login` keeps minting its 24-hour token, because the dev client has no refresh flow.
 
