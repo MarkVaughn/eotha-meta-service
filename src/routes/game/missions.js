@@ -9,6 +9,7 @@ import {
   underMissionLimit
 } from '../../config/missions.js';
 import { CARGO_MAX_LOTS } from '../../config/cargo.js';
+import { missionXp } from '../../config/captain.js';
 import { H3_PATTERN, UUID_PATTERN } from '../../config/patterns.js';
 import { CARGO_REFUSALS, applyCargoWrite, cargoLotSchema, toStoredLots } from '../../lib/cargo.js';
 import {
@@ -17,6 +18,7 @@ import {
   dockedReceiptRefusal,
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
+import { awardCaptainXp } from '../../lib/captain.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import { MISSION_TYPES, verifyMissionOffer } from '../../lib/mission-offer.js';
 import { adjustReputation, missionFaction, standingsOf } from '../../lib/reputation.js';
@@ -246,7 +248,7 @@ export default async function missionsRoutes(fastify) {
 
   // The reissued token carrying the ship's new passenger count.
   const tokenFor = (request, ship, passengersAboard) =>
-    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard).ship_attributes);
+    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard, ship.traits).ship_attributes);
 
   fastify.get('/missions/cooldown', { schema: cooldownSchema }, async (request) => {
     const nowMs = Date.now();
@@ -319,7 +321,7 @@ export default async function missionsRoutes(fastify) {
       });
       if (abandoned) return fail(409, 'This mission was abandoned and cannot be accepted again.', { code: 'mission_abandoned' });
 
-      const { passenger_capacity: capacity, passengers_aboard: aboard } = computeShipAttributes(ship.components, ship.passengersAboard);
+      const { passenger_capacity: capacity, passengers_aboard: aboard } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits);
       const freeBerths = Math.max(0, Math.floor(capacity) - aboard);
       if (offer.required_berths > freeBerths) {
         return fail(400, 'Ship has insufficient free passenger berths for this mission.', {
@@ -420,7 +422,7 @@ export default async function missionsRoutes(fastify) {
     };
   });
 
-  // Returns `{ credits, standings, ship, passengersAboard }` (plus the stored `lots` for a gather claim), null
+  // Returns `{ credits, standings, ship, passengersAboard, captain }` (plus the stored `lots` for a gather claim), null
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
   // the payout would overflow credits.
@@ -469,7 +471,9 @@ export default async function missionsRoutes(fastify) {
         const passengersAboard = unboarded(ship, active.offer.required_berths);
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
         const standings = await standingsOf(tx, playerId);
-        return { credits: player.credits, standings, ship, passengersAboard, ...(lots && { lots }) };
+        // Captain XP rides on the payout record above: a replayed claim never reaches this line.
+        const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true });
+        return { credits: player.credits, standings, ship, passengersAboard, captain, ...(lots && { lots }) };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -529,7 +533,7 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
-    // 5. Atomic settlement: payout, reputation, cooldown, and the passengers disembark.
+    // 5. Atomic settlement: payout, reputation, cooldown, captain XP, and the passengers disembark.
     const settled = await settle(request, active, claim);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
@@ -540,6 +544,7 @@ export default async function missionsRoutes(fastify) {
       payout: claim.rewardCredits,
       reputation_change: claim.reputationChange,
       standings: settled.standings,
+      ...settled.captain,
       ...(settled.lots && { lots: settled.lots }),
       token: tokenFor(request, settled.ship, settled.passengersAboard)
     };

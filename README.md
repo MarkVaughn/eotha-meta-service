@@ -36,6 +36,7 @@ eotha-meta-service/
 ├── src/
 │   ├── config/
 │   │   ├── auth.js             # Device-id length constants
+│   │   ├── captain.js          # Captain leveling curve, XP table, trait catalog and prerequisites
 │   │   ├── cargo.js            # Cargo lease rules (lot limit)
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
@@ -45,6 +46,7 @@ eotha-meta-service/
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
+│   │   ├── captain.js          # Lazy captain creation, XP awards, captain view
 │   │   ├── cargo.js            # Verifies signed cargo manifests and sale records; the cargo fencing rule
 │   │   ├── claim-key.js        # Loads the public key engine-signed claims verify against
 │   │   ├── docked-receipt.js   # Verifies the engine's signed docked receipts
@@ -65,6 +67,7 @@ eotha-meta-service/
 │   │   │   ├── index.js        # Guest, Register, Login, Refresh, Logout, Link, and Dev-Login routes
 │   │   │   └── schema.js       # Fastify JSON request/response schemas
 │   │   └── game/
+│   │       ├── captain.js      # Captain view and docked trait unlocks
 │   │       ├── cargo.js        # Cargo lease, stored hold, manifest relay and ore sale routes
 │   │       ├── index.js        # Game session allocation routes
 │   │       └── schema.js       # Session route schemas
@@ -204,7 +207,14 @@ All Protected. See [Mission offers](#mission-offers).
 - `POST /game/missions/abandon`
   - Body `{ missionId, dockedReceipt }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `dockedReceipt` is optional and says where the ship is docked; abandoning is allowed docked or in flight. `404` when no such mission is held; a receipt is refused as for upgrades (`403 docked_receipt_invalid` / `docked_receipt_expired`, `503 CLAIM_KEY_NOT_CONFIGURED`) before anything changes. Returns `{ abandoned, mission_id, outcome, reputation_change, standings, token }` (`mission_id`, `outcome` and `reputation_change` as in the contract's `MissionAbandonResponse`). No payout; the reputation penalty and origin cooldown are in [Late completion, abandon and reputation](#late-completion-abandon-and-reputation), and a passage's passengers disembark.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation, starts the origin's cooldown and disembarks the mission's passengers. Returns `{ success, credits, payout, reputation_change, standings, token }`. A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation, starts the origin's cooldown, awards captain XP and disembarks the mission's passengers. Returns `{ success, credits, payout, reputation_change, standings, xpGained, currentLevel, traitPointsAvailable, token }` (see [Captain progression](#captain-progression)). A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
+
+### Captain
+All Protected. See [Captain progression](#captain-progression).
+- `GET /game/captain`
+  - `{ captain: { name, level, xp, xpForLevel, xpForNextLevel, unlockedTraits, traitPoints, traitPointsAvailable, missionsCompleted } }` (`xpForNextLevel` is `null` at Level 10).
+- `POST /game/captain/trait`
+  - Body `{ traitId, dockedReceipt, stationId? }`. Spends one trait point on `traitId` while docked. Returns `{ captain, ship_attributes, token }`, the token re-signed with the new attributes. Refusals answer `{ error: <code>, message, ... }`: `403 docked_receipt_required` (no receipt, or an expired one), `403 docked_receipt_invalid`, `403 docked_receipt_wrong_station` (`stationId` sent and not the receipt's `dockedEntityId`), `409 trait_already_unlocked`, `400 prerequisite_not_met` (with `requiredPointsInBranch` and `currentPoints`), `409 no_trait_points` (with `traitPointsAvailable`), a schema `400` for an unknown trait, and `503 CLAIM_KEY_NOT_CONFIGURED`.
 
 ### Game Sessions
 - `GET /game/session` (Protected)
@@ -368,6 +378,41 @@ Ship upgrades are offered only while docked, and the client cannot be trusted to
 | `docked_receipt_expired` | `issuedAtMs` is more than `DOCKED_RECEIPT_TTL_MS` (30 s) in the past or more than `DOCKED_RECEIPT_MAX_SKEW_MS` (5 s) in the future, or `dockedAtMs` is after `issuedAtMs`. The client should fetch a new receipt and retry once. |
 
 Both constants are in `src/config/docking.js`; the age (`now - issuedAtMs`) is logged at debug level so clock drift shows up. Enforcement is hard, with no environment flag. A receipt is **not single-use**: it can serve several upgrades inside its window, and `nonce` is signed but not tracked, so the real bound on an upgrade after undocking is the 30 s window. This service does not check that the entity is a known station, because the engine is the only authority on what it can dock at. The docked check runs before the guest hull lock, so an undocked guest is told to dock first.
+
+## Captain progression
+
+Every pilot has one `Captain`. It is created at Level 1 (0 XP, no traits, named after the pilot) the first time the pilot logs in or its ship is next locked by any game route, so pilots from before captains need no backfill. `Captain` is a new table: existing databases pick it up with `npx prisma db push`, which only creates the table, its unique index and its foreign key.
+
+**XP** is awarded only inside the transaction that records a verified engine-signed claim, so a replayed or concurrent duplicate, which that record refuses, earns nothing, and nothing the client sends sets it. Values are in `src/config/captain.js`:
+
+| Source | XP |
+|---|---|
+| `POST /game/missions/complete`, passage | `100 + 40 x distance_hexes + 10 x required_berths` |
+| research | `120 + 50 x distance_hexes` |
+| gather | `150 + 60 x route`, the route (origin to source to destination) read from the signed `duration_limit_ms` (`route x 5 min + 5 min`) |
+| any mission paid above its offer (the engine's speed bonus) | the above `x 1.25`, rounded down |
+| `POST /game/charts/register-planet` | `35`, the first time the planet is registered |
+| `POST /game/charts/claim-system` | `150`, once per system |
+
+Those three responses add `xpGained`, `currentLevel` and `traitPointsAvailable` when XP is awarded. A late completion earns full XP; abandoning earns none.
+
+**Levels** follow cumulative XP, `round_to_50(180 x (L - 1)^1.75)`: 0, 200, 600, 1250, 2050, 3000, 4150, 5400, 6850 and 8400 XP for Levels 1 to 10. Each level from 2 to 10 grants one trait point (9 in all).
+
+**Traits** are 18, six per branch (Helmsman `H1`-`H6`, Astrogation `S1`-`S6`, Command `C1`-`C6`): three Tier I, two Tier II and one Tier III capstone. A Tier II trait needs 2 points already spent in its branch, a capstone 4. They are unlocked through `POST /game/captain/trait`, only with a valid docked receipt (see [Docked upgrades](#docked-upgrades)), under the pilot's lock, so a point is never spent twice. The ship traits are folded into `computeShipAttributes` and signed into every token from then on:
+
+| Trait | Effect |
+|---|---|
+| `H1_TRIM_THRUSTERS` | `max_speed_mps x 1.08` (never above 343) |
+| `H2_HARBOR_PILOT` | `docking_time_mult x 0.8` |
+| `H3_BULKHEAD_PACKING` | `cargo_capacity_m3 x 1.15` |
+| `H4_MODULAR_CABINS` | `passenger_capacity + 2` |
+| `H6_FLEET_CAPTAIN` | hull subsystem budget `+ 1` |
+| `S1_LONG_BASELINE` | `radar_range_m` and `identification_range_m x 1.2` |
+| `S2_PULSE_CYCLING` | `sensor_cooldown_mult x 0.85`, `sensor_range_m x 1.2` |
+| `S3_RESONANCE_EAR` | `tuning_tolerance_hz + 25`, `extraction_rate_mult x 1.1` |
+| `C3_COLD_RUNNING` | `stealth_rating + 0.15` |
+
+`docking_time_mult`, `extraction_rate_mult` and `tuning_tolerance_hz` (contracts `ShipAttributes` fields 21-23) are always signed, at `1.0`, `1.0` and `100` without traits. The other nine traits can be unlocked and count toward prerequisites, but their effects (payouts, mission slots and time limits, crew, factions) belong to systems not built yet, so they change nothing today.
 
 ## Authentication model
 

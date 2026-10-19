@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
 import { PlanetarySurvey } from '../../lib/contracts/exploration.js';
 import { H3_PATTERN, STATION_PATTERN } from '../../config/patterns.js';
+import { PLANET_CHART_XP, SYSTEM_CHART_XP } from '../../config/captain.js';
+import { awardCaptainXp } from '../../lib/captain.js';
 import {
   verifyPlanetChartKey,
   verifySystemChartSignature
 } from '../../lib/chart-claim.js';
+import { lockActiveShip } from '../../lib/ship.js';
 
 const PLANET_CHART_PAYOUT = 500;
 const SYSTEM_CHART_PAYOUT = 2500;
@@ -124,6 +127,15 @@ export default async function chartsRoutes(fastify) {
     message: 'Sold charts cannot be overwritten'
   });
 
+  // Records a newly verified chart with `create(tx)` and awards its captain XP in one transaction
+  // holding the pilot's lock, so the XP is earned exactly once per chart: a duplicate fails the create
+  // (P2002) and rolls the award back with it.
+  const recordWithXp = (request, xp, create) => prisma.$transaction(async (tx) => {
+    const { captain } = await lockActiveShip(tx, request.user);
+    await create(tx);
+    return awardCaptainXp(tx, captain, xp);
+  });
+
   fastify.post('/charts/register-planet', { schema: registerPlanetSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const { chartKey, surveyBytesBase64 } = request.body;
     const playerId = request.user.sub;
@@ -155,14 +167,16 @@ export default async function chartsRoutes(fastify) {
     const existing = await prisma.planetChart.findUnique({ where });
     if (!existing) {
       try {
-        await prisma.planetChart.create({ data: { playerId, planetId: chartKey.planetId, ...data } });
-        return { registered: true, planetId: chartKey.planetId };
+        const captain = await recordWithXp(request, PLANET_CHART_XP, (tx) =>
+          tx.planetChart.create({ data: { playerId, planetId: chartKey.planetId, ...data } }));
+        return { registered: true, planetId: chartKey.planetId, ...captain };
       } catch (err) {
         if (err?.code !== 'P2002') throw err;
         // Lost a creation race: fall through to the update path.
       }
     }
     // Guarded update so concurrent submissions can neither roll back a newer key nor touch a sold chart.
+    // A newer key for a chart already registered awards no XP.
     const { count } = await prisma.planetChart.updateMany({
       where: { playerId, planetId: chartKey.planetId, soldAt: null, completedAtMs: { lt: completedAtMs } },
       data
@@ -198,12 +212,13 @@ export default async function chartsRoutes(fastify) {
     };
     const duplicate = () => reply.code(409).send({ error: 'SYSTEM_ALREADY_CLAIMED' });
     try {
-      await prisma.systemChart.create({ data: { playerId, systemH3: systemKey.systemH3, ...data } });
+      const captain = await recordWithXp(request, SYSTEM_CHART_XP, (tx) =>
+        tx.systemChart.create({ data: { playerId, systemH3: systemKey.systemH3, ...data } }));
+      return { claimed: true, systemH3: systemKey.systemH3, ...captain };
     } catch (err) {
       if (err?.code === 'P2002') return duplicate();
       throw err;
     }
-    return { claimed: true, systemH3: systemKey.systemH3 };
   });
 
   fastify.get('/charts/inventory', async (request) => {

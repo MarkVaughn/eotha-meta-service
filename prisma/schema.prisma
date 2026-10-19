@@ -43,6 +43,30 @@ model Player {
   accounts     Account[]
   refreshTokens RefreshToken[]
   guestDevice  GuestDevice?
+  captain      Captain?
+}
+
+// The pilot's one Captain (src/config/captain.js), created at Level 1 the first time the pilot logs in
+// or its ship is next locked (src/lib/captain.js), so existing pilots need no backfill. `level` is
+// always levelForXp(xp); `unlockedTraits` is the array of trait ids spent, at most one per level above 1.
+// `originType`, `promotedFromCrewId`, `innateClass`, `innateRank` and `quirkId` are kept for crew
+// promotion and stay at their defaults until it exists.
+model Captain {
+  id                 String   @id @default(uuid()) @db.Uuid
+  playerId           String   @unique @db.Uuid
+  player             Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  name               String
+  level              Int      @default(1)
+  xp                 Int      @default(0)
+  unlockedTraits     Json     @default("[]")
+  originType         String   @default("STARTER") // STARTER, ACADEMY_RECRUIT, PROMOTED_CREW
+  promotedFromCrewId String?  @db.Uuid
+  innateClass        String?
+  innateRank         String?
+  quirkId            String?
+  missionsCompleted  Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }
 
 model SpaceHarbor {

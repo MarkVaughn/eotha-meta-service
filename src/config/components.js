@@ -1,3 +1,5 @@
+import { applyTraitEffects, traitHullBudgetBonus } from './captain.js';
+
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
 ];
@@ -83,9 +85,10 @@ export function defaultComponents() {
 // silently change balance; Tier 1 fits the default loadout (6 Tier 1 subsystems).
 const HULL_BUDGETS = [6, 10, 18, 27, 36];
 
-export function hullBudget(hullTier) {
+// `traits` are the captain's unlocked trait ids; H6_FLEET_CAPTAIN adds a point.
+export function hullBudget(hullTier, traits = []) {
   const tier = Math.min(5, Math.max(1, Math.round(hullTier || 1)));
-  return HULL_BUDGETS[tier - 1];
+  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits);
 }
 
 export function totalSubsystemPoints(components = []) {
@@ -100,12 +103,17 @@ export function clampPassengers(count, capacity) {
   return Math.min(count, Math.max(0, Math.floor(capacity)));
 }
 
+// Attributes no component sets: their values before captain traits (eotha-contracts ShipAttributes
+// fields 21-23, matching the engine's `ShipAttributes::tier_one()`).
+const BASE_ATTRIBUTES = { docking_time_mult: 1.0, extraction_rate_mult: 1.0, tuning_tolerance_hz: 100.0 };
+
 /**
  * Deterministically derive ship attributes from a list of `{ type, tier }`
  * components. Missing components (and invalid tiers) default to Tier 1. `passengersAboard` is the
  * ship's persisted manifest count; it is clamped to the life support's passenger_capacity.
+ * `traits` are the captain's unlocked trait ids, whose ship effects are folded in (src/config/captain.js).
  */
-export function computeShipAttributes(components = [], passengersAboard = 0) {
+export function computeShipAttributes(components = [], passengersAboard = 0, traits = []) {
   const tiers = {};
   for (const c of components) {
     if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
@@ -120,6 +128,8 @@ export function computeShipAttributes(components = [], passengersAboard = 0) {
       attributes[attr] = tier === 0 ? (ZERO_TIER_OVERRIDES[attr] ?? 0) : values[tier - 1];
     }
   }
+  Object.assign(attributes, BASE_ATTRIBUTES);
+  applyTraitEffects(attributes, traits);
   attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity);
   return attributes;
 }
