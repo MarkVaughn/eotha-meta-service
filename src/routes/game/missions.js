@@ -21,7 +21,8 @@ import {
 import { awardCaptainXp } from '../../lib/captain.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import { MISSION_TYPES, verifyMissionOffer } from '../../lib/mission-offer.js';
-import { adjustReputation, missionFaction, standingsOf } from '../../lib/reputation.js';
+import { withColorsBonus } from '../../config/factions.js';
+import { LEDGER_REASONS, adjustReputation, factionsClaim, missionFaction, standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
@@ -246,9 +247,10 @@ export default async function missionsRoutes(fastify) {
   const fail = (status, error, extra = {}) => ({ failure: { status, body: { error, ...extra } } });
   const conflict = (reply, error) => reply.code(409).send({ error });
 
-  // The reissued token carrying the ship's new passenger count.
-  const tokenFor = (request, ship, passengersAboard) =>
-    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard, ship.traits).ship_attributes);
+  // The reissued token carrying the ship's new passenger count and `factions`, the pilot's factions
+  // claim after any standing change (the one read under the lock by default).
+  const tokenFor = (request, ship, passengersAboard, factions = ship.factions) =>
+    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard, ship.traits).ship_attributes, factions);
 
   fastify.get('/missions/cooldown', { schema: cooldownSchema }, async (request) => {
     const nowMs = Date.now();
@@ -403,12 +405,22 @@ export default async function missionsRoutes(fastify) {
           reason
         }
       });
-      await adjustReputation(tx, playerId, factionId, terms.reputation);
+      await adjustReputation(tx, playerId, factionId, terms.reputation, {
+        reason: LEDGER_REASONS.MISSION_ABANDONED,
+        missionId: row.missionId
+      });
       if (terms.cooldownMs > 0) await startCooldown(tx, playerId, row.originStationId, nowMs, terms.cooldownMs);
       // Only a passage boarded anyone (`required_berths` is 0 for the other types).
       const passengersAboard = unboarded(ship, offer.required_berths);
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-      return { ship, passengersAboard, missionId: row.missionId, reputationChange: terms.reputation, standings: await standingsOf(tx, playerId) };
+      return {
+        ship,
+        passengersAboard,
+        missionId: row.missionId,
+        reputationChange: terms.reputation,
+        standings: await standingsOf(tx, playerId),
+        factions: await factionsClaim(tx, playerId)
+      };
     });
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     // `mission_id`, `outcome` and `reputation_change` are the contract's MissionAbandonResponse.
@@ -418,11 +430,11 @@ export default async function missionsRoutes(fastify) {
       outcome: 'MISSION_ABANDON_OUTCOME_CANCELLED',
       reputation_change: outcome.reputationChange,
       standings: outcome.standings,
-      token: tokenFor(request, outcome.ship, outcome.passengersAboard)
+      token: tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
     };
   });
 
-  // Returns `{ credits, standings, ship, passengersAboard, captain }` (plus the stored `lots` for a gather claim), null
+  // Returns `{ credits, reputationChange, standings, factions, ship, passengersAboard, captain }` (plus the stored `lots` for a gather claim), null
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
   // the payout would overflow credits.
@@ -465,15 +477,18 @@ export default async function missionsRoutes(fastify) {
         });
         if (credited !== 1) throw OVERFLOW;
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-        // The signed reputation, negative for a late enough completion, goes to the sponsor.
-        await adjustReputation(tx, playerId, factionId, claim.reputationChange);
+        // The signed reputation, negative for a late enough completion, goes to the sponsor: a gain
+        // for the faction whose colors the pilot flies is multiplied (withColorsBonus).
+        const reputationChange = withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors);
+        await adjustReputation(tx, playerId, factionId, reputationChange, { reason: LEDGER_REASONS.MISSION_COMPLETED, missionId });
         await startCooldown(tx, playerId, stationId, Date.now(), MISSION_COOLDOWN_MS);
         const passengersAboard = unboarded(ship, active.offer.required_berths);
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
         const standings = await standingsOf(tx, playerId);
+        const factions = await factionsClaim(tx, playerId);
         // Captain XP rides on the payout record above: a replayed claim never reaches this line.
         const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true });
-        return { credits: player.credits, standings, ship, passengersAboard, captain, ...(lots && { lots }) };
+        return { credits: player.credits, reputationChange, standings, factions, ship, passengersAboard, captain, ...(lots && { lots }) };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -533,7 +548,7 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
-    // 5. Atomic settlement: payout, reputation, cooldown, captain XP, and the passengers disembark.
+    // 5. Atomic settlement: payout, reputation (with any Flying Colors bonus), cooldown, captain XP, and the passengers disembark.
     const settled = await settle(request, active, claim);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
@@ -542,11 +557,11 @@ export default async function missionsRoutes(fastify) {
       success: true,
       credits: settled.credits,
       payout: claim.rewardCredits,
-      reputation_change: claim.reputationChange,
+      reputation_change: settled.reputationChange,
       standings: settled.standings,
       ...settled.captain,
       ...(settled.lots && { lots: settled.lots }),
-      token: tokenFor(request, settled.ship, settled.passengersAboard)
+      token: tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
     };
   });
 }

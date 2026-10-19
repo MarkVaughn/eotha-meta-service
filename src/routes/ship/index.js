@@ -68,11 +68,11 @@ export default async function shipRoutes(fastify, opts) {
           });
         }
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-        return { shipId: ship.id, components: ship.components, passengersAboard, traits: ship.traits };
+        return { shipId: ship.id, components: ship.components, passengersAboard, traits: ship.traits, factions: ship.factions };
       });
       if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
       const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits);
-      return { ...loadout, token: reissueToken(fastify, request, loadout.ship_attributes) };
+      return { ...loadout, token: reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
     });
   }
 
@@ -165,11 +165,11 @@ export default async function shipRoutes(fastify, opts) {
       }
 
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, cost, credits: player.credits };
+      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, factions: ship.factions, cost, credits: player.credits };
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits);
-    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(fastify, request, loadout.ship_attributes) };
+    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
   });
 }
