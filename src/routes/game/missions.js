@@ -362,7 +362,7 @@ export default async function missionsRoutes(fastify) {
 
   // Abandoning costs the sponsoring faction's reputation and starts a cooldown at the origin, by type
   // (ABANDON_TERMS), docked or not, and pays nothing, and the mission's berths (a survey's surveyor
-// too) empty. A passage is the exception: only cancelling it
+  // too) empty. A passage is the exception: only cancelling it
   // while docked at its origin, where the passengers step back off, has those terms. Abandoned
   // anywhere else its passengers still disembark wherever the ship is, at no cost and with no
   // cooldown, until the passenger hostage state replaces that.
