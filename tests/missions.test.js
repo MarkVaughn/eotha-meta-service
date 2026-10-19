@@ -1251,4 +1251,77 @@ describe('engine-signed missions', () => {
       }
     });
   });
+
+  describe('survey surveyor', () => {
+    const survey = (pilot, overrides = {}) => research(pilot, { required_berths: 1, ...overrides });
+
+    test('with one free berth a survey boards its surveyor; with none it is refused', async () => {
+      const pilot = await newPilot();
+      await call(pilot, 'GET', '/ship/loadout'); // creates the ship row; Tier 1 has 2 berths
+      await setAboard(pilot, 1);
+      const res = await accept(pilot, survey(pilot));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(tokenAboard(res), 2);
+      assert.equal(await aboard(pilot), 2);
+
+      const full = await accept(pilot, survey(pilot));
+      assert.equal(full.statusCode, 400);
+      assert.equal(json(full).code, 'insufficient_berths');
+      assert.equal(json(full).available_berths, 0);
+      assert.equal((await activeIds(pilot)).length, 1);
+      assert.equal(await aboard(pilot), 2);
+    });
+
+    test('a hold full of passage passengers blocks a survey, and a survey blocks a passage', async () => {
+      const pilot = await newPilot();
+      await acceptOk(pilot, signedOffer(pilot, { required_berths: 2 }));
+      assert.equal(await aboard(pilot), 2);
+      const blocked = await accept(pilot, survey(pilot));
+      assert.equal(blocked.statusCode, 400);
+      assert.equal(json(blocked).code, 'insufficient_berths');
+      assert.equal(json(blocked).available_berths, 0);
+
+      const other = await newPilot();
+      await acceptOk(other, survey(other));
+      const passage = await accept(other, signedOffer(other, { required_berths: 2 }));
+      assert.equal(json(passage).code, 'insufficient_berths');
+      assert.equal(json(passage).available_berths, 1);
+    });
+
+    test('the surveyor steps off at completion', async () => {
+      const pilot = await newPilot();
+      await call(pilot, 'GET', '/ship/loadout');
+      await setAboard(pilot, 1);
+      const active = await acceptOk(pilot, survey(pilot));
+      assert.equal(await aboard(pilot), 2);
+      const res = await complete(pilot, signedClaim(pilot, active));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(tokenAboard(res), 1);
+      assert.equal(await aboard(pilot), 1);
+      assert.equal(json(await accept(pilot, survey(pilot))).active.offer.required_berths, 1);
+    });
+
+    test('the surveyor steps off at abandon, in flight and in port, with the research terms', async () => {
+      const pilot = await newPilot();
+      const flying = await acceptOk(pilot, survey(pilot));
+      assert.equal(await aboard(pilot), 1);
+      const res = await abandon(pilot, flying.mission_id);
+      assert.equal(json(res).reputation_change, -8);
+      assert.equal(tokenAboard(res), 0);
+      assert.equal(await aboard(pilot), 0);
+
+      const offer = survey(pilot, { origin_station_id: randomUUID() });
+      const docked = await acceptOk(pilot, offer);
+      assert.equal(await aboard(pilot), 1);
+      const inPort = await call(pilot, 'POST', '/game/missions/abandon', {
+        missionId: docked.mission_id,
+        dockedReceipt: receiptAtOrigin(pilot, offer)
+      });
+      assert.equal(inPort.statusCode, 200, inPort.body);
+      assert.equal(json(inPort).reputation_change, -8);
+      assert.equal(tokenAboard(inPort), 0);
+      assert.equal(await aboard(pilot), 0);
+      assert.equal((await abandonRows(pilot)).filter((r) => r.reason === 'in_port_origin').length, 1);
+    });
+  });
 });
