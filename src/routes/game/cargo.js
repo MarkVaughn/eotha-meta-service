@@ -12,7 +12,7 @@ import {
   verifyCargoManifest,
   verifySaleRecord
 } from '../../lib/cargo.js';
-import { deductCrewRevenueShare } from '../../lib/crew.js';
+import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const manifestSchema = {
@@ -106,7 +106,7 @@ export default async function cargoRoutes(fastify) {
           // The crew aboard take their share of the signed total; the pilot is credited the rest.
           // Guarded increment; throwing rolls back the stored hold with it, so the record stays
           // creditable once the balance allows.
-          split = deductCrewRevenueShare(ship.crew, ship.traits, saleRecord.totalCredits);
+          split = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, saleRecord.totalCredits);
           const { count } = await tx.player.updateMany({
             where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - split.netCredits } },
             data: { credits: { increment: split.netCredits } }

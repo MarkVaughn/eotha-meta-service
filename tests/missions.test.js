@@ -762,6 +762,18 @@ describe('engine-signed missions', () => {
       assert.equal(await credits(pilot), claim.rewardCredits);
     });
 
+    test('crew on standby still take their wage share of the payout', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500, status: 'STANDBY', spaceshipId: null });
+      const active = await acceptOk(pilot, research(pilot));
+      const claim = signedClaim(pilot, active, { rewardCredits: 1000 });
+      const res = await complete(pilot, claim);
+      assert.equal(res.statusCode, 200, res.body);
+      const body = json(res);
+      assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [1000, 50, 950]);
+      assert.equal(body.credits, 950);
+    });
+
     test('ASSERT-2.2.3: the active crew take their wage share of the payout and the pilot is paid the rest', async () => {
       const pilot = await newPilot();
       const chef = await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });

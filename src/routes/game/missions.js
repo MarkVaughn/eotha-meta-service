@@ -19,7 +19,7 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
-import { deductCrewRevenueShare } from '../../lib/crew.js';
+import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import { MISSION_TYPES, isLegacyRow, verifyMissionOffer } from '../../lib/mission-offer.js';
 import { withColorsBonus } from '../../config/factions.js';
@@ -465,7 +465,7 @@ export default async function missionsRoutes(fastify) {
         });
         // The crew aboard take their share of the signed reward; the pilot is credited the rest.
         // Guarded increment; throwing rolls back the mission delete and payout record.
-        const payout = deductCrewRevenueShare(ship.crew, ship.traits, claim.rewardCredits);
+        const payout = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, claim.rewardCredits);
         const { count: credited } = await tx.player.updateMany({
           where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - payout.netCredits } },
           data: { credits: { increment: payout.netCredits } }

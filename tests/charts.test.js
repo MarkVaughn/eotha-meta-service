@@ -314,6 +314,15 @@ describe('cartography', () => {
     assert.equal(await credits(pilot), 475);
   });
 
+  test('crew on standby still take their share of a chart sale', async () => {
+    const pilot = await newPilot('StandbyChart');
+    await register(pilot, planetKey(pilot));
+    await addCrew(pilot, { crewClass: 'CHEF', status: 'STANDBY', spaceshipId: null });
+    const body = json(await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', stationId: 'station-alpha' }));
+    assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [500, 25, 475]);
+    assert.equal(await credits(pilot), 475);
+  });
+
   test('sells charts once for credits', async () => {
     const pilot = await newPilot('Merchant');
     await register(pilot, planetKey(pilot));

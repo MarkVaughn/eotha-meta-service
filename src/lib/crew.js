@@ -36,6 +36,10 @@ export const REFUSAL_PRIORITY = Object.freeze([
 export const primaryReason = (reasons) =>
   reasons.reduce((best, reason) => (REFUSAL_PRIORITY.indexOf(reason.code) < REFUSAL_PRIORITY.indexOf(best.code) ? reason : best));
 
+// `db` is the Prisma client or an open transaction. Everyone on the pilot's payroll: the crew aboard
+// `ship` plus the crew on standby, who still take their share of a payout.
+export const payrollCrewOf = async (db, playerId, ship) => [...ship.crew, ...(await standbyCrewOf(db, playerId))];
+
 /**
  * What stops `ship` (lockActiveShip's result) taking aboard one more crew member of `crewClass`, as
  * `{ code, label, ...details }`: a class already aboard, the hull's crew limit, no free berth.

@@ -75,8 +75,8 @@ model Captain {
 }
 
 // A crew member hired from a station board (src/config/crew.js, src/lib/crew-generator.js). ACTIVE
-// crew are aboard `spaceshipId` and take their wage share of every payout; STANDBY crew are on the
-// roster with no ship, no berth and no share. `rank` and `quirkId` are fixed at hire (a rank changes
+// crew are aboard `spaceshipId` and take their wage share of every payout; STANDBY crew take theirs too but are on the
+// roster with no ship and no berth. `rank` and `quirkId` are fixed at hire (a rank changes
 // only by promotion, a later phase); `wageShareBp` is the rank's base share at hire, the effective
 // share (quirk, captain traits) being derived when a payout settles. `morale`, `seniorityXp`,
 // `unutilizedStreak` and `unpaidArrearsCredits` are kept for the morale and seniority phases and stay

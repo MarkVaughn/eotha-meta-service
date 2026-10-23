@@ -324,6 +324,20 @@ describe('cargo persistence and sales', () => {
   });
 
   describe('sell', () => {
+    test('crew on standby still take their share of a cargo sale, alongside the active crew', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });
+      await addCrew(pilot, { crewClass: 'DOCTOR', rank: 'NOVICE', wageShareBp: 500, status: 'STANDBY', spaceshipId: null });
+      const { lease_id: leaseId } = (await lease(pilot)).cargo;
+      const sale = saleFor(pilot, leaseId, randomUUID(), 1, [ORE], { totalCredits: 1000 });
+      const res = await sell(pilot, sale);
+      assert.equal(res.statusCode, 200, res.body);
+      const body = json(res);
+      assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [1000, 100, 900]);
+      assert.equal(body.crewPayouts.length, 2);
+      assert.equal(await credits(pilot), 900);
+    });
+
     test('ASSERT-2.2.3: a Novice Chef takes 5% of a 1000 cr sale; the pilot is credited 950 and a replay answers the same split', async () => {
       const pilot = await newPilot();
       await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });

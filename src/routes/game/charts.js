@@ -7,7 +7,7 @@ import {
   verifyPlanetChartKey,
   verifySystemChartSignature
 } from '../../lib/chart-claim.js';
-import { deductCrewRevenueShare } from '../../lib/crew.js';
+import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { lockActiveShip } from '../../lib/ship.js';
 
 const PLANET_CHART_PAYOUT = 500;
@@ -278,7 +278,7 @@ export default async function chartsRoutes(fastify) {
       // Guarded on soldAt so a chart pays out at most once.
       const { count } = await txModel.updateMany({ where: { ...where, soldAt: null }, data: { soldAt: new Date() } });
       if (count !== 1) return null;
-      const payout = deductCrewRevenueShare(ship.crew, ship.traits, rewardCredits);
+      const payout = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, rewardCredits);
       const player = await tx.player.update({
         where: { id: playerId },
         data: { credits: { increment: payout.netCredits } },
