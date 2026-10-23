@@ -5,6 +5,37 @@ export const MISSION_OFFER_DOMAIN = Buffer.from('EOTHA_MISSION_OFFER_V1', 'utf8'
 
 // `MissionType` numbers (eotha-contracts `rtse/v1/mission.proto`); the payload signs the number.
 export const MISSION_TYPES = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2, MISSION_TYPE_GATHER: 3 };
+export const MISSION_VISIBILITIES = {
+  MISSION_VISIBILITY_UNSPECIFIED: 0, MISSION_VISIBILITY_OVERT: 1, MISSION_VISIBILITY_COVERT: 2
+};
+export const MISSION_ARCHETYPES = Object.fromEntries([
+  'UNSPECIFIED', 'DIPLOMAT_ESCORT', 'SABOTEUR_INSERTION', 'SYNDICATE_EXTRACTION',
+  'STRATEGIC_RECON', 'FORBIDDEN_PLANET_SURVEY', 'ARMS_DELIVERY', 'ILLEGAL_CARGO_SMUGGLE', 'TRAITOR_DEFECTOR_OP'
+].map((name, value) => [`MISSION_ARCHETYPE_${name}`, value]));
+
+export function missionEnum(value, values) {
+  if (value === undefined) return 0;
+  if (typeof value === 'number' && Object.values(values).includes(value)) return value;
+  if (Object.hasOwn(values, value)) return values[value];
+  throw new Error('Unknown mission enum value.');
+}
+
+// Visibility, never the presence of claim fields, selects both signing domains. A V1 offer
+// must not acquire unsigned V2 fields; omitted proto zero values are equivalent to explicit zeros.
+export function missionOfferVersion(offer) {
+  const visibility = missionEnum(offer.visibility, MISSION_VISIBILITIES);
+  const archetype = missionEnum(offer.archetype, MISSION_ARCHETYPES);
+  if (visibility !== 0) return 2;
+  if (archetype !== 0 || (offer.opposed_faction_id ?? '') !== ''
+      || (offer.opposed_reputation_change ?? 0) !== 0 || BigInt(offer.clandestine_bonus_credits ?? 0) !== 0n
+      || (offer.carries_contraband_or_operative ?? false) !== false
+      || (offer.required_flying_colors_faction_id ?? '') !== '') {
+    throw new Error('V2 mission fields require visibility.');
+  }
+  return 1;
+}
+
+export const isCovert = (offer) => missionEnum(offer.visibility, MISSION_VISIBILITIES) === 2;
 
 function lenPrefixed(value) {
   const bytes = Buffer.from(value, 'utf8');
@@ -46,8 +77,9 @@ function f64(value) {
 export function canonicalMissionOfferPayload(offer) {
   const type = MISSION_TYPES[offer.type];
   if (type === undefined) throw new Error('type must be a MissionType name.');
+  const version = missionOfferVersion(offer);
   const v1 = [
-    MISSION_OFFER_DOMAIN,
+    version === 2 ? Buffer.from('EOTHA_MISSION_OFFER_V2', 'utf8') : MISSION_OFFER_DOMAIN,
     lenPrefixed(offer.pilot_id),
     u64(offer.offered_at_ms),
     lenPrefixed(offer.mission_id),
@@ -82,7 +114,16 @@ export function canonicalMissionOfferPayload(offer) {
         f64(offer.source_lng)
       ]
     : [];
-  return Buffer.concat([...v1, ...gather]);
+  const v2 = version === 2 ? [
+    u32(missionEnum(offer.visibility, MISSION_VISIBILITIES)),
+    u32(missionEnum(offer.archetype, MISSION_ARCHETYPES)),
+    lenPrefixed(offer.opposed_faction_id ?? ''),
+    i32(offer.opposed_reputation_change ?? 0),
+    u64(offer.clandestine_bonus_credits ?? 0),
+    Buffer.from([offer.carries_contraband_or_operative ? 1 : 0]),
+    lenPrefixed(offer.required_flying_colors_faction_id ?? '')
+  ] : [];
+  return Buffer.concat([...v1, ...gather, ...v2]);
 }
 
 // `offer.signature` is the base64-encoded 64-byte Ed25519 signature. Never throws.

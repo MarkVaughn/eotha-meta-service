@@ -59,7 +59,7 @@ export default async function cargoRoutes(fastify) {
     });
 
     const { ship_attributes: shipAttributes } = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew);
-    const token = reissueToken(fastify, request, shipAttributes, ship.factions, { cargo: { lease_id: lease.id, lots: lease.lots } });
+    const token = await reissueToken(fastify, request, shipAttributes, ship.factions, { cargo: { lease_id: lease.id, lots: lease.lots } });
     return { token, cargo: holdView(lease) };
   });
 

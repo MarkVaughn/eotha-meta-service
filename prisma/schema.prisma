@@ -257,6 +257,7 @@ model PlayerReputation {
 // Append-only audit of every standing change (src/lib/reputation.js). `factionId` is the faction the
 // event was for and `factionDelta` its change; `alphaDelta`, `betaDelta` and `gammaDelta` are the
 // changes to the three factions, including those their caps made. `reason`: MISSION_COMPLETED,
+// COMPLETE_COVERT_CLEAN, COMPLETE_COVERT_DETECTED,
 // MISSION_ABANDONED or RENOUNCE_PARAGON. `bribePaidCredits` is reserved for customs bribes.
 model ReputationLedger {
   id               String   @id @default(uuid()) @db.Uuid

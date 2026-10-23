@@ -12,6 +12,8 @@ import { DEFAULT_FACTION_ID } from '../config/missions.js';
 // What a ReputationLedger row's `reason` records.
 export const LEDGER_REASONS = Object.freeze({
   MISSION_COMPLETED: 'MISSION_COMPLETED',
+  COMPLETE_COVERT_CLEAN: 'COMPLETE_COVERT_CLEAN',
+  COMPLETE_COVERT_DETECTED: 'COMPLETE_COVERT_DETECTED',
   MISSION_ABANDONED: 'MISSION_ABANDONED',
   RENOUNCE_PARAGON: 'RENOUNCE_PARAGON'
 });
@@ -76,6 +78,24 @@ export async function adjustReputation(tx, playerId, factionId, delta, { reason,
   await upsertStanding(tx, playerId, factionId, standing);
   if (standing !== current) await tx.reputationLedger.create({ data: { ...entry, playerId, factionDelta: standing - current } });
   return standing;
+}
+
+// A completion can change sponsor and rival together. Apply both before the faction caps so
+// rival harm that frees a cap in this same event does not prematurely truncate sponsor gains.
+// The ledger records the combined capped deltas with the sponsor as its primary faction.
+export async function adjustMissionReputation(tx, playerId, factionId, sponsorDelta, opposedFactionId, opposedDelta, entry) {
+  if (isFactionId(factionId) && isFactionId(opposedFactionId) && opposedDelta !== 0) {
+    return rewriteFactionStandings(tx, playerId, (previous) => {
+      const next = { ...previous };
+      next[factionId] += sponsorDelta;
+      next[opposedFactionId] += opposedDelta;
+      return next;
+    }, { ...entry, factionId });
+  }
+  await adjustReputation(tx, playerId, factionId, sponsorDelta, entry);
+  if (opposedFactionId && opposedDelta !== 0) {
+    await adjustReputation(tx, playerId, opposedFactionId, opposedDelta, entry);
+  }
 }
 
 // Inside `tx`, holding the pilot's lock: lowers the pilot's Paragon standing with `factionId` to
