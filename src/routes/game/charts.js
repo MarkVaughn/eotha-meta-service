@@ -7,6 +7,7 @@ import {
   verifyPlanetChartKey,
   verifySystemChartSignature
 } from '../../lib/chart-claim.js';
+import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { lockActiveShip } from '../../lib/ship.js';
 
 const PLANET_CHART_PAYOUT = 500;
@@ -269,19 +270,23 @@ export default async function chartsRoutes(fastify) {
     const existing = await model.findFirst({ where, select: { id: true } });
     if (!existing) return reply.code(404).send({ error: 'Chart not registered.' });
 
-    const newBalance = await prisma.$transaction(async (tx) => {
+    // The pilot's lock serialises the sale with every other payout, and the crew aboard take their
+    // share of the reward before the pilot is credited the rest.
+    const sale = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
       const txModel = isPlanet ? tx.planetChart : tx.systemChart;
       // Guarded on soldAt so a chart pays out at most once.
       const { count } = await txModel.updateMany({ where: { ...where, soldAt: null }, data: { soldAt: new Date() } });
       if (count !== 1) return null;
+      const payout = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, rewardCredits);
       const player = await tx.player.update({
         where: { id: playerId },
-        data: { credits: { increment: rewardCredits } },
+        data: { credits: { increment: payout.netCredits } },
         select: { credits: true }
       });
-      return player.credits;
+      return { payout, newBalance: player.credits };
     });
-    if (newBalance === null) return reply.code(409).send({ error: 'Chart has already been sold.' });
-    return { sold: true, rewardCredits, newBalance };
+    if (sale === null) return reply.code(409).send({ error: 'Chart has already been sold.' });
+    return { sold: true, rewardCredits, newBalance: sale.newBalance, ...sale.payout };
   });
 }

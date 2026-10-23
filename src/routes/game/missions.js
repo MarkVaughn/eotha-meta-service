@@ -1,4 +1,4 @@
-import { computeShipAttributes } from '../../config/components.js';
+import { computeShipAttributes, freeBerths } from '../../config/components.js';
 import {
   ABANDON_TERMS,
   MAX_OFFER_FUTURE_SKEW_MS,
@@ -19,8 +19,9 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
+import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
-import { MISSION_TYPES, verifyMissionOffer } from '../../lib/mission-offer.js';
+import { MISSION_TYPES, isLegacyRow, verifyMissionOffer } from '../../lib/mission-offer.js';
 import { withColorsBonus } from '../../config/factions.js';
 import { LEDGER_REASONS, adjustReputation, factionsClaim, missionFaction, standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
@@ -165,17 +166,6 @@ function fromStoredOffer(stored) {
 
 const LEGACY_MESSAGE = 'Your previous mission was cancelled because the mission format changed. Nothing was charged; accept a new mission.';
 
-// A mission stored before offers were signed by the engine (legacy id, no exact coordinates, or no
-// signature) can never be claimed: the engine would not recognise its offer. It is removed when the
-// pilot's missions are next listed, abandoned or completed, or an accept succeeds, and never counts
-// against a limit; accepting it charged nothing and boarded no one, so there is nothing to refund or
-// unboard.
-const isLegacyRow = (row) =>
-  !UUID_PATTERN.test(row.missionId)
-  || !Array.isArray(row.offer?.exact_destination)
-  || row.offer.exact_destination.length !== 2
-  || typeof row.offer.signature !== 'string';
-
 // Proto-JSON ActiveMission for a stored row.
 function toActiveMission(playerId, offer, acceptedAt) {
   const acceptedAtMs = acceptedAt.getTime();
@@ -251,7 +241,7 @@ export default async function missionsRoutes(fastify) {
   // The reissued token carrying the ship's new passenger count and `factions`, the pilot's factions
   // claim after any standing change (the one read under the lock by default).
   const tokenFor = (request, ship, passengersAboard, factions = ship.factions) =>
-    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard, ship.traits).ship_attributes, factions);
+    reissueToken(fastify, request, toLoadout(ship.id, ship.components, passengersAboard, ship.traits, ship.crew).ship_attributes, factions);
 
   fastify.get('/missions/cooldown', { schema: cooldownSchema }, async (request) => {
     const nowMs = Date.now();
@@ -324,12 +314,13 @@ export default async function missionsRoutes(fastify) {
       });
       if (abandoned) return fail(409, 'This mission was abandoned and cannot be accepted again.', { code: 'mission_abandoned' });
 
-      const { passenger_capacity: capacity, passengers_aboard: aboard } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits);
-      const freeBerths = Math.max(0, Math.floor(capacity) - aboard);
-      if (offer.required_berths > freeBerths) {
+      // Active crew occupy berths too, as the engine counts them.
+      const attributes = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, ship.crew);
+      const available = freeBerths(attributes);
+      if (offer.required_berths > available) {
         return fail(400, 'Ship has insufficient free passenger berths for this mission.', {
           code: 'insufficient_berths',
-          available_berths: freeBerths
+          available_berths: available
         });
       }
 
@@ -343,7 +334,7 @@ export default async function missionsRoutes(fastify) {
           acceptedAt
         }
       });
-      const passengersAboard = aboard + offer.required_berths;
+      const passengersAboard = attributes.passengers_aboard + offer.required_berths;
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       return { ship, passengersAboard };
     });
@@ -436,7 +427,7 @@ export default async function missionsRoutes(fastify) {
     };
   });
 
-  // Returns `{ credits, reputationChange, standings, factions, ship, passengersAboard, captain }` (plus the stored `lots` for a gather claim), null
+  // Returns `{ credits, payout, reputationChange, standings, factions, ship, passengersAboard, captain }` (`payout` the crew's split of the reward, see deductCrewRevenueShare; plus the stored `lots` for a gather claim), null
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
   // the payout would overflow credits.
@@ -472,10 +463,12 @@ export default async function missionsRoutes(fastify) {
         await tx.completedMission.create({
           data: { playerId, missionId, factionId, rewardCredits: claim.rewardCredits, reputationChange: claim.reputationChange }
         });
+        // The crew aboard take their share of the signed reward; the pilot is credited the rest.
         // Guarded increment; throwing rolls back the mission delete and payout record.
+        const payout = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, claim.rewardCredits);
         const { count: credited } = await tx.player.updateMany({
-          where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - claim.rewardCredits } },
-          data: { credits: { increment: claim.rewardCredits } }
+          where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - payout.netCredits } },
+          data: { credits: { increment: payout.netCredits } }
         });
         if (credited !== 1) throw OVERFLOW;
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
@@ -490,7 +483,7 @@ export default async function missionsRoutes(fastify) {
         const factions = await factionsClaim(tx, playerId);
         // Captain XP rides on the payout record above: a replayed claim never reaches this line.
         const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true });
-        return { credits: player.credits, reputationChange, standings, factions, ship, passengersAboard, captain, ...(lots && { lots }) };
+        return { credits: player.credits, payout, reputationChange, standings, factions, ship, passengersAboard, captain, ...(lots && { lots }) };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -550,7 +543,7 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
-    // 5. Atomic settlement: payout, reputation (with any Flying Colors bonus), cooldown, captain XP, and the passengers disembark.
+    // 5. Atomic settlement: payout (less the crew's share), reputation (with any Flying Colors bonus), cooldown, captain XP, and the passengers disembark.
     const settled = await settle(request, active, claim);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
@@ -558,7 +551,9 @@ export default async function missionsRoutes(fastify) {
     return {
       success: true,
       credits: settled.credits,
+      // `payout` is the signed reward; the crew's share comes out of it before the pilot is credited.
       payout: claim.rewardCredits,
+      ...settled.payout,
       reputation_change: settled.reputationChange,
       standings: settled.standings,
       ...settled.captain,

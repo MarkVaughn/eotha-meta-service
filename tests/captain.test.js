@@ -127,7 +127,7 @@ describe('captain config', () => {
     assert.equal(all.max_speed_mps, 21.6); // 20 x 1.08
     assert.equal(all.docking_time_mult, 0.8);
     assert.equal(all.cargo_capacity_m3, 23); // 20 x 1.15
-    assert.equal(all.passenger_capacity, 4); // 2 + 2
+    assert.equal(all.passenger_capacity, 5); // 3 + 2
     assert.equal(all.passengers_aboard, 3); // clamped to the raised capacity
     assert.equal(all.radar_range_m, 600);
     assert.equal(all.identification_range_m, 180);
@@ -320,14 +320,14 @@ describe('captain over HTTP', () => {
 
   test('Modular Cabins berths count when accepting a passage', async () => {
     const pilot = await captainWith(LEVEL_XP[3], ['H1_TRIM_THRUSTERS', 'H2_HARBOR_PILOT']);
-    const offer = signedOffer(pilot, { required_berths: 4 });
+    const offer = signedOffer(pilot, { required_berths: 5 });
     const accept = () => call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
     assert.equal(json(await accept()).code, 'insufficient_berths');
     const res = await unlockDocked(pilot, 'H4_MODULAR_CABINS');
-    assert.equal(json(res).ship_attributes.passenger_capacity, 4);
+    assert.equal(json(res).ship_attributes.passenger_capacity, 5);
     const accepted = await accept();
     assert.equal(accepted.statusCode, 200, accepted.body);
-    assert.equal(app.jwt.verify(json(accepted).token).ship_attributes.passengers_aboard, 4);
+    assert.equal(app.jwt.verify(json(accepted).token).ship_attributes.passengers_aboard, 5);
   });
 
   test('ASSERT-1.2.4: a missing or expired docked receipt is refused with docked_receipt_required', async () => {

@@ -40,7 +40,8 @@ describe('computeShipAttributes', () => {
     assert.equal(a.energy_regen_rate, 10);
     assert.equal(a.comms_range_m, 1000);
     assert.equal(a.max_speed_mps, 20);
-    assert.equal(a.passenger_capacity, 2);
+    assert.equal(a.passenger_capacity, 3);
+    assert.equal(a.crew_aboard, 0);
     assert.deepEqual(computeShipAttributes(), a);
   });
 
@@ -57,7 +58,7 @@ describe('computeShipAttributes', () => {
       passenger_capacity: 50,
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
       docking_time_mult: 1, extraction_rate_mult: 1, tuning_tolerance_hz: 100,
-      passengers_aboard: 0
+      crew_aboard: 0, passengers_aboard: 0
     });
   });
 
@@ -72,16 +73,16 @@ describe('computeShipAttributes', () => {
     assert.equal(computeShipAttributes([]).passengers_aboard, 0);
     assert.equal(computeShipAttributes(defaultComponents()).passengers_aboard, 0);
     assert.equal(computeShipAttributes([], 2).passengers_aboard, 2);
-    assert.equal(computeShipAttributes([], 40).passengers_aboard, 2);
+    assert.equal(computeShipAttributes([], 40).passengers_aboard, 3);
     assert.equal(computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: 4 }], 15).passengers_aboard, 15);
-    assert.equal(computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: 4 }], 21).passengers_aboard, 20);
+    assert.equal(computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: 4 }], 23).passengers_aboard, 22);
     for (const bad of [-1, 1.5, NaN, null, undefined, '3']) {
       assert.equal(clampPassengers(bad, 10), 0, `${bad}`);
     }
   });
 
   test('maps every life support tier to its passenger capacity', () => {
-    const expected = [2, 5, 10, 20, 50];
+    const expected = [3, 6, 12, 22, 50];
     expected.forEach((capacity, i) => {
       const a = computeShipAttributes([{ type: 'LIFE_SUPPORT', tier: i + 1 }]);
       assert.equal(a.passenger_capacity, capacity);
@@ -251,18 +252,18 @@ describe('ship components over HTTP', () => {
     const pilot = await newPilot('PaxClamp');
     await setCredits(pilot, 100_000);
     await loadout(pilot);
-    // Capacity is 2 at life support Tier 1; 40 is the state left behind if capacity ever drops.
+    // Capacity is 3 at life support Tier 1; 40 is the state left behind if capacity ever drops.
     await app.prisma.spaceship.updateMany({ where: { playerId: pilot.id }, data: { passengersAboard: 40 } });
-    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 3);
     // The loadout only clamps what it reports; the stored count is untouched until a component changes.
     assert.equal((await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } })).passengersAboard, 40);
 
     assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 200); // Tier 1 hull budget is full
     const up = json(await upgrade(pilot, 'RADAR', 2));
-    assert.equal(up.ship_attributes.passengers_aboard, 2);
-    assert.equal(app.jwt.verify(up.token).ship_attributes.passengers_aboard, 2);
+    assert.equal(up.ship_attributes.passengers_aboard, 3);
+    assert.equal(app.jwt.verify(up.token).ship_attributes.passengers_aboard, 3);
     const stored = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } });
-    assert.equal(stored.passengersAboard, 2);
+    assert.equal(stored.passengersAboard, 3);
   });
 
   test('POST /ship/dev/passengers sets the count within capacity and reissues the token', async () => {
@@ -270,16 +271,16 @@ describe('ship components over HTTP', () => {
     await setCredits(pilot, 100_000);
     const set = (n) => call(pilot, 'POST', '/ship/dev/passengers', { passengersAboard: n });
 
-    const ok = await set(2);
+    const ok = await set(3);
     assert.equal(ok.statusCode, 200);
-    assert.equal(json(ok).ship_attributes.passengers_aboard, 2);
-    assert.equal(app.jwt.verify(json(ok).token).ship_attributes.passengers_aboard, 2);
-    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+    assert.equal(json(ok).ship_attributes.passengers_aboard, 3);
+    assert.equal(app.jwt.verify(json(ok).token).ship_attributes.passengers_aboard, 3);
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 3);
 
-    const over = await set(3);
+    const over = await set(4);
     assert.equal(over.statusCode, 400);
     assert.equal(json(over).code, 'passengers_exceed_capacity');
-    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 2);
+    assert.equal((await loadout(pilot)).ship_attributes.passengers_aboard, 3);
 
     assert.equal((await set(-1)).statusCode, 400);
     assert.equal((await set(1.5)).statusCode, 400);

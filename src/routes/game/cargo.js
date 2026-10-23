@@ -12,6 +12,7 @@ import {
   verifyCargoManifest,
   verifySaleRecord
 } from '../../lib/cargo.js';
+import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const manifestSchema = {
@@ -57,7 +58,7 @@ export default async function cargoRoutes(fastify) {
       return { ship, lease };
     });
 
-    const { ship_attributes: shipAttributes } = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits);
+    const { ship_attributes: shipAttributes } = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew);
     const token = reissueToken(fastify, request, shipAttributes, ship.factions, { cargo: { lease_id: lease.id, lots: lease.lots } });
     return { token, cargo: holdView(lease) };
   });
@@ -78,8 +79,9 @@ export default async function cargoRoutes(fastify) {
     return { applied: outcome === CARGO_WRITE.APPLIED };
   });
 
-  // A signed sale: credits `totalCredits` once, keyed by its nonce, and stores the remaining hold in
-  // the same transaction. A replay answers with the first sale and the current balance.
+  // A signed sale: credits `totalCredits` less the crew's share once, keyed by its nonce, and stores
+  // the remaining hold in the same transaction. A replay answers with the first sale, its split and
+  // the current balance.
   fastify.post('/cargo/sell', { schema: sellSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
     const { saleRecord } = request.body;
@@ -91,20 +93,23 @@ export default async function cargoRoutes(fastify) {
     let outcome;
     try {
       outcome = await prisma.$transaction(async (tx) => {
-        await lockActiveShip(tx, request.user);
+        const ship = await lockActiveShip(tx, request.user);
         // The lock serialises this lookup with every other sale of the pilot's.
         const sale = await tx.cargoSale.findUnique({ where: { nonce } });
         if (sale && sale.playerId !== playerId) {
           return { refusal: { error: 'Another pilot already redeemed this sale nonce.', code: 'sale_nonce_conflict' } };
         }
+        let split;
         if (!sale) {
           const { outcome: write } = await applyCargoWrite(tx, playerId, writeOf(saleRecord, toStoredLots(saleRecord.remaining)));
           if (CARGO_REFUSALS[write]) return { refusal: CARGO_REFUSALS[write] };
+          // The crew aboard take their share of the signed total; the pilot is credited the rest.
           // Guarded increment; throwing rolls back the stored hold with it, so the record stays
           // creditable once the balance allows.
+          split = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, saleRecord.totalCredits);
           const { count } = await tx.player.updateMany({
-            where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - saleRecord.totalCredits } },
-            data: { credits: { increment: saleRecord.totalCredits } }
+            where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - split.netCredits } },
+            data: { credits: { increment: split.netCredits } }
           });
           if (count !== 1) throw OVERFLOW;
           await tx.cargoSale.create({
@@ -116,15 +121,24 @@ export default async function cargoRoutes(fastify) {
               stationId: saleRecord.stationId,
               items: toStoredLots(saleRecord.items),
               totalCredits: saleRecord.totalCredits,
+              crewShareCredits: split.crewShareCredits,
               soldAtMs: BigInt(saleRecord.soldAtMs)
             }
           });
         }
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         const { lots } = holdView(await currentLease(tx, playerId));
+        // `total_credits` is the signed gross. A replay does not list the crew's payouts: only the
+        // total share is kept with the sale.
+        const grossCredits = sale?.totalCredits ?? saleRecord.totalCredits;
+        const crewShareCredits = sale?.crewShareCredits ?? split.crewShareCredits;
         return {
           credits: player.credits,
-          total_credits: sale?.totalCredits ?? saleRecord.totalCredits,
+          total_credits: grossCredits,
+          grossCredits,
+          crewShareCredits,
+          netCredits: grossCredits - crewShareCredits,
+          ...(split && { crewPayouts: split.crewPayouts }),
           lots,
           replayed: Boolean(sale)
         };

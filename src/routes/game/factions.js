@@ -61,7 +61,7 @@ export default async function factionsRoutes(fastify) {
   }
 
   const tokenFor = (request, ship, factions) =>
-    reissueToken(fastify, request, toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits).ship_attributes, factions);
+    reissueToken(fastify, request, toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew).ship_attributes, factions);
 
   // Flies a faction's colors (standing at least FLYING_COLORS_MIN_REP with it), or with a null
   // `factionId` stops, and answers with a token carrying the new `factions.active_colors`.

@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, createPublicKey, sign } from 'node:crypto';
 import { PlanetarySurvey } from '../src/lib/contracts/exploration.js';
-import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey } from './helpers.js';
+import { addCrew, app, call, closeApp, credits, json, loginKey, newPilot, rtseKey } from './helpers.js';
 import { computeShipAttributes } from '../src/config/components.js';
 import {
   PLANET_CHART_DOMAIN,
@@ -302,6 +302,27 @@ describe('cartography', () => {
     assert.equal((await claim(key)).statusCode, 200);
   });
 
+  test('ASSERT-2.2.3: the crew take their share of a chart sale', async () => {
+    const pilot = await newPilot('CrewChart');
+    await register(pilot, planetKey(pilot));
+    await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });
+    const res = await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', stationId: 'station-alpha' });
+    assert.equal(res.statusCode, 200, res.body);
+    const body = json(res);
+    assert.deepEqual([body.rewardCredits, body.grossCredits, body.crewShareCredits, body.netCredits], [500, 500, 25, 475]);
+    assert.equal(body.newBalance, 475);
+    assert.equal(await credits(pilot), 475);
+  });
+
+  test('crew on standby still take their share of a chart sale', async () => {
+    const pilot = await newPilot('StandbyChart');
+    await register(pilot, planetKey(pilot));
+    await addCrew(pilot, { crewClass: 'CHEF', status: 'STANDBY', spaceshipId: null });
+    const body = json(await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', stationId: 'station-alpha' }));
+    assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [500, 25, 475]);
+    assert.equal(await credits(pilot), 475);
+  });
+
   test('sells charts once for credits', async () => {
     const pilot = await newPilot('Merchant');
     await register(pilot, planetKey(pilot));
@@ -309,10 +330,10 @@ describe('cartography', () => {
 
     let res = await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', stationId: 'station-alpha' });
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(json(res), { sold: true, rewardCredits: 500, newBalance: 500 });
+    assert.deepEqual(json(res), { sold: true, rewardCredits: 500, newBalance: 500, grossCredits: 500, crewShareCredits: 0, netCredits: 500, crewPayouts: [] });
 
     res = await call(pilot, 'POST', '/game/charts/sell', { systemH3: SYSTEM, stationId: 'station-alpha' });
-    assert.deepEqual(json(res), { sold: true, rewardCredits: 2500, newBalance: 3000 });
+    assert.deepEqual(json(res), { sold: true, rewardCredits: 2500, newBalance: 3000, grossCredits: 2500, crewShareCredits: 0, netCredits: 2500, crewPayouts: [] });
 
     // No double payout, no unknown charts, exactly one target.
     res = await call(pilot, 'POST', '/game/charts/sell', { planetId: 'planet-1', stationId: 'station-alpha' });

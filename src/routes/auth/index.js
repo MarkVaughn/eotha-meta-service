@@ -3,6 +3,7 @@ import env from '../../config/env.js';
 import { DEV_LOGIN_EMAIL_DOMAIN, DEV_STARTING_CREDITS } from '../../config/dev.js';
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
 import { captainTraits, ensureCaptain } from '../../lib/captain.js';
+import { activeCrewOf } from '../../lib/crew.js';
 import { convertGuest } from '../../lib/identity.js';
 import { factionsClaim } from '../../lib/reputation.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
@@ -19,7 +20,7 @@ export default async function authRoutes(fastify, opts) {
   const devLoginEnabled = opts.devLogin ?? env.NODE_ENV === 'development';
 
   // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet), with the captain's
-  // traits folded in, and the pilot's factions claim; a pilot without a captain gets its Level 1
+  // traits and the crew aboard folded in, and the pilot's factions claim; a pilot without a captain gets its Level 1
   // starter here. The claims are exactly what the RTSE validates; `ttlSeconds` only overrides the
   // default token lifetime.
   async function signSession(player, { ttlSeconds } = {}) {
@@ -32,7 +33,8 @@ export default async function authRoutes(fastify, opts) {
       ? ship.components.map(({ type, tier, healthPct }) => ({ type, tier, healthPct }))
       : defaultComponents();
     const captain = await ensureCaptain(prisma, player.id, player.callsign);
-    const shipAttributes = computeShipAttributes(components, ship?.passengersAboard, captainTraits(captain));
+    const crew = ship ? await activeCrewOf(prisma, ship.id) : [];
+    const shipAttributes = computeShipAttributes(components, ship?.passengersAboard, captainTraits(captain), crew);
     const claims = {
       sub: player.id,
       callsign: player.callsign,

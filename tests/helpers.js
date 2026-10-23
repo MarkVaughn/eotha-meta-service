@@ -225,6 +225,30 @@ export const credits = async (pilot) => json(await call(pilot, 'GET', '/game/cre
 export const setCredits = (pilot, value) =>
   app.prisma.player.update({ where: { id: pilot.id }, data: { credits: value } });
 
+/**
+ * Puts a crew member aboard `pilot`'s active ship directly (no signing bonus, no board): a Novice Chef
+ * with the plain quirk Q01 unless `overrides` say otherwise. Pass `status: 'STANDBY'` with
+ * `spaceshipId: null` for one on Harbor Standby.
+ */
+export async function addCrew(pilot, overrides = {}) {
+  await call(pilot, 'GET', '/ship/loadout'); // creates the ship row
+  const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id, active: true } });
+  return app.prisma.crewMember.create({
+    data: {
+      playerId: pilot.id,
+      spaceshipId: ship.id,
+      name: 'Test Crew',
+      crewClass: 'CHEF',
+      rank: 'NOVICE',
+      quirkId: 'Q01',
+      wageShareBp: 500,
+      homeFactionId: 'independent',
+      hiredAtStationId: randomUUID(),
+      ...overrides
+    }
+  });
+}
+
 /** Deletes the pilots created by newPilot (their rows cascade) and closes the app. */
 export async function closeApp() {
   await app.prisma.player.deleteMany({ where: { id: { in: created.splice(0) } } });

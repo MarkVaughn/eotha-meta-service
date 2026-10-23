@@ -37,6 +37,7 @@ eotha-meta-service/
 │   ├── config/
 │   │   ├── auth.js             # Device-id length constants
 │   │   ├── captain.js          # Captain leveling curve, XP table, trait catalog and prerequisites
+│   │   ├── crew.js             # Crew constants, class and rank tables, signing bonuses, wage shares, quirk catalog Q01-Q20
 │   │   ├── cargo.js            # Cargo lease rules (lot limit)
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked-receipt validity window and clock skew
@@ -50,6 +51,8 @@ eotha-meta-service/
 │   │   ├── captain.js          # Lazy captain creation, XP awards, captain view
 │   │   ├── cargo.js            # Verifies signed cargo manifests and sale records; the cargo fencing rule
 │   │   ├── claim-key.js        # Loads the public key engine-signed claims verify against
+│   │   ├── crew-generator.js   # The deterministic hiring board of a station and why a candidate is unavailable
+│   │   ├── crew.js             # Active and standby crew, berth checks, the crew revenue share
 │   │   ├── docked-receipt.js   # Verifies the engine's signed docked receipts
 │   │   ├── identity.js         # Guest -> linked player conversion
 │   │   ├── mission-claim.js    # Verifies the engine's signed mission completion claims
@@ -71,6 +74,7 @@ eotha-meta-service/
 │   │   └── game/
 │   │       ├── captain.js      # Captain view and docked trait unlocks
 │   │       ├── cargo.js        # Cargo lease, stored hold, manifest relay and ore sale routes
+│   │       ├── crew.js         # Crew roster, hiring board, hire, dismiss, standby and activate
 │   │       ├── factions.js     # Docked Flying Colors toggle and Paragon renouncement
 │   │       ├── index.js        # Game session allocation routes
 │   │       └── schema.js       # Session route schemas
@@ -197,7 +201,7 @@ All Protected. See [Cargo persistence and sales](#cargo-persistence-and-sales).
 - `POST /game/cargo/manifest`
   - Body `{ manifest }`: an engine-signed `CargoManifest`. Returns `{ applied }`: `true` when it became the stored hold, `false` for a stale snapshot of the same session (nothing changes). `403 cargo_manifest_invalid` (bad signature, or another pilot's), `409 cargo_superseded`, `409 cargo_lease_unknown`, `503 CLAIM_KEY_NOT_CONFIGURED`.
 - `POST /game/cargo/sell`
-  - Body `{ saleRecord }`: an engine-signed `SaleRecord` (V2). Credits its `totalCredits` once and stores its `remaining` hold, in one transaction. Returns `{ credits, total_credits, lots, replayed }`, `credits` being the new balance and `lots` the stored hold; a replay of the same record answers `200` with the first sale's total, the current balance and `replayed: true`, and pays nothing. `403 sale_record_invalid`, `409 cargo_superseded` (the ore stays in the stored hold), `409 cargo_lease_unknown`, `409 credit_overflow` (nothing changes; the record stays creditable), `409 sale_nonce_conflict` (another pilot's sale already used the nonce), `503 CLAIM_KEY_NOT_CONFIGURED`.
+  - Body `{ saleRecord }`: an engine-signed `SaleRecord` (V2). Credits its `totalCredits` once and stores its `remaining` hold, in one transaction. Returns `{ credits, total_credits, grossCredits, crewShareCredits, netCredits, crewPayouts, lots, replayed }`, `credits` being the new balance, `lots` the stored hold and `total_credits` the signed total; the crew, active and on standby, take their [revenue share](#crew) of it, so the pilot is credited `netCredits = grossCredits - crewShareCredits` (`crewPayouts` lists each member's part). A replay of the same record answers `200` with the first sale's split (`grossCredits`, `crewShareCredits`, `netCredits`), the current balance and `replayed: true`, and pays nothing. `403 sale_record_invalid`, `409 cargo_superseded` (the ore stays in the stored hold), `409 cargo_lease_unknown`, `409 credit_overflow` (nothing changes; the record stays creditable), `409 sale_nonce_conflict` (another pilot's sale already used the nonce), `503 CLAIM_KEY_NOT_CONFIGURED`.
 
 ### Missions
 All Protected. See [Mission offers](#mission-offers).
@@ -210,7 +214,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `POST /game/missions/abandon`
   - Body `{ missionId, dockedReceipt }`, the held mission to abandon; it may be left out while only one is held, and is otherwise refused with `400 mission_id_required`. `dockedReceipt` is optional and says where the ship is docked; abandoning is allowed docked or in flight. `404` when no such mission is held; a receipt is refused as for upgrades (`403 docked_receipt_invalid` / `docked_receipt_expired`, `503 CLAIM_KEY_NOT_CONFIGURED`) before anything changes. Returns `{ abandoned, mission_id, outcome, reputation_change, standings, token }` (`mission_id`, `outcome` and `reputation_change` as in the contract's `MissionAbandonResponse`). No payout; the reputation penalty and origin cooldown are in [Late completion, abandon and reputation](#late-completion-abandon-and-reputation), and a passage's passengers disembark.
 - `POST /game/missions/complete`
-  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation (with any [Flying Colors](#factions-1) bonus, which `reputation_change` includes), starts the origin's cooldown, awards captain XP and disembarks the mission's passengers. Returns `{ success, credits, payout, reputation_change, standings, xpGained, currentLevel, traitPointsAvailable, token }` (see [Captain progression](#captain-progression)). A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
+  - Body `{ claim }`: the RTSE-signed completion claim for one of the pilot's held missions (`claim.missionId`); settles the payout once, applies the signed reputation (with any [Flying Colors](#factions-1) bonus, which `reputation_change` includes), starts the origin's cooldown, awards captain XP and disembarks the mission's passengers. Returns `{ success, credits, payout, grossCredits, crewShareCredits, netCredits, crewPayouts, reputation_change, standings, xpGained, currentLevel, traitPointsAvailable, token }` (see [Captain progression](#captain-progression)); `payout` is the signed reward, which the crew, active and on standby, take their [revenue share](#crew) of, so the pilot is credited `netCredits` and `credits` is the new balance. A claim completed after the deadline is still settled up to the late cutoff and refused beyond it with `400 mission_expired`; see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured; `403` when the signature does not verify against it. A gather claim also answers `400` when its cargo suffix is missing or misplaced, `409 cargo_superseded` / `409 cargo_lease_unknown`, and adds `lots` to the response; see [Gather completion](#gather-completion).
 
 ### Captain
 All Protected. See [Captain progression](#captain-progression).
@@ -218,6 +222,21 @@ All Protected. See [Captain progression](#captain-progression).
   - `{ captain: { name, level, xp, xpForLevel, xpForNextLevel, unlockedTraits, traitPoints, traitPointsAvailable, missionsCompleted } }` (`xpForNextLevel` is `null` at Level 10).
 - `POST /game/captain/trait`
   - Body `{ traitId, dockedReceipt, stationId? }`. Spends one trait point on `traitId` while docked. Returns `{ captain, ship_attributes, token }`, the token re-signed with the new attributes. Refusals answer `{ error: <code>, message, ... }`: `403 docked_receipt_required` (no receipt, or an expired one), `403 docked_receipt_invalid`, `403 docked_receipt_wrong_station` (`stationId` sent and not the receipt's `dockedEntityId`), `409 trait_already_unlocked`, `400 prerequisite_not_met` (with `requiredPointsInBranch` and `currentPoints`), `409 no_trait_points` (with `traitPointsAvailable`), a schema `400` for an unknown trait, and `503 CLAIM_KEY_NOT_CONFIGURED`.
+
+### Crew
+All Protected. See [Crew](#crew).
+- `GET /game/crew`
+  - `{ active, standby, limits }`: the crew aboard, the crew on Harbor Standby and `limits` (`hullTier`, `activeCrew`, `maxActiveCrew`, `passengerCapacity`, `passengersAboard`, `freeBerths`, `maxStandbyCrew`, `standbyTransferFeeCredits`).
+- `GET /game/crew/board?stationId=<dock uuid>`
+  - The station's four candidates for the current 30-minute window, the same for every pilot, with `window` (`startsAt`, `expiresAt`), `credits` and, per candidate, the person, class, rank, home faction, the whole quirk (`quirk.summary` and the numeric `modifiers`), the class `effects`, `baseWageShareBp`, `effectiveWageShareBp`, `signingBonusCredits`, `hireable` and `unavailableReasons: [{ code, label, ... }]` (`INSUFFICIENT_FACTION_REP`, `INSUFFICIENT_CREDITS`, `CLASS_ALREADY_ACTIVE`, `HULL_CREW_CAP_REACHED`, `INSUFFICIENT_FREE_BERTHS`). Needs no receipt: the board is a pure function of the station and the window.
+- `POST /game/crew/hire`
+  - Body `{ candidateId, dockedReceipt, stationId? }`; the board hired from is the receipt's `dockedEntityId`. Pays the signing bonus and puts the candidate aboard in one transaction under the pilot's lock. Returns `{ crew, credits, ship_attributes, token }`. Refusals answer `{ error: <code>, message, ... }`: `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_wrong_station`, `404 candidate_not_found` (not on the current board), `400 hull_crew_cap_reached` (with `maxCrew`), `400 insufficient_free_berths`, `409 class_already_active`, `403 insufficient_faction_rep` (with `requiredScore`, `currentScore`), `402 insufficient_credits` (with `requiredCredits`); each carries the full `unavailableReasons`, and when several apply the first of those in that order is the `error`. `503 CLAIM_KEY_NOT_CONFIGURED`.
+- `POST /game/crew/dismiss`
+  - Body `{ crewId, dockedReceipt, stationId? }`. Lets a crew member go; the signing bonus is not refunded. Returns `{ dismissed, ship_attributes, token }`. `409 crew_locked_by_active_mission` while the pilot holds any mission; `409 engineer_required_for_loadout` (with `requiredBudget`, `baseBudget`) when the installed components need the hull budget the crew member provides; `404 crew_not_found`; receipt refusals as for hire.
+- `POST /game/crew/standby`
+  - Body as for dismiss. Moves an active crew member to Harbor Standby for 50 cr, freeing their berth and hull crew slot: `{ crew, credits, feeCredits, ship_attributes, token }`. The same `409` guards as dismiss, plus `409 standby_full` (two at most), `409 crew_not_active` and `402 insufficient_credits`.
+- `POST /game/crew/activate`
+  - Body as for dismiss. Brings a crew member back from Harbor Standby, free of charge, under the hire's hull, class and berth limits (`400 hull_crew_cap_reached`, `400 insufficient_free_berths`, `409 class_already_active`; `409 crew_not_on_standby`).
 
 ### Factions
 All Protected. See [Factions](#factions-1).
@@ -326,7 +345,7 @@ A gather claim also signs the pilot's cargo position and hold: `leaseId` and `se
 ## Passengers aboard
 Taking off takes 0.5 s longer per passenger, so the real-time engine needs the ship's manifest. Each ship stores its count in `Spaceship.passengersAboard` (integer, default `0`) and it travels as `ship_attributes.passengers_aboard` (`ShipAttributes.passengers_aboard`, field 19, in eotha-contracts `common/v1/ship.proto`): in the signed access token, in the `ship` of a dev-login response and in `GET /ship/loadout`, and it is recomputed whenever the token is minted or reissued.
 
-The count never exceeds `ship_attributes.passenger_capacity` (from the LIFE_SUPPORT tier): the attributes clamp it on every read, and `POST /ship/upgrade` writes the clamped count back if a component change leaves it above the new capacity.
+The count never exceeds the berths the crew leave free, `ship_attributes.passenger_capacity - ship_attributes.crew_aboard` (capacity from the LIFE_SUPPORT tier; see [Crew](#crew)): the attributes clamp it on every read, and `POST /ship/upgrade` writes the clamped count back if a component change leaves it above the new capacity.
 
 Passengers board when a passage or research mission is accepted (`passengers_aboard += required_berths`; a survey carries one surveyor, a gather none, and each counts against berth capacity like any passenger) and disembark when it is completed or abandoned (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
 
@@ -434,13 +453,28 @@ Those three responses add `xpGained`, `currentLevel` and `traitPointsAvailable` 
 | `H2_HARBOR_PILOT` | `docking_time_mult x 0.8` |
 | `H3_BULKHEAD_PACKING` | `cargo_capacity_m3 x 1.15` |
 | `H4_MODULAR_CABINS` | `passenger_capacity + 2` |
-| `H6_FLEET_CAPTAIN` | hull subsystem budget `+ 1` |
+| `H6_FLEET_CAPTAIN` | hull subsystem budget `+ 1`, one more crew slot |
 | `S1_LONG_BASELINE` | `radar_range_m` and `identification_range_m x 1.2` |
 | `S2_PULSE_CYCLING` | `sensor_cooldown_mult x 0.85`, `sensor_range_m x 1.2` |
 | `S3_RESONANCE_EAR` | `tuning_tolerance_hz + 25`, `extraction_rate_mult x 1.1` |
 | `C3_COLD_RUNNING` | `stealth_rating + 0.15` |
+| `C1_HARD_BARGAINER` | crew wage shares `x 0.85`, signing bonuses `x 0.75` |
+| `C2_SHORE_CONTACTS` | new crew start with 10 more morale |
 
-`docking_time_mult`, `extraction_rate_mult` and `tuning_tolerance_hz` (contracts `ShipAttributes` fields 21-23) are always signed, at `1.0`, `1.0` and `100` without traits. The other nine traits can be unlocked and count toward prerequisites, but their effects (payouts, mission slots and time limits, crew, factions) belong to systems not built yet, so they change nothing today.
+`docking_time_mult`, `extraction_rate_mult` and `tuning_tolerance_hz` (contracts `ShipAttributes` fields 21-23) are always signed, at `1.0`, `1.0` and `100` without traits. The other traits can be unlocked and count toward prerequisites, but their effects (payouts, mission slots and time limits, factions) belong to systems not built yet, so they change nothing today. The crew effects of `H6`, `C1` and `C2` are described under [Crew](#crew).
+
+## Crew
+
+A pilot hires up to one crew member per class (Pilot, Navigator, Science, Engineer, Chef, Doctor, Gunner) from the hiring board of the station it is docked at. Crew are `CrewMember` rows (`ACTIVE` aboard the active ship, or `STANDBY` with no ship) and everything is in `src/config/crew.js`.
+
+- **Berths.** Every active crew member takes a life support berth: `ship_attributes.crew_aboard` (`ShipAttributes` field 24, merged in eotha-contracts; the plan's draft said 20) counts them and the free berths are `floor(passenger_capacity) - crew_aboard - passengers_aboard`. That is what mission accept, the dev passenger count and the crew routes check, so LIFE_SUPPORT Tier 1 to 5 now has `3, 6, 12, 22, 50` berths (it had `2, 5, 10, 20, 50`). Most active crew by hull tier: `1, 2, 3, 5, 7` (`H6_FLEET_CAPTAIN` adds one).
+- **Board.** Four candidates per station per 30-minute window, seeded by `SHA256("crew_board_v1" || stationId || window_30m || slotIndex)` (window as a big-endian u64, slot as one byte), so every pilot sees the same people and refreshing cannot reroll them. Slot 3 is the hub specialist (Adept or Master only). Rank odds are 65/30/5 % (Novice/Adept/Master); the home faction is `alpha` 30 %, `beta` 30 %, `gamma` 20 %, `independent` 20 %; the quirk is one of Q01-Q20 with weights summing to 1000. A candidate the pilot cannot hire is still listed, with the reasons.
+- **Hiring terms.** Rank sets the signing bonus (500 / 1500 / 4000 cr, non-refundable), the wage share (5 / 8 / 12 % of every payout) and the standing needed with the candidate's home faction (-499 / -149 / +450). Quirks move the wage share and bonus (and `C1_HARD_BARGAINER` takes 15 % off wages and 25 % off bonuses, `C2_SHORE_CONTACTS` adds 10 starting morale), and a quirk's effect is shown on the board before hiring.
+- **Revenue share.** Every payout the pilot is credited from a signed claim (`POST /game/missions/complete`, `POST /game/cargo/sell`, `POST /game/charts/sell`) is split under the pilot's lock: each crew member, active or on Harbor Standby, takes `floor(gross x effective wage share)`, all together at most 50 %, scaled down in proportion when they would ask for more. Standby crew take a share but still count for no berth, class effect or hull budget. The responses carry `grossCredits`, `crewShareCredits`, `netCredits` and `crewPayouts`; the pilot's balance rises by `netCredits`.
+- **Effects today.** Class modifiers act on `ship_attributes` through `computeShipAttributes` and scale with morale (Inspired x1.15, Nominal x1, Disgruntled x0.6, Mutinous 0), and an Adept or Master Engineer adds 1 or 2 points of hull subsystem budget. Chef and Doctor have no ship attribute to move yet. Morale changes, shore leave, seniority XP, unique capabilities, payout bonuses from quirks and retirement are later phases: their quirk text is in the catalog but changes nothing.
+- **Abuse guards.** Dismiss and standby are refused while any mission is held, so the crew cannot be fired just before a payout, and refused when an Engineer's hull budget is what keeps the installed components legal. Hire, dismiss, standby and activate all run under the pilot's lock, so berths, the class slot and credits are never over-spent.
+
+`CrewMember` and `CargoSale.crewShareCredits` (default `0`, so a replayed sale reports its own split) are additions only, so existing databases pick them up with `npx prisma db push` (there are no migration files).
 
 ## Authentication model
 

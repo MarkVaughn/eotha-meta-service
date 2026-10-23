@@ -1,7 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPrivateKey, createPublicKey, randomBytes, randomUUID, sign } from 'node:crypto';
-import { app, call, closeApp, credits, json, loginKey, newPilot, rtseKey, setCredits } from './helpers.js';
+import { addCrew, app, call, closeApp, credits, json, loginKey, newPilot, rtseKey, setCredits } from './helpers.js';
 import {
   canonicalCargoManifestPayload,
   canonicalSaleRecordPayload,
@@ -89,6 +89,8 @@ const signed = (fields, bytes, key) => ({ ...fields, signature: sign(null, bytes
 
 const ORE = { resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8000 };
 const ROCK = { resourceType: 'FERRITE', unitsMilli: 900, grade: 1, purityBp: 9600 };
+// The revenue-share fields of a sale answer when no crew is aboard.
+const noCrewShare = (gross) => ({ grossCredits: gross, crewShareCredits: 0, netCredits: gross });
 const stored = (lot) => ({ resource_type: lot.resourceType, units_milli: lot.unitsMilli, grade: lot.grade, purity_bp: lot.purityBp });
 
 /** A manifest the engine would sign for `pilot` in (`leaseId`, `sessionId`) at `seq`. */
@@ -322,6 +324,62 @@ describe('cargo persistence and sales', () => {
   });
 
   describe('sell', () => {
+    test('crew on standby still take their share of a cargo sale, alongside the active crew', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });
+      await addCrew(pilot, { crewClass: 'DOCTOR', rank: 'NOVICE', wageShareBp: 500, status: 'STANDBY', spaceshipId: null });
+      const { lease_id: leaseId } = (await lease(pilot)).cargo;
+      const sale = saleFor(pilot, leaseId, randomUUID(), 1, [ORE], { totalCredits: 1000 });
+      const res = await sell(pilot, sale);
+      assert.equal(res.statusCode, 200, res.body);
+      const body = json(res);
+      assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [1000, 100, 900]);
+      assert.equal(body.crewPayouts.length, 2);
+      assert.equal(await credits(pilot), 900);
+    });
+
+    test('ASSERT-2.2.3: a Novice Chef takes 5% of a 1000 cr sale; the pilot is credited 950 and a replay answers the same split', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });
+      const { lease_id: leaseId } = (await lease(pilot)).cargo;
+      const session = randomUUID();
+      const sale = saleFor(pilot, leaseId, session, 1, [ORE], { totalCredits: 1000 });
+
+      const res = await sell(pilot, sale);
+      assert.equal(res.statusCode, 200, res.body);
+      const body = json(res);
+      assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [1000, 50, 950]);
+      assert.equal(body.crewPayouts.length, 1);
+      assert.equal(body.credits, 950);
+      assert.equal(body.total_credits, 1000);
+      assert.equal(await credits(pilot), 950);
+      const [stored] = await app.prisma.cargoSale.findMany({ where: { playerId: pilot.id } });
+      assert.equal(stored.crewShareCredits, 50);
+
+      // The crew leave, but the replay still reports the sale as it was paid and credits nothing.
+      await app.prisma.crewMember.deleteMany({ where: { playerId: pilot.id } });
+      const replay = json(await sell(pilot, sale));
+      assert.equal(replay.replayed, true);
+      assert.deepEqual([replay.grossCredits, replay.crewShareCredits, replay.netCredits], [1000, 50, 950]);
+      assert.equal(await credits(pilot), 950);
+    });
+
+    test('several crew each take their own share, together at most half the sale', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'MASTER', wageShareBp: 1200, quirkId: 'Q05' });
+      // A Tier 5 hull for the crew limit and Tier 2 life support for their berths.
+      await app.prisma.shipComponentRecord.updateMany({ where: { spaceship: { playerId: pilot.id }, type: 'HULL' }, data: { tier: 5 } });
+      await app.prisma.shipComponentRecord.updateMany({ where: { spaceship: { playerId: pilot.id }, type: 'LIFE_SUPPORT' }, data: { tier: 2 } });
+      for (const crewClass of ['DOCTOR', 'GUNNER', 'PILOT', 'NAVIGATOR']) {
+        await addCrew(pilot, { crewClass, rank: 'MASTER', wageShareBp: 1200, quirkId: 'Q05' });
+      }
+      const { lease_id: leaseId } = (await lease(pilot)).cargo;
+      const res = await sell(pilot, saleFor(pilot, leaseId, randomUUID(), 1, [ORE], { totalCredits: 10_000 }));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.deepEqual([json(res).crewShareCredits, json(res).netCredits], [5000, 5000]);
+      assert.equal(await credits(pilot), 5000);
+    });
+
     test('credits the signed total and stores the remaining hold', async () => {
       const pilot = await newPilot();
       const { lease_id: leaseId } = (await lease(pilot)).cargo;
@@ -330,7 +388,7 @@ describe('cargo persistence and sales', () => {
 
       const res = await sell(pilot, saleFor(pilot, leaseId, session, 2, [ORE, ROCK], { totalCredits: 720 }));
       assert.equal(res.statusCode, 200, res.body);
-      assert.deepEqual(json(res), { credits: 720, total_credits: 720, lots: [], replayed: false });
+      assert.deepEqual(json(res), { credits: 720, total_credits: 720, ...noCrewShare(720), crewPayouts: [], lots: [], replayed: false });
       assert.equal(await credits(pilot), 720);
       assert.deepEqual((await hold(pilot)).lots, []);
       const sales = await app.prisma.cargoSale.findMany({ where: { playerId: pilot.id } });
@@ -349,7 +407,7 @@ describe('cargo persistence and sales', () => {
 
       const res = await sell(pilot, sale);
       assert.equal(res.statusCode, 200, res.body);
-      assert.deepEqual(json(res), { credits: 61, total_credits: 61, lots: [stored(ROCK)], replayed: false });
+      assert.deepEqual(json(res), { credits: 61, total_credits: 61, ...noCrewShare(61), crewPayouts: [], lots: [stored(ROCK)], replayed: false });
       assert.deepEqual((await hold(pilot)).lots, [stored(ROCK)]);
     });
 
@@ -366,7 +424,7 @@ describe('cargo persistence and sales', () => {
 
       const res = await sell(pilot, sale);
       assert.equal(res.statusCode, 200, res.body);
-      assert.deepEqual(json(res), { credits: 61, total_credits: 61, lots: [stored(ROCK)], replayed: false });
+      assert.deepEqual(json(res), { credits: 61, total_credits: 61, ...noCrewShare(61), crewPayouts: [], lots: [stored(ROCK)], replayed: false });
       assert.equal(await credits(pilot), 61);
     });
 
@@ -380,7 +438,7 @@ describe('cargo persistence and sales', () => {
       await lease(pilot);
       const res = await sell(pilot, sale);
       assert.equal(res.statusCode, 200, res.body);
-      assert.deepEqual(json(res), { credits: 61, total_credits: 61, lots: [], replayed: true });
+      assert.deepEqual(json(res), { credits: 61, total_credits: 61, ...noCrewShare(61), lots: [], replayed: true });
       assert.equal(await credits(pilot), 61);
     });
 

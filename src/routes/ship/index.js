@@ -53,25 +53,26 @@ export default async function shipRoutes(fastify, opts) {
 
   fastify.get('/loadout', async (request) => {
     const ship = await withActiveShip(request, async (tx, active) => active);
-    return toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits);
+    return toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew);
   });
 
   if (devPassengers) {
     fastify.post('/dev/passengers', { schema: devPassengersSchema }, async (request, reply) => {
       const { passengersAboard } = request.body;
       const outcome = await withActiveShip(request, async (tx, ship) => {
-        const capacity = computeShipAttributes(ship.components, 0, ship.traits).passenger_capacity;
-        if (passengersAboard > capacity) {
-          return fail(400, `Passengers aboard cannot exceed the passenger capacity of ${capacity}.`, {
+        const capacity = computeShipAttributes(ship.components, 0, ship.traits, ship.crew).passenger_capacity;
+        // Active crew take berths too, so the passengers fit what they leave.
+        if (passengersAboard + ship.crew.length > capacity) {
+          return fail(400, `Passengers aboard and crew cannot exceed the passenger capacity of ${capacity}.`, {
             code: 'passengers_exceed_capacity',
             passenger_capacity: capacity
           });
         }
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-        return { shipId: ship.id, components: ship.components, passengersAboard, traits: ship.traits, factions: ship.factions };
+        return { shipId: ship.id, components: ship.components, passengersAboard, traits: ship.traits, crew: ship.crew, factions: ship.factions };
       });
       if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-      const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits);
+      const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
       return { ...loadout, token: reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
     });
   }
@@ -119,13 +120,13 @@ export default async function shipRoutes(fastify, opts) {
       const currentPoints = totalSubsystemPoints(ship.components);
 
       if (componentType === 'HULL') {
-        const budget = hullBudget(targetTier, ship.traits);
+        const budget = hullBudget(targetTier, ship.traits, ship.crew);
         if (currentPoints > budget) {
           return fail(400, `Upgrade exceeds Hull Tier ${targetTier} budget of ${budget} points (requested: ${currentPoints}).`);
         }
       } else {
         const projectedPoints = currentPoints - currentComponentTier + targetTier;
-        const budget = hullBudget(currentHullTier, ship.traits);
+        const budget = hullBudget(currentHullTier, ship.traits, ship.crew);
         if (projectedPoints > budget) {
           return fail(400, `Upgrade exceeds Hull Tier ${currentHullTier} budget of ${budget} points (requested: ${projectedPoints}).`);
         }
@@ -158,18 +159,18 @@ export default async function shipRoutes(fastify, opts) {
 
       // A component change can lower the passenger capacity; persist the clamped count with it.
       const components = await tx.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } });
-      const capacity = computeShipAttributes(components, 0, ship.traits).passenger_capacity;
-      const passengersAboard = clampPassengers(ship.passengersAboard, capacity);
+      const capacity = computeShipAttributes(components, 0, ship.traits, ship.crew).passenger_capacity;
+      const passengersAboard = clampPassengers(ship.passengersAboard, capacity - ship.crew.length);
       if (passengersAboard !== ship.passengersAboard) {
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       }
 
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, factions: ship.factions, cost, credits: player.credits };
+      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, crew: ship.crew, factions: ship.factions, cost, credits: player.credits };
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-    const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits);
+    const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
     return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
   });
 }

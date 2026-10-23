@@ -2,6 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto';
 import {
+  addCrew,
   app,
   call,
   closeApp,
@@ -372,26 +373,26 @@ describe('engine-signed missions', () => {
 
     test('too few free berths is refused with insufficient_berths; passengers already aboard count', async () => {
       const pilot = await newPilot();
-      // Tier 1 life support has 2 berths.
-      const big = await accept(pilot, signedOffer(pilot, { required_berths: 3 }));
+      // Tier 1 life support has 3 berths.
+      const big = await accept(pilot, signedOffer(pilot, { required_berths: 4 }));
       assert.equal(big.statusCode, 400);
       assert.equal(json(big).code, 'insufficient_berths');
-      assert.equal(json(big).available_berths, 2);
+      assert.equal(json(big).available_berths, 3);
 
       await call(pilot, 'GET', '/ship/loadout'); // creates the ship row
-      await setAboard(pilot, 1);
+      await setAboard(pilot, 2);
       const full = await accept(pilot, signedOffer(pilot, { required_berths: 2 }));
       assert.equal(full.statusCode, 400);
       assert.equal(json(full).code, 'insufficient_berths');
       assert.equal(json(full).available_berths, 1);
       assert.equal(await activeMission(pilot), null);
-      assert.equal(await aboard(pilot), 1);
+      assert.equal(await aboard(pilot), 2);
 
       // One free berth still takes a one-passenger passage, and boards on top of who is aboard.
       const res = await accept(pilot, signedOffer(pilot, { required_berths: 1 }));
       assert.equal(res.statusCode, 200, res.body);
-      assert.equal(tokenAboard(res), 2);
-      assert.equal(await aboard(pilot), 2);
+      assert.equal(tokenAboard(res), 3);
+      assert.equal(await aboard(pilot), 3);
     });
 
     test('the origin is on cooldown after a completion there; other docks are not', async () => {
@@ -717,7 +718,7 @@ describe('engine-signed missions', () => {
       const pilot = await newPilot();
       const offer = legacyOffer();
       await seed(pilot, offer.mission_id, offer);
-      assert.equal(json(await accept(pilot, signedOffer(pilot, { required_berths: 3 }))).code, 'insufficient_berths');
+      assert.equal(json(await accept(pilot, signedOffer(pilot, { required_berths: 4 }))).code, 'insufficient_berths');
       assert.equal(json(await call(pilot, 'GET', '/game/missions/active')).cancelled_mission.mission_id, offer.mission_id);
     });
   });
@@ -737,6 +738,10 @@ describe('engine-signed missions', () => {
         success: true,
         credits: claim.rewardCredits,
         payout: claim.rewardCredits,
+        grossCredits: claim.rewardCredits,
+        crewShareCredits: 0,
+        netCredits: claim.rewardCredits,
+        crewPayouts: [],
         reputation_change: 5,
         standings: { 'faction-high': 5 },
         // The claim earned the speed bonus (paid above the offer): (100 + 40 x 2 + 10 x 2) x 1.25.
@@ -755,6 +760,47 @@ describe('engine-signed missions', () => {
       const replay = await complete(pilot, claim);
       assert.equal(replay.statusCode, 404);
       assert.equal(await credits(pilot), claim.rewardCredits);
+    });
+
+    test('crew on standby still take their wage share of the payout', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500, status: 'STANDBY', spaceshipId: null });
+      const active = await acceptOk(pilot, research(pilot));
+      const claim = signedClaim(pilot, active, { rewardCredits: 1000 });
+      const res = await complete(pilot, claim);
+      assert.equal(res.statusCode, 200, res.body);
+      const body = json(res);
+      assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [1000, 50, 950]);
+      assert.equal(body.credits, 950);
+    });
+
+    test('ASSERT-2.2.3: the active crew take their wage share of the payout and the pilot is paid the rest', async () => {
+      const pilot = await newPilot();
+      const chef = await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });
+      const doctor = await addCrew(pilot, { crewClass: 'DOCTOR', rank: 'ADEPT', wageShareBp: 800, quirkId: 'Q13' }); // CHARMING: +1.5%
+      await app.prisma.shipComponentRecord.updateMany({ where: { spaceship: { playerId: pilot.id }, type: 'HULL' }, data: { tier: 2 } });
+      const active = await acceptOk(pilot, research(pilot));
+      const claim = signedClaim(pilot, active, { rewardCredits: 1000 });
+
+      const res = await complete(pilot, claim);
+      assert.equal(res.statusCode, 200, res.body);
+      const body = json(res);
+      // 5.0% and 9.5% of 1000, rounded down.
+      assert.deepEqual([body.grossCredits, body.crewShareCredits, body.netCredits], [1000, 145, 855]);
+      assert.deepEqual(body.crewPayouts.map((p) => [p.crewId, p.shareCredits]), [[chef.id, 50], [doctor.id, 95]]);
+      assert.equal(body.payout, 1000);
+      assert.equal(body.credits, 855);
+      assert.equal(await credits(pilot), 855);
+    });
+
+    test('a crew share rounds down, so a tiny payout can leave the pilot everything', async () => {
+      const pilot = await newPilot();
+      await addCrew(pilot, { crewClass: 'CHEF', rank: 'NOVICE', wageShareBp: 500 });
+      const active = await acceptOk(pilot, research(pilot));
+      const res = await complete(pilot, signedClaim(pilot, active, { rewardCredits: 19 }));
+      assert.equal(res.statusCode, 200, res.body);
+      assert.deepEqual([json(res).crewShareCredits, json(res).netCredits], [0, 19]);
+      assert.equal(await credits(pilot), 19);
     });
 
     test('unboards only the mission\'s passengers, and never below zero', async () => {
@@ -950,7 +996,7 @@ describe('engine-signed missions', () => {
       assert.equal(res.statusCode, 200, res.body);
       const { token, ...body } = json(res);
       assert.deepEqual(body, {
-        success: true, credits: 500, payout: 500, reputation_change: -10, standings: { 'faction-high': -10 },
+        success: true, credits: 500, payout: 500, grossCredits: 500, crewShareCredits: 0, netCredits: 500, crewPayouts: [], reputation_change: -10, standings: { 'faction-high': -10 },
         xpGained: 200, currentLevel: 2, traitPointsAvailable: 1
       });
       assert.equal(app.jwt.verify(token).ship_attributes.passengers_aboard, 0);
@@ -1257,25 +1303,25 @@ describe('engine-signed missions', () => {
 
     test('with one free berth a survey boards its surveyor; with none it is refused', async () => {
       const pilot = await newPilot();
-      await call(pilot, 'GET', '/ship/loadout'); // creates the ship row; Tier 1 has 2 berths
-      await setAboard(pilot, 1);
+      await call(pilot, 'GET', '/ship/loadout'); // creates the ship row; Tier 1 has 3 berths
+      await setAboard(pilot, 2);
       const res = await accept(pilot, survey(pilot));
       assert.equal(res.statusCode, 200, res.body);
-      assert.equal(tokenAboard(res), 2);
-      assert.equal(await aboard(pilot), 2);
+      assert.equal(tokenAboard(res), 3);
+      assert.equal(await aboard(pilot), 3);
 
       const full = await accept(pilot, survey(pilot));
       assert.equal(full.statusCode, 400);
       assert.equal(json(full).code, 'insufficient_berths');
       assert.equal(json(full).available_berths, 0);
       assert.equal((await activeIds(pilot)).length, 1);
-      assert.equal(await aboard(pilot), 2);
+      assert.equal(await aboard(pilot), 3);
     });
 
     test('a hold full of passage passengers blocks a survey, and a survey blocks a passage', async () => {
       const pilot = await newPilot();
-      await acceptOk(pilot, signedOffer(pilot, { required_berths: 2 }));
-      assert.equal(await aboard(pilot), 2);
+      await acceptOk(pilot, signedOffer(pilot, { required_berths: 3 }));
+      assert.equal(await aboard(pilot), 3);
       const blocked = await accept(pilot, survey(pilot));
       assert.equal(blocked.statusCode, 400);
       assert.equal(json(blocked).code, 'insufficient_berths');
@@ -1283,9 +1329,9 @@ describe('engine-signed missions', () => {
 
       const other = await newPilot();
       await acceptOk(other, survey(other));
-      const passage = await accept(other, signedOffer(other, { required_berths: 2 }));
+      const passage = await accept(other, signedOffer(other, { required_berths: 3 }));
       assert.equal(json(passage).code, 'insufficient_berths');
-      assert.equal(json(passage).available_berths, 1);
+      assert.equal(json(passage).available_berths, 2);
     });
 
     test('the surveyor steps off at completion', async () => {
