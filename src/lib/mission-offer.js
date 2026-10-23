@@ -1,4 +1,5 @@
 import { verify } from 'node:crypto';
+import { UUID_PATTERN } from '../config/patterns.js';
 
 export const MISSION_OFFER_DOMAIN = Buffer.from('EOTHA_MISSION_OFFER_V1', 'utf8'); // 22 bytes
 
@@ -95,3 +96,14 @@ export function verifyMissionOffer(offer, publicKey) {
     return false;
   }
 }
+
+// A mission stored before offers were signed by the engine (legacy id, no exact coordinates, or no
+// signature) can never be claimed: the engine would not recognise its offer. It is removed when the
+// pilot's missions are next listed, abandoned or completed, or an accept succeeds, and never counts
+// against a limit; accepting it charged nothing and boarded no one, so there is nothing to refund or
+// unboard.
+export const isLegacyRow = (row) =>
+  !UUID_PATTERN.test(row.missionId)
+  || !Array.isArray(row.offer?.exact_destination)
+  || row.offer.exact_destination.length !== 2
+  || typeof row.offer.signature !== 'string';

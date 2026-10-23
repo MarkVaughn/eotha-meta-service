@@ -77,7 +77,7 @@ export default async function captainRoutes(fastify) {
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
 
     const { ship } = outcome;
-    const loadout = toLoadout(ship.id, ship.components, ship.passengersAboard, outcome.traits);
+    const loadout = toLoadout(ship.id, ship.components, ship.passengersAboard, outcome.traits, ship.crew);
     return {
       captain: captainView(outcome.captain),
       ship_attributes: loadout.ship_attributes,

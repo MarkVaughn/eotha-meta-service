@@ -1,4 +1,5 @@
-import { applyTraitEffects, traitHullBudgetBonus } from './captain.js';
+import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
+import { LIFE_SUPPORT_BERTHS_BY_TIER, crewHullBudgetBonus, crewShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
@@ -60,7 +61,7 @@ const TIER_TABLE = {
   },
   COMMS: { comms_range_m: [1000, 2500, 5000, 10000, 25000] },
   ENGINES: { max_speed_mps: [20, 40, 85, 170, 343] },
-  LIFE_SUPPORT: { passenger_capacity: [2, 5, 10, 20, 50] },
+  LIFE_SUPPORT: { passenger_capacity: LIFE_SUPPORT_BERTHS_BY_TIER },
   SENSORS: {
     sensor_range_m: [1500, 3000, 4500, 6000, 7500],
     sensor_cooldown_mult: [1.0, 0.85, 0.7, 0.55, 0.4],
@@ -85,10 +86,11 @@ export function defaultComponents() {
 // silently change balance; Tier 1 fits the default loadout (6 Tier 1 subsystems).
 const HULL_BUDGETS = [6, 10, 18, 27, 36];
 
-// `traits` are the captain's unlocked trait ids; H6_FLEET_CAPTAIN adds a point.
-export function hullBudget(hullTier, traits = []) {
+// `traits` are the captain's unlocked trait ids (H6_FLEET_CAPTAIN adds a point) and `crew` the active
+// crew (an Adept or Master Engineer adds one or two).
+export function hullBudget(hullTier, traits = [], crew = []) {
   const tier = Math.min(5, Math.max(1, Math.round(hullTier || 1)));
-  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits);
+  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits) + crewHullBudgetBonus(crew);
 }
 
 export function totalSubsystemPoints(components = []) {
@@ -103,17 +105,27 @@ export function clampPassengers(count, capacity) {
   return Math.min(count, Math.max(0, Math.floor(capacity)));
 }
 
-// Attributes no component sets: their values before captain traits (eotha-contracts ShipAttributes
-// fields 21-23, matching the engine's `ShipAttributes::tier_one()`).
+// Attributes no component sets: their values before captain traits and crew (eotha-contracts
+// ShipAttributes fields 21-23, matching the engine's `ShipAttributes::tier_one()`).
 const BASE_ATTRIBUTES = { docking_time_mult: 1.0, extraction_rate_mult: 1.0, tuning_tolerance_hz: 100.0 };
+
+/**
+ * The berths still free on a ship with `attributes` (computeShipAttributes): its capacity less the
+ * passengers and the active crew aboard, as the engine computes them from the same attributes.
+ */
+export function freeBerths(attributes) {
+  return Math.max(0, Math.floor(attributes.passenger_capacity) - attributes.passengers_aboard - attributes.crew_aboard);
+}
 
 /**
  * Deterministically derive ship attributes from a list of `{ type, tier }`
  * components. Missing components (and invalid tiers) default to Tier 1. `passengersAboard` is the
  * ship's persisted manifest count; it is clamped to the life support's passenger_capacity.
- * `traits` are the captain's unlocked trait ids, whose ship effects are folded in (src/config/captain.js).
+ * `traits` are the captain's unlocked trait ids, whose ship effects are folded in (src/config/captain.js),
+ * and `activeCrew` the crew aboard, whose class effects are too and which occupy `crew_aboard` of the
+ * berths (src/config/crew.js).
  */
-export function computeShipAttributes(components = [], passengersAboard = 0, traits = []) {
+export function computeShipAttributes(components = [], passengersAboard = 0, traits = [], activeCrew = []) {
   const tiers = {};
   for (const c of components) {
     if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
@@ -129,7 +141,8 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     }
   }
   Object.assign(attributes, BASE_ATTRIBUTES);
-  applyTraitEffects(attributes, traits);
-  attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity);
+  applyShipEffects(attributes, [...traitShipEffects(traits), ...crewShipEffects(activeCrew)]);
+  attributes.crew_aboard = activeCrew.length;
+  attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity - attributes.crew_aboard);
   return attributes;
 }

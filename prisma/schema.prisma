@@ -48,6 +48,7 @@ model Player {
   refreshTokens RefreshToken[]
   guestDevice  GuestDevice?
   captain      Captain?
+  crewMembers  CrewMember[]
 }
 
 // The pilot's one Captain (src/config/captain.js), created at Level 1 the first time the pilot logs in
@@ -71,6 +72,38 @@ model Captain {
   missionsCompleted  Int      @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+// A crew member hired from a station board (src/config/crew.js, src/lib/crew-generator.js). ACTIVE
+// crew are aboard `spaceshipId` and take their wage share of every payout; STANDBY crew are on the
+// roster with no ship, no berth and no share. `rank` and `quirkId` are fixed at hire (a rank changes
+// only by promotion, a later phase); `wageShareBp` is the rank's base share at hire, the effective
+// share (quirk, captain traits) being derived when a payout settles. `morale`, `seniorityXp`,
+// `unutilizedStreak` and `unpaidArrearsCredits` are kept for the morale and seniority phases and stay
+// at their defaults until they exist.
+model CrewMember {
+  id                   String     @id @default(uuid()) @db.Uuid
+  playerId             String     @db.Uuid
+  player               Player     @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  spaceshipId          String?    @db.Uuid
+  spaceship            Spaceship? @relation(fields: [spaceshipId], references: [id], onDelete: SetNull)
+  name                 String
+  crewClass            String     // PILOT, NAVIGATOR, SCIENCE, ENGINEER, CHEF, DOCTOR, GUNNER
+  rank                 String     // NOVICE, ADEPT, MASTER
+  quirkId              String     // Q01..Q20
+  status               String     @default("ACTIVE") // ACTIVE, STANDBY
+  morale               Int        @default(75)
+  seniorityXp          Int        @default(0)
+  wageShareBp          Int        @default(500)
+  unutilizedStreak     Int        @default(0)
+  unpaidArrearsCredits Int        @default(0)
+  homeFactionId        String     @default("independent")
+  hiredAtStationId     String
+  hiredAt              DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  @@index([playerId, status])
+  @@index([spaceshipId])
 }
 
 model SpaceHarbor {
@@ -109,6 +142,8 @@ model Spaceship {
   createdAt  DateTime              @default(now())
   updatedAt  DateTime              @updatedAt
   components ShipComponentRecord[]
+  // The crew aboard (status ACTIVE); a crew member on STANDBY has no ship.
+  crewMembers CrewMember[]
 }
 
 model ShipComponentRecord {
@@ -268,7 +303,10 @@ model CargoSale {
   seq          BigInt
   stationId    String
   items        Json     // sold lots, as signed (stored form)
-  totalCredits Int
+  totalCredits Int      // gross: what the engine signed, before the crew's share
+  // The crew's share of totalCredits taken when the sale was credited; 0 on sales from before crew,
+  // so a replay answers with the same split the first credit made.
+  crewShareCredits Int  @default(0)
   soldAtMs     BigInt
   creditedAt   DateTime @default(now())
 

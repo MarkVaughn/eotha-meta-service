@@ -71,10 +71,20 @@ export const traitPointsForLevel = (level) => Math.max(0, Math.min(level, MAX_CA
 export const BRANCHES = Object.freeze(['HELMSMAN', 'ASTROGATION', 'COMMAND']);
 
 // `ship` lists the ship attribute effects computeShipAttributes folds in (`mult` multiplies, `add`
-// adds); `hullBudgetBonus` raises the hull subsystem budget. A trait with neither acts in meta-service
-// systems of later phases (payouts, crew, factions); its effect is described in `summary` only.
+// adds); `hullBudgetBonus` raises the hull subsystem budget; `crew` holds the terms it sets for crew
+// (see traitCrewTerms). A trait with none of them acts in meta-service systems of later phases
+// (payouts, factions); its effect is described in `summary` only.
 const trait = (id, name, branch, tier, summary, effects = {}) =>
-  Object.freeze({ id, name, branch, tier, summary, ship: Object.freeze(effects.ship ?? {}), hullBudgetBonus: effects.hullBudgetBonus ?? 0 });
+  Object.freeze({
+    id,
+    name,
+    branch,
+    tier,
+    summary,
+    ship: Object.freeze(effects.ship ?? {}),
+    hullBudgetBonus: effects.hullBudgetBonus ?? 0,
+    crew: Object.freeze(effects.crew ?? {})
+  });
 
 export const TRAITS = Object.freeze(Object.fromEntries([
   trait('H1_TRIM_THRUSTERS', 'Trim Thrusters', 'HELMSMAN', 1, '+8% max speed',
@@ -87,7 +97,7 @@ export const TRAITS = Object.freeze(Object.fromEntries([
     { ship: { passenger_capacity: { add: 2 } } }),
   trait('H5_DEAD_RECKONING', 'Dead Reckoning', 'HELMSMAN', 2, '+15% mission time limits; speed bonus threshold 55%'),
   trait('H6_FLEET_CAPTAIN', 'Fleet Quartermaster', 'HELMSMAN', 3, '+1 hull subsystem budget point and +1 active crew slot',
-    { hullBudgetBonus: 1 }),
+    { hullBudgetBonus: 1, crew: { crewSlots: 1 } }),
   trait('S1_LONG_BASELINE', 'Long-Baseline Array', 'ASTROGATION', 1, '+20% radar and identification range',
     { ship: { radar_range_m: { mult: 1.2 }, identification_range_m: { mult: 1.2 } } }),
   trait('S2_PULSE_CYCLING', 'Pulse Cycling', 'ASTROGATION', 1, '-15% sensor cooldown and +20% sensor range',
@@ -97,8 +107,10 @@ export const TRAITS = Object.freeze(Object.fromEntries([
   trait('S4_DEEP_SURVEYOR', 'Deep Surveyor', 'ASTROGATION', 2, '+25% research mission and chart sale payouts'),
   trait('S5_PROSPECTOR_EYE', "Prospector's Eye", 'ASTROGATION', 2, '+15% gather mission and +10% ore sale payouts'),
   trait('S6_ASTROGATOR_PRIME', 'Astrogator Prime', 'ASTROGATION', 3, '+1 research or gather mission slot and -35% station mission cooldown'),
-  trait('C1_HARD_BARGAINER', 'Hard Bargainer', 'COMMAND', 1, '-15% crew wage shares and -25% signing bonuses'),
-  trait('C2_SHORE_CONTACTS', 'Shore Contacts', 'COMMAND', 1, '+10 starting crew morale and -25% morale decay'),
+  trait('C1_HARD_BARGAINER', 'Hard Bargainer', 'COMMAND', 1, '-15% crew wage shares and -25% signing bonuses',
+    { crew: { wageMult: 0.85, signingMult: 0.75 } }),
+  trait('C2_SHORE_CONTACTS', 'Shore Contacts', 'COMMAND', 1, '+10 starting crew morale and -25% morale decay',
+    { crew: { startMorale: 10 } }),
   trait('C3_COLD_RUNNING', 'Cold Running', 'COMMAND', 1, '+0.15 stealth rating',
     { ship: { stealth_rating: { add: 0.15 } } }),
   trait('C4_FACTION_ENVOY', 'Faction Envoy', 'COMMAND', 2, '+25% overt reputation gains and -20% rival reputation losses'),
@@ -135,16 +147,34 @@ export function traitUnlockRefusal(traitId, { level, traitIds }) {
 // The hull subsystem budget points the traits add.
 export const traitHullBudgetBonus = (traitIds) => traitIds.reduce((sum, id) => sum + (TRAITS[id]?.hullBudgetBonus ?? 0), 0);
 
-// Ceilings on trait-raised attributes: Mach 1 is the engine's top speed, and stealth is a fraction.
-const ATTRIBUTE_CEILINGS = { max_speed_mps: 343, stealth_rating: 1 };
+// Limits on attributes the traits and the crew move: Mach 1 is the engine's top speed, stealth is a
+// fraction, and the engine clamps docking time, extraction rate and tuning tolerance to these ranges.
+const ATTRIBUTE_CEILINGS = { max_speed_mps: 343, stealth_rating: 1, extraction_rate_mult: 3, tuning_tolerance_hz: 250 };
+const ATTRIBUTE_FLOORS = { docking_time_mult: 0.5, extraction_rate_mult: 0.5, tuning_tolerance_hz: 50 };
 
-// Trait arithmetic is rounded to this many decimals so 0.8 + 0.15 signs as 0.95.
+// Arithmetic on attributes is rounded to this many decimals so 0.8 + 0.15 signs as 0.95.
 const round6 = (value) => Math.round(value * 1e6) / 1e6;
 
-// Folds the traits' ship effects into `attributes` (mutated and returned), multipliers before
-// additions so an addition is never scaled.
-export function applyTraitEffects(attributes, traitIds) {
-  const effects = traitIds.flatMap((id) => Object.entries(TRAITS[id]?.ship ?? {}));
+// What the crew terms of `traitIds` add up to: `crewSlots` extra active crew, `wageMult` and
+// `signingMult` on crew wage shares and signing bonuses, `startMorale` added to new crew's morale.
+export function traitCrewTerms(traitIds) {
+  const terms = { crewSlots: 0, wageMult: 1, signingMult: 1, startMorale: 0 };
+  for (const id of traitIds) {
+    const crew = TRAITS[id]?.crew ?? {};
+    terms.crewSlots += crew.crewSlots ?? 0;
+    terms.wageMult *= crew.wageMult ?? 1;
+    terms.signingMult *= crew.signingMult ?? 1;
+    terms.startMorale += crew.startMorale ?? 0;
+  }
+  return terms;
+}
+
+// The ship effects of `traitIds` as `[attribute, { mult } | { add }]` entries.
+export const traitShipEffects = (traitIds) => traitIds.flatMap((id) => Object.entries(TRAITS[id]?.ship ?? {}));
+
+// Folds `effects` (`[attribute, { mult } | { add }]` entries, from the traits and the crew) into
+// `attributes` (mutated and returned), multipliers before additions so an addition is never scaled.
+export function applyShipEffects(attributes, effects) {
   const touched = new Set();
   for (const [attr, { mult }] of effects) {
     if (mult !== undefined) { attributes[attr] *= mult; touched.add(attr); }
@@ -153,7 +183,7 @@ export function applyTraitEffects(attributes, traitIds) {
     if (add !== undefined) { attributes[attr] += add; touched.add(attr); }
   }
   for (const attr of touched) {
-    attributes[attr] = round6(Math.min(attributes[attr], ATTRIBUTE_CEILINGS[attr] ?? Infinity));
+    attributes[attr] = round6(Math.max(ATTRIBUTE_FLOORS[attr] ?? -Infinity, Math.min(attributes[attr], ATTRIBUTE_CEILINGS[attr] ?? Infinity)));
   }
   return attributes;
 }
