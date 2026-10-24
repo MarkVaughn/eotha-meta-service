@@ -1,5 +1,5 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
-import { LIFE_SUPPORT_BERTHS_BY_TIER, crewHullBudgetBonus, crewShipEffects } from './crew.js';
+import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, crewHullBudgetBonus, crewResists, crewShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
@@ -106,8 +106,15 @@ export function clampPassengers(count, capacity) {
 }
 
 // Attributes no component sets: their values before captain traits and crew (eotha-contracts
-// ShipAttributes fields 21-23, matching the engine's `ShipAttributes::tier_one()`).
-const BASE_ATTRIBUTES = { docking_time_mult: 1.0, extraction_rate_mult: 1.0, tuning_tolerance_hz: 100.0 };
+// ShipAttributes fields 21-23, and 25-27, matching the engine's `ShipAttributes::tier_one()`).
+const BASE_ATTRIBUTES = {
+  docking_time_mult: 1.0,
+  extraction_rate_mult: 1.0,
+  tuning_tolerance_hz: 100.0,
+  ion_fog_shield_resist: 0,
+  node_interference_resist: 0,
+  crew_capability_flags: 0
+};
 
 /**
  * The berths still free on a ship with `attributes` (computeShipAttributes): its capacity less the
@@ -142,6 +149,7 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
   }
   Object.assign(attributes, BASE_ATTRIBUTES);
   applyShipEffects(attributes, [...traitShipEffects(traits), ...crewShipEffects(activeCrew)]);
+  Object.assign(attributes, crewResists(activeCrew), { crew_capability_flags: crewCapabilityFlags(activeCrew) });
   attributes.crew_aboard = activeCrew.length;
   attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity - attributes.crew_aboard);
   return attributes;

@@ -3,6 +3,16 @@
 // src/lib/crew.js and the station boards are src/lib/crew-generator.js.
 import { traitCrewTerms } from './captain.js';
 
+// The bits of ShipAttributes.crew_capability_flags (eotha-contracts src/crew_capabilities.ts). Only the
+// bits the contracts assigned are ever set; 0x08, 0x10 and 0x20 stay unused until they are.
+export const CREW_CAPABILITY = Object.freeze({
+  HOT_CASTOFF: 0x01,
+  COLD_DRIFT: 0x02,
+  COARSE_GRADE_REVEAL: 0x04,
+  HARMONIC_AUTOTRIM: 0x40,
+  BELT_CLEARANCE: 0x80
+});
+
 // Confirmed passenger_capacity of LIFE_SUPPORT Tiers 1-5; active crew share these berths with passengers.
 export const LIFE_SUPPORT_BERTHS_BY_TIER = Object.freeze([3, 6, 12, 22, 50]);
 // Most active crew a ship carries, by hull tier (H6_FLEET_CAPTAIN adds a slot).
@@ -40,6 +50,27 @@ export const NOMINAL_MORALE_THRESHOLD = 50;
 export const DISGRUNTLED_MORALE_THRESHOLD = 25;
 export const MORALE_MULT = Object.freeze({ INSPIRED: 1.15, NOMINAL: 1.0, DISGRUNTLED: 0.6, MUTINOUS: 0 });
 
+// What moves morale. A paid, utilized mission lifts it by MORALE_GAIN_UTILIZED_PAID; a crew member left
+// unutilized for more than UNUTILIZED_GRACE_MISSIONS missions running loses MORALE_DECAY_UNUTILIZED per
+// mission; a deferred payout costs MORALE_DECAY_DEFERRED_PAY and paying the arrears gives back
+// MORALE_GAIN_PAY_ARREARS (up to the rested cap).
+export const RESTED_MORALE_CAP = 80;
+export const MASTER_CHEF_RESTED_MORALE_CAP = 90;
+export const MORALE_GAIN_UTILIZED_PAID = 4;
+export const UNUTILIZED_GRACE_MISSIONS = 2;
+export const MORALE_DECAY_UNUTILIZED = 6;
+export const MORALE_DECAY_DEFERRED_PAY = 25;
+export const MORALE_GAIN_PAY_ARREARS = 15;
+
+// Seniority XP a crew member needs to be promoted into a rank, and the training fee at a station.
+export const CREW_TRAINING_XP_REQ = Object.freeze({ ADEPT: 1500, MASTER: 5000 });
+export const CREW_TRAINING_FEE_CREDITS = Object.freeze({ ADEPT: 800, MASTER: 2500 });
+export const MAX_SENIORITY_XP = 2_147_483_647; // CrewMember.seniorityXp is a 32-bit Int
+export const MAX_ARREARS_CREDITS = 2_147_483_647; // so is unpaidArrearsCredits
+
+// The share of MISSION_COOLDOWN_MS an active Doctor of each rank takes off (index 0 Novice).
+export const DOCTOR_COOLDOWN_REDUCTION = Object.freeze([0.2, 0.35, 0.5]);
+
 export const CREW_STATUS = Object.freeze({ ACTIVE: 'ACTIVE', STANDBY: 'STANDBY' });
 
 // The factions a candidate calls home: its standing with the pilot gates hiring (CREW_REP_REQ_SCORE).
@@ -58,22 +89,37 @@ export const HUB_RANK_WEIGHTS = Object.freeze([['ADEPT', 750], ['MASTER', 250]])
 // What a crew member of each class adds to the ship's signed attributes, by rank (index 0 Novice).
 // `pct` is a fractional change to the attribute and `add` an addition, both scaled by the member's
 // morale multiplier (effectiveMoraleMult); `hullBudget` is a subsystem budget point granted while the
-// member's morale is at least NOMINAL_MORALE_THRESHOLD. Chef and Doctor change no ship attribute;
-// their effects (morale, payouts, cooldowns) belong to systems not built yet.
+// member's morale is at least NOMINAL_MORALE_THRESHOLD. `capabilities` lists the CREW_CAPABILITY bits
+// the class signs into the ship, each `[bit, rank it unlocks at]` (a higher rank keeps the lower ranks'),
+// and `resists` the 0 to 1 attributes (ion_fog_shield_resist, node_interference_resist) it raises by
+// rank, scaled by the morale multiplier; both need the member's morale at NOMINAL_MORALE_THRESHOLD or
+// better. Chef and Doctor change no ship attribute; their effects (morale, cooldowns) are meta-service
+// rules (shoreLeaveRestedCap, doctorCooldownReduction).
 const pct = (attr, values) => Object.freeze({ attr, pct: Object.freeze(values) });
 const add = (attr, values) => Object.freeze({ attr, add: Object.freeze(values) });
-const crewClass = (name, effects = [], hullBudget = [0, 0, 0]) =>
-  Object.freeze({ name, effects: Object.freeze(effects), hullBudget: Object.freeze(hullBudget) });
+const crewClass = (name, effects = [], hullBudget = [0, 0, 0], { capabilities = [], resists = {} } = {}) =>
+  Object.freeze({
+    name,
+    effects: Object.freeze(effects),
+    hullBudget: Object.freeze(hullBudget),
+    capabilities: Object.freeze(capabilities.map((c) => Object.freeze(c))),
+    resists: Object.freeze(resists)
+  });
 
 export const CREW_CLASSES = Object.freeze({
   PILOT: crewClass('Pilot', [
     pct('max_speed_mps', [0.08, 0.15, 0.25]),
     pct('docking_time_mult', [-0.15, -0.25, -0.4])
-  ]),
+  ], [0, 0, 0], {
+    capabilities: [[CREW_CAPABILITY.HOT_CASTOFF, 'ADEPT'], [CREW_CAPABILITY.COLD_DRIFT, 'MASTER']]
+  }),
   NAVIGATOR: crewClass('Navigator', [
     pct('radar_range_m', [0.15, 0.3, 0.5]),
     pct('identification_range_m', [0.15, 0.3, 0.5])
-  ]),
+  ], [0, 0, 0], {
+    capabilities: [[CREW_CAPABILITY.COARSE_GRADE_REVEAL, 'ADEPT']],
+    resists: { node_interference_resist: [0.2, 0.35, 0.5] }
+  }),
   SCIENCE: crewClass('Science', [
     pct('sensor_cooldown_mult', [-0.12, -0.22, -0.35]),
     pct('sensor_range_m', [0.15, 0.3, 0.5])
@@ -83,13 +129,16 @@ export const CREW_CLASSES = Object.freeze({
     pct('extraction_rate_mult', [0.1, 0.2, 0.35]),
     pct('shield_regen_rate', [0.2, 0.4, 0.65]),
     pct('energy_regen_rate', [0.2, 0.4, 0.65])
-  ], [0, 1, 2]),
+  ], [0, 1, 2], {
+    capabilities: [[CREW_CAPABILITY.HARMONIC_AUTOTRIM, 'MASTER']],
+    resists: { ion_fog_shield_resist: [0.25, 0.5, 0.75] }
+  }),
   CHEF: crewClass('Chef'),
   DOCTOR: crewClass('Doctor'),
   GUNNER: crewClass('Gunner', [
     pct('weapon_dps', [0.15, 0.3, 0.5]),
     pct('weapon_range_m', [0.1, 0.2, 0.35])
-  ])
+  ], [0, 0, 0], { capabilities: [[CREW_CAPABILITY.BELT_CLEARANCE, 'ADEPT']] })
 });
 export const CREW_CLASS_IDS = Object.freeze(Object.keys(CREW_CLASSES));
 
@@ -97,26 +146,30 @@ export const CREW_CLASS_IDS = Object.freeze(Object.keys(CREW_CLASSES));
 // design effect, shown on the board before hiring. The numeric fields are the effects enforced today:
 // `wageBp` (added to the rank's share), `signingMult`, `startMorale` (added to the starting morale),
 // `stat` (terms added to the morale multiplier: `delta`, only at `rank` and/or from `minMorale`),
-// `zeroWhenDisgruntled` and `inspiredAt`. The rest (morale events, seniority, customs, factions,
-// retirement) act in later phases.
+// `zeroWhenDisgruntled` and `inspiredAt`; `moraleShift` (added to every morale gain, taken off every
+// loss), `xpMult` and `feeMult` (seniority XP earned, promotion fee), `idleGrace` (added to the idle
+// missions allowed before morale decays), `idleDecay` (the morale lost per idle mission instead of
+// MORALE_DECAY_UNUTILIZED), `shoreLeaveDelta` (added to the morale a dock restores), `enduranceMult`
+// (on the flight time before fatigue) and `outpostGain` (the morale an outpost restores instead of
+// SHORE_LEAVE_OUTPOST_GAIN). The rest (customs, factions, retirement) act in later phases.
 const quirk = (id, key, name, category, weight, summary, effects = {}) =>
   Object.freeze({ id, key, name, category, weight, summary, ...effects });
 
 export const QUIRKS = Object.freeze(Object.fromEntries([
   quirk('Q01', 'GOOD_NATURED', 'Good-Natured', 'POSITIVE', 50,
-    '+1 morale on every morale gain and 1 less on every loss'),
+    '+1 morale on every morale gain and 1 less on every loss', { moraleShift: 1 }),
   quirk('Q02', 'MODEST', 'Modest', 'POSITIVE', 50,
     '-0.5% wage share and -15% signing bonus', { wageBp: -50, signingMult: 0.85 }),
   quirk('Q03', 'QUICK_STUDY', 'Quick Study', 'POSITIVE', 40,
-    '+15% seniority XP and -15% promotion fee'),
+    '+15% seniority XP and -15% promotion fee', { xpMult: 1.15, feeMult: 0.85 }),
   quirk('Q04', 'COOL_HEADED', 'Cool-Headed', 'POSITIVE', 40,
     '+3% class modifiers and -5% customs catch chance', { stat: [{ delta: 0.03 }] }),
   quirk('Q05', 'MERCENARY_MINDED', 'Mercenary', 'NEGATIVE', 50,
     '+0.5% wage share and +15% signing bonus', { wageBp: 50, signingMult: 1.15 }),
   quirk('Q06', 'GROUCHY', 'Grouchy', 'NEGATIVE', 50,
-    'Starts at 70 morale; shore leave restores 2 less', { startMorale: -5 }),
+    'Starts at 70 morale; shore leave restores 2 less', { startMorale: -5, shoreLeaveDelta: -2 }),
   quirk('Q07', 'RUSTY', 'Rusty', 'NEGATIVE', 40,
-    '-15% seniority XP and +15% promotion fee'),
+    '-15% seniority XP and +15% promotion fee', { xpMult: 0.85, feeMult: 1.15 }),
   quirk('Q08', 'NERVOUS_TELL', 'Nervous Tell', 'NEGATIVE', 40,
     '+6% customs inspection chance with contraband or operatives aboard; +5% leak risk when Disgruntled'),
   quirk('Q09', 'EAGER', 'Eager', 'CORE', 65,
@@ -124,10 +177,10 @@ export const QUIRKS = Object.freeze(Object.fromEntries([
     { stat: [{ delta: 0.1 }], zeroWhenDisgruntled: true }),
   quirk('Q10', 'LAZY', 'Lazy', 'CORE', 65,
     '-1.0% wage share and 1 more idle mission before morale decays; -10% class modifiers and -15% seniority XP',
-    { wageBp: -100, stat: [{ delta: -0.1 }] }),
+    { wageBp: -100, stat: [{ delta: -0.1 }], xpMult: 0.85, idleGrace: 1 }),
   quirk('Q11', 'AMBITIOUS', 'Ambitious', 'CORE', 55,
     '+35% seniority XP and +5% class modifiers at Master; -9 morale per idle mission past the first; a Master resigns if passed over when the Captain retires',
-    { stat: [{ delta: 0.05, rank: 'MASTER' }] }),
+    { stat: [{ delta: 0.05, rank: 'MASTER' }], xpMult: 1.35, idleGrace: -1, idleDecay: 9 }),
   quirk('Q12', 'FLAKY', 'Flaky', 'CORE', 55,
     '-1.0% wage share and -30% signing bonus; 10% chance to leave at undocking while morale is below 85',
     { wageBp: -100, signingMult: 0.7 }),
@@ -135,7 +188,7 @@ export const QUIRKS = Object.freeze(Object.fromEntries([
     '+6% client mission payouts and -8% customs inspection chance; +1.5% wage share', { wageBp: 150 }),
   quirk('Q14', 'SPARTAN', 'Spartan', 'CORE', 45,
     '+50% shore-leave endurance and +10 morale at outposts; +0.5% wage share and -10% passage payouts with VIPs aboard',
-    { wageBp: 50 }),
+    { wageBp: 50, enduranceMult: 1.5, outpostGain: 10 }),
   quirk('Q15', 'PERFECTIONIST', 'Perfectionist', 'CORE', 40,
     '+12% class modifiers and +10 Hz tuning tolerance when Inspired, which takes 88 morale; -8 morale on a failed or abandoned mission',
     { stat: [{ delta: 0.12, minMorale: 88 }], inspiredAt: 88 }),
@@ -220,6 +273,39 @@ export const crewHullBudgetBonus = (crew = []) =>
     const def = CREW_CLASSES[member.crewClass];
     return sum + (def && isRank(member.rank) && member.morale >= NOMINAL_MORALE_THRESHOLD ? def.hullBudget[rankIndex(member.rank)] : 0);
   }, 0);
+
+// Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better.
+const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD;
+
+/**
+ * The ShipAttributes.crew_capability_flags `crew` (active members) signs into the ship: the bits of every
+ * member whose morale is at least NOMINAL_MORALE_THRESHOLD and whose rank has unlocked them.
+ */
+export function crewCapabilityFlags(crew = []) {
+  let flags = 0;
+  for (const member of crew) {
+    const def = CREW_CLASSES[member.crewClass];
+    if (!def || !isRank(member.rank) || !capabilitiesOn(member)) continue;
+    for (const [bit, rank] of def.capabilities) if (rankIndex(member.rank) >= rankIndex(rank)) flags |= bit;
+  }
+  return flags;
+}
+
+/**
+ * The 0 to 1 resistances `crew` signs into the ship, `{ ion_fog_shield_resist, node_interference_resist }`:
+ * each active member at NOMINAL_MORALE_THRESHOLD or better adds its rank's value scaled by its morale
+ * multiplier, together at most 1.
+ */
+export function crewResists(crew = []) {
+  const resists = { ion_fog_shield_resist: 0, node_interference_resist: 0 };
+  for (const member of crew) {
+    const def = CREW_CLASSES[member.crewClass];
+    if (!def || !isRank(member.rank) || !capabilitiesOn(member)) continue;
+    for (const [attr, values] of Object.entries(def.resists)) resists[attr] += values[rankIndex(member.rank)] * effectiveMoraleMult(member);
+  }
+  for (const attr of Object.keys(resists)) resists[attr] = round6(Math.min(1, Math.max(0, resists[attr])));
+  return resists;
+}
 
 /** Most active crew a ship of `hullTier` carries when its captain holds `traits`. */
 export function maxActiveCrew(hullTier, traits = []) {

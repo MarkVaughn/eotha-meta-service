@@ -110,7 +110,7 @@ export const TRAITS = Object.freeze(Object.fromEntries([
   trait('C1_HARD_BARGAINER', 'Hard Bargainer', 'COMMAND', 1, '-15% crew wage shares and -25% signing bonuses',
     { crew: { wageMult: 0.85, signingMult: 0.75 } }),
   trait('C2_SHORE_CONTACTS', 'Shore Contacts', 'COMMAND', 1, '+10 starting crew morale and -25% morale decay',
-    { crew: { startMorale: 10 } }),
+    { crew: { startMorale: 10, moraleDecayMult: 0.75 } }),
   trait('C3_COLD_RUNNING', 'Cold Running', 'COMMAND', 1, '+0.15 stealth rating',
     { ship: { stealth_rating: { add: 0.15 } } }),
   trait('C4_FACTION_ENVOY', 'Faction Envoy', 'COMMAND', 2, '+25% overt reputation gains and -20% rival reputation losses'),
@@ -156,15 +156,17 @@ const ATTRIBUTE_FLOORS = { docking_time_mult: 0.5, extraction_rate_mult: 0.5, tu
 const round6 = (value) => Math.round(value * 1e6) / 1e6;
 
 // What the crew terms of `traitIds` add up to: `crewSlots` extra active crew, `wageMult` and
-// `signingMult` on crew wage shares and signing bonuses, `startMorale` added to new crew's morale.
+// `signingMult` on crew wage shares and signing bonuses, `startMorale` added to new crew's morale and
+// `moraleDecayMult` on every morale loss.
 export function traitCrewTerms(traitIds) {
-  const terms = { crewSlots: 0, wageMult: 1, signingMult: 1, startMorale: 0 };
+  const terms = { crewSlots: 0, wageMult: 1, signingMult: 1, startMorale: 0, moraleDecayMult: 1 };
   for (const id of traitIds) {
     const crew = TRAITS[id]?.crew ?? {};
     terms.crewSlots += crew.crewSlots ?? 0;
     terms.wageMult *= crew.wageMult ?? 1;
     terms.signingMult *= crew.signingMult ?? 1;
     terms.startMorale += crew.startMorale ?? 0;
+    terms.moraleDecayMult *= crew.moraleDecayMult ?? 1;
   }
   return terms;
 }

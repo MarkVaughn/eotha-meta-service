@@ -58,6 +58,7 @@ describe('computeShipAttributes', () => {
       passenger_capacity: 50,
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
       docking_time_mult: 1, extraction_rate_mult: 1, tuning_tolerance_hz: 100,
+      ion_fog_shield_resist: 0, node_interference_resist: 0, crew_capability_flags: 0,
       crew_aboard: 0, passengers_aboard: 0
     });
   });
