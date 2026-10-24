@@ -103,6 +103,14 @@ export const standbyCrewOf = (db, playerId) =>
     orderBy: [{ hiredAt: 'asc' }, { id: 'asc' }]
   });
 
+// `db` is the Prisma client or an open transaction. The ids of the board candidates the pilot's roster
+// (active and standby) was hired as; members hired before the id was stored have none.
+export const hiredCandidateIdsOf = async (db, playerId) =>
+  new Set(
+    (await db.crewMember.findMany({ where: { playerId, sourceCandidateId: { not: null } }, select: { sourceCandidateId: true } }))
+      .map((member) => member.sourceCandidateId)
+  );
+
 /** What the client shows of a crew member; `traits` are the captain's, which move the wage share. */
 export function crewMemberView(member, traits = []) {
   return {

@@ -431,6 +431,83 @@ describe('POST /game/crew/hire', () => {
   });
 });
 
+describe('a hired candidate and the board', () => {
+  const ids = (res) => json(res).candidates.map((c) => c.candidateId);
+
+  test('records the candidate on the hire and leaves them off the pilot\'s board, the others unmoved', async () => {
+    const { stationId, candidates } = findStation((c) => novice(c).length > 0);
+    const candidate = novice(candidates)[0];
+    const pilot = await newPilot('BoardHired');
+    const other = await newPilot('BoardOther');
+    await setCredits(pilot, 2_000);
+    assert.deepEqual(ids(await board(pilot, stationId)), candidates.map((c) => c.candidateId));
+    assert.equal((await hire(pilot, stationId, candidate.candidateId)).statusCode, 200);
+
+    const stored = await app.prisma.crewMember.findFirst({ where: { playerId: pilot.id } });
+    assert.equal(stored.sourceCandidateId, candidate.candidateId);
+    const after = await board(pilot, stationId);
+    assert.deepEqual(ids(after), candidates.map((c) => c.candidateId).filter((id) => id !== candidate.candidateId));
+    assert.equal(json(after).candidates.length, candidates.length - 1);
+    // The remaining cards are exactly what the same pilot would have seen with the hire out of the way.
+    assert.deepEqual(json(after).candidates.map((c) => c.slotIndex), candidates.map((c) => c.slotIndex).filter((slot) => slot !== candidate.slotIndex));
+    // Only the pilot who hired is affected: the board is still the same for everyone else.
+    assert.deepEqual(ids(await board(other, stationId)), candidates.map((c) => c.candidateId));
+    assert.deepEqual(generateCrewBoard(stationId, Date.now()).candidates, candidates);
+  });
+
+  test('a second hire of the same candidate is refused with 409 and changes nothing', async () => {
+    const { stationId, candidates } = findStation((c) => novice(c).length > 0);
+    const candidate = novice(candidates)[0];
+    const pilot = await newPilot('HireTwice');
+    await setCredits(pilot, 5_000);
+    assert.equal((await hire(pilot, stationId, candidate.candidateId)).statusCode, 200);
+    const balance = await credits(pilot);
+    const res = await hire(pilot, stationId, candidate.candidateId);
+    assert.equal(res.statusCode, 409, res.body);
+    assert.equal(json(res).error, 'candidate_already_hired');
+    assert.equal(await credits(pilot), balance);
+    assert.equal(await app.prisma.crewMember.count({ where: { playerId: pilot.id } }), 1);
+  });
+
+  test('the same candidate hired by two requests at once is hired once', async () => {
+    const { stationId, candidates } = findStation((c) => novice(c).length > 0);
+    const candidate = novice(candidates)[0];
+    const pilot = await newPilot('HireRace');
+    await setCredits(pilot, 5_000);
+    const results = await Promise.all([1, 2, 3].map(() => hire(pilot, stationId, candidate.candidateId)));
+    assert.equal(results.filter((r) => r.statusCode === 200).length, 1, results.map((r) => r.body).join('\n'));
+    for (const res of results.filter((r) => r.statusCode !== 200)) assert.equal(json(res).error, 'candidate_already_hired');
+    assert.equal(await app.prisma.crewMember.count({ where: { playerId: pilot.id } }), 1);
+    assert.equal(await credits(pilot), 5_000 - signingBonusCredits('NOVICE', candidate.quirkId));
+  });
+
+  test('a crew member on standby is still off the board; a dismissed one may be offered again', async () => {
+    const { stationId, candidates } = findStation((c) => novice(c).length > 0);
+    const candidate = novice(candidates)[0];
+    const pilot = await newPilot('HireCycle');
+    await setCredits(pilot, 5_000);
+    const hired = json(await hire(pilot, stationId, candidate.candidateId)).crew;
+    assert.equal((await standby(pilot, hired.id)).statusCode, 200);
+    assert.equal(ids(await board(pilot, stationId)).includes(candidate.candidateId), false);
+    const again = await hire(pilot, stationId, candidate.candidateId);
+    assert.equal(again.statusCode, 409);
+    assert.equal(json(again).error, 'candidate_already_hired');
+
+    assert.equal((await dismiss(pilot, hired.id)).statusCode, 200);
+    assert.deepEqual(ids(await board(pilot, stationId)), candidates.map((c) => c.candidateId));
+    assert.equal((await hire(pilot, stationId, candidate.candidateId)).statusCode, 200);
+  });
+
+  test('crew hired before the candidate was recorded never match one', async () => {
+    const { stationId, candidates } = findStation((c) => novice(c).length > 0);
+    const candidate = novice(candidates)[0];
+    const pilot = await newPilot('HireLegacy');
+    await setCredits(pilot, 5_000);
+    await addCrew(pilot, { name: candidate.name, crewClass: candidate.crewClass, quirkId: candidate.quirkId, hiredAtStationId: stationId });
+    assert.deepEqual(ids(await board(pilot, stationId)), candidates.map((c) => c.candidateId));
+  });
+});
+
 describe('dismiss and standby', () => {
   test('dismiss removes the crew member for good, frees the berth and refunds nothing', async () => {
     const pilot = await newPilot('Dismiss');
