@@ -21,15 +21,21 @@ import {
 import { awardCaptainXp } from '../../lib/captain.js';
 import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
-import { MISSION_TYPES, isLegacyRow, verifyMissionOffer } from '../../lib/mission-offer.js';
+import {
+  MISSION_ARCHETYPES, MISSION_TYPES, MISSION_VISIBILITIES, isCovert, isLegacyRow, missionOfferVersion, verifyMissionOffer
+} from '../../lib/mission-offer.js';
+import { fromStoredOffer, toActiveMission } from '../../lib/active-mission.js';
 import { withColorsBonus } from '../../config/factions.js';
-import { LEDGER_REASONS, adjustReputation, factionsClaim, missionFaction, standingsOf } from '../../lib/reputation.js';
+import { LEDGER_REASONS, adjustMissionReputation, adjustReputation, factionsClaim, missionFaction, standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 const uint32 = { type: 'integer', minimum: 0, maximum: 4_294_967_295 };
 const int32 = { type: 'integer', minimum: -2147483648, maximum: 2147483647 };
 const text = (maxLength) => ({ type: 'string', maxLength, default: '' });
+const missionEnumSchema = (values) => ({ anyOf: [
+  { type: 'string', enum: Object.keys(values) }, { type: 'integer', enum: Object.values(values) }
+] });
 
 const cooldownSchema = {
   querystring: {
@@ -78,7 +84,14 @@ const offerSchema = {
     source_system_h3: { type: 'string', maxLength: 256 },
     source_node_h3: { type: 'string', maxLength: 256 },
     source_lat: { type: 'number' },
-    source_lng: { type: 'number' }
+    source_lng: { type: 'number' },
+    visibility: missionEnumSchema(MISSION_VISIBILITIES),
+    archetype: missionEnumSchema(MISSION_ARCHETYPES),
+    opposed_faction_id: { type: 'string', maxLength: 256 },
+    opposed_reputation_change: int32,
+    clandestine_bonus_credits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS },
+    carries_contraband_or_operative: { type: 'boolean' },
+    required_flying_colors_faction_id: { type: 'string', maxLength: 256 }
   }
 };
 
@@ -129,6 +142,10 @@ const completeSchema = {
           rewardCredits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS },
           reputationChange: int32,
           signature: { type: 'string', minLength: 1, maxLength: 512 },
+          wasDetected: { type: 'boolean', default: false },
+          exposureScoreMilli: { type: 'integer', minimum: 0, maximum: 100_000, default: 0 },
+          opposedReputationChange: { ...int32, default: 0 },
+          bribePaidCredits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS, default: 0 },
           // The cargo suffix of a GATHER claim, and of no other (see `settle`): the engine's position
           // in the pilot's cargo history and the whole hold after the delivered ore left it.
           leaseId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
@@ -151,33 +168,7 @@ const toStoredOffer = (offer) => ({
   ...(isGather(offer) && { exact_source: [String(offer.source_lat), String(offer.source_lng)] })
 });
 
-function fromStoredOffer(stored) {
-  const { exact_destination: exact, exact_source: source, ...offer } = stored;
-  if (Array.isArray(exact)) {
-    offer.destination_lat = Number(exact[0]);
-    offer.destination_lng = Number(exact[1]);
-  }
-  if (Array.isArray(source)) {
-    offer.source_lat = Number(source[0]);
-    offer.source_lng = Number(source[1]);
-  }
-  return offer;
-}
-
 const LEGACY_MESSAGE = 'Your previous mission was cancelled because the mission format changed. Nothing was charged; accept a new mission.';
-
-// Proto-JSON ActiveMission for a stored row.
-function toActiveMission(playerId, offer, acceptedAt) {
-  const acceptedAtMs = acceptedAt.getTime();
-  return {
-    mission_id: offer.mission_id,
-    player_ship_id: playerId,
-    offer,
-    accepted_at_ms: acceptedAtMs,
-    deadline_ms: acceptedAtMs + offer.duration_limit_ms,
-    is_completed: false
-  };
-}
 
 // The mission type without its enum prefix, as AbandonedMission stores it.
 const typeName = (offer) => offer.type.replace(/^MISSION_TYPE_/, '');
@@ -294,6 +285,11 @@ export default async function missionsRoutes(fastify) {
       if (held.some((row) => row.missionId === offer.mission_id)) {
         return fail(409, 'This mission is already active.', { code: 'mission_already_active' });
       }
+      if (isCovert(offer) && held.some((row) => isCovert(row.offer))) {
+        return fail(409, 'At most one covert mission can be held at once. Complete or abandon it first.', {
+          code: 'covert_mission_limit_reached', limit: 1
+        });
+      }
       if (!underMissionLimit(held.map((row) => row.offer), offer.type)) {
         const limit = MISSION_LIMITS[offer.type];
         return fail(409, `At most ${limit} missions of this type can be held at once. Complete or abandon one first.`, {
@@ -340,7 +336,7 @@ export default async function missionsRoutes(fastify) {
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
-    return { active: toActiveMission(playerId, offer, acceptedAt), token: tokenFor(request, outcome.ship, outcome.passengersAboard) };
+    return { active: toActiveMission(playerId, offer, acceptedAt), token: await tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
   // `active` (the oldest mission) and `cancelled_mission` are kept for clients that hold one mission.
@@ -423,7 +419,7 @@ export default async function missionsRoutes(fastify) {
       outcome: 'MISSION_ABANDON_OUTCOME_CANCELLED',
       reputation_change: outcome.reputationChange,
       standings: outcome.standings,
-      token: tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
+      token: await tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
     };
   });
 
@@ -475,7 +471,13 @@ export default async function missionsRoutes(fastify) {
         // The signed reputation, negative for a late enough completion, goes to the sponsor: a gain
         // for the faction whose colors the pilot flies is multiplied (withColorsBonus).
         const reputationChange = withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors);
-        await adjustReputation(tx, playerId, factionId, reputationChange, { reason: LEDGER_REASONS.MISSION_COMPLETED, missionId });
+        const covert = isCovert(active.offer);
+        const reason = covert
+          ? (claim.wasDetected ? LEDGER_REASONS.COMPLETE_COVERT_DETECTED : LEDGER_REASONS.COMPLETE_COVERT_CLEAN)
+          : LEDGER_REASONS.MISSION_COMPLETED;
+        await adjustMissionReputation(tx, playerId, factionId, reputationChange,
+          covert && claim.wasDetected ? active.offer.opposed_faction_id : null,
+          covert && claim.wasDetected ? claim.opposedReputationChange : 0, { reason, missionId });
         await startCooldown(tx, playerId, stationId, Date.now(), MISSION_COOLDOWN_MS);
         const passengersAboard = unboarded(ship, active.offer.required_berths);
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
@@ -522,12 +524,25 @@ export default async function missionsRoutes(fastify) {
     if (claim.completedAtMs > Date.now() + MAX_FUTURE_SKEW_MS) {
       return reply.code(400).send({ error: 'Claim completion time is in the future.' });
     }
-    if (claim.rewardCredits > Math.floor(active.offer.reward_credits * MAX_BONUS_MULTIPLIER)) {
+    const version = missionOfferVersion(active.offer);
+    const covert = isCovert(active.offer);
+    // The engine's final signed reward already includes the clean bonus, added AFTER speed/late
+    // terms. Do not add it again at settlement or let a detected/overt claim use this allowance.
+    const cleanBonus = covert && !claim.wasDetected ? (active.offer.clandestine_bonus_credits ?? 0) : 0;
+    if (claim.rewardCredits > Math.floor(active.offer.reward_credits * MAX_BONUS_MULTIPLIER) + cleanBonus) {
       return reply.code(400).send({ error: 'Claim reward exceeds the maximum speed bonus.' });
     }
     // Lateness only lowers reputation, so a claim never gains more than the offer.
     if (claim.reputationChange > Math.max(0, active.offer.reputation_change)) {
       return reply.code(400).send({ error: 'Claim reputation exceeds the offered reputation.' });
+    }
+
+    // Phase 3 has no customs/bribes. Detection attribution and opposed harm must match the
+    // signed offer; overt/V1 missions carry zero attribution fields, including when defaults omit them.
+    const expectedHarm = covert && claim.wasDetected ? (active.offer.opposed_reputation_change ?? 0) : 0;
+    if (claim.bribePaidCredits !== 0 || claim.opposedReputationChange !== expectedHarm
+        || (!covert && (claim.wasDetected || claim.exposureScoreMilli !== 0))) {
+      return reply.code(400).send({ error: 'Claim attribution does not match the active mission.' });
     }
 
     // The cargo suffix is required exactly when the stored offer's signed type is GATHER.
@@ -539,7 +554,7 @@ export default async function missionsRoutes(fastify) {
     }
 
     // 4. Canonical Ed25519 signature by the engine's claim key.
-    if (!verifyClaimSignature(claim, fastify.claimKey.key, gather)) {
+    if (!verifyClaimSignature(claim, fastify.claimKey.key, gather, version)) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
@@ -558,7 +573,7 @@ export default async function missionsRoutes(fastify) {
       standings: settled.standings,
       ...settled.captain,
       ...(settled.lots && { lots: settled.lots }),
-      token: tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
+      token: await tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
     };
   });
 }

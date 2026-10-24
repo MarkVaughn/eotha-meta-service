@@ -6,6 +6,7 @@ import { captainTraits, ensureCaptain } from '../../lib/captain.js';
 import { activeCrewOf } from '../../lib/crew.js';
 import { convertGuest } from '../../lib/identity.js';
 import { factionsClaim } from '../../lib/reputation.js';
+import { activeMissionClaim } from '../../lib/active-mission.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
 import { gatewayWsUrl } from '../../lib/gateway-url.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
@@ -35,7 +36,9 @@ export default async function authRoutes(fastify, opts) {
     const captain = await ensureCaptain(prisma, player.id, player.callsign);
     const crew = ship ? await activeCrewOf(prisma, ship.id) : [];
     const shipAttributes = computeShipAttributes(components, ship?.passengersAboard, captainTraits(captain), crew);
+    const mission = await activeMissionClaim(prisma, player.id);
     const claims = {
+      ...(mission && { active_mission: mission }),
       sub: player.id,
       callsign: player.callsign,
       home_h3: player.harbor?.h3Index || "881f1d4887fffff",

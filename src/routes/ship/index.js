@@ -73,7 +73,7 @@ export default async function shipRoutes(fastify, opts) {
       });
       if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
       const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
-      return { ...loadout, token: reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
+      return { ...loadout, token: await reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
     });
   }
 
@@ -171,6 +171,6 @@ export default async function shipRoutes(fastify, opts) {
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
-    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
+    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: await reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
   });
 }

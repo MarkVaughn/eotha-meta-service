@@ -8,6 +8,7 @@ import {
 import { captainTraits, ensureCaptain } from './captain.js';
 import { activeCrewOf } from './crew.js';
 import { factionsClaim } from './reputation.js';
+import { activeMissionClaim } from './active-mission.js';
 
 // Inside transaction `tx`: takes the per-player advisory lock, so concurrent requests cannot
 // create duplicate active ships or interleave a check with its write, and returns the pilot's
@@ -49,7 +50,13 @@ export function toLoadout(shipId, components, passengersAboard, traits = [], cre
 // under the pilot's lock) so the token RTSE verifies is current. The expiry is carried over: only a
 // refresh token may extend a login. A `cargo` lease claim is never carried over (a reissued token
 // would load a stale hold); only POST /game/cargo/lease adds one, through `extraClaims`.
-export function reissueToken(fastify, request, shipAttributes, factions, extraClaims = {}) {
-  const { iat, iss, cargo, ...claims } = request.user;
-  return fastify.signWithExpiry({ ...claims, ship_attributes: shipAttributes, factions, ...extraClaims });
+// The optional covert `active_mission` is reconstructed from the DB on every reissue, never
+// copied from the caller, so an old token cannot restore abandoned/completed mission tracking.
+export async function reissueToken(fastify, request, shipAttributes, factions, extraClaims = {}) {
+  const { iat, iss, cargo, active_mission, ...claims } = request.user;
+  const mission = await activeMissionClaim(fastify.prisma, request.user.sub);
+  return fastify.signWithExpiry({
+    ...claims, ship_attributes: shipAttributes, factions, ...extraClaims,
+    ...(mission && { active_mission: mission })
+  });
 }

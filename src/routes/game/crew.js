@@ -115,9 +115,9 @@ export default async function crewRoutes(fastify) {
   }
 
   // Re-signs the token with the ship's attributes after `ship.crew` changed to `crew`.
-  function respondWithShip(request, ship, crew, body) {
+  async function respondWithShip(request, ship, crew, body) {
     const loadout = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, crew);
-    return { ...body, ship_attributes: loadout.ship_attributes, token: reissueToken(fastify, request, loadout.ship_attributes, ship.factions) };
+    return { ...body, ship_attributes: loadout.ship_attributes, token: await reissueToken(fastify, request, loadout.ship_attributes, ship.factions) };
   }
 
   // The pilot's roster and the limits the lounge shows.

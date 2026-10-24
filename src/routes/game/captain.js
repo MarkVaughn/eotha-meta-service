@@ -81,7 +81,7 @@ export default async function captainRoutes(fastify) {
     return {
       captain: captainView(outcome.captain),
       ship_attributes: loadout.ship_attributes,
-      token: reissueToken(fastify, request, loadout.ship_attributes, ship.factions)
+      token: await reissueToken(fastify, request, loadout.ship_attributes, ship.factions)
     };
   });
 }

@@ -131,6 +131,11 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
 
 const MISSION_TYPE_NUMBERS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2, MISSION_TYPE_GATHER: 3 };
 const OFFER_WINDOW_MS = 30 * 60_000;
+const VISIBILITY_NUMBERS = { MISSION_VISIBILITY_UNSPECIFIED: 0, MISSION_VISIBILITY_OVERT: 1, MISSION_VISIBILITY_COVERT: 2 };
+const ARCHETYPE_NUMBERS = Object.fromEntries([
+  'UNSPECIFIED', 'DIPLOMAT_ESCORT', 'SABOTEUR_INSERTION', 'SYNDICATE_EXTRACTION', 'STRATEGIC_RECON',
+  'FORBIDDEN_PLANET_SURVEY', 'ARMS_DELIVERY', 'ILLEGAL_CARGO_SMUGGLE', 'TRAITOR_DEFECTOR_OP'
+].map((name, index) => [`MISSION_ARCHETYPE_${name}`, index]));
 
 /**
  * A mission offer signed the way the engine signs it (eotha-contracts `MissionOffer.signature`):
@@ -181,8 +186,10 @@ export function signedOffer(pilot, overrides = {}, signer = rtseKey) {
   const i32 = num('writeInt32LE', 4);
   const f64 = num('writeDoubleLE', 8);
   const u64 = (value) => num('writeBigUInt64LE', 8)(BigInt(value));
+  const visibility = typeof offer.visibility === 'number' ? offer.visibility : (VISIBILITY_NUMBERS[offer.visibility] ?? 0);
+  const archetype = typeof offer.archetype === 'number' ? offer.archetype : (ARCHETYPE_NUMBERS[offer.archetype] ?? 0);
   const payload = Buffer.concat([
-    Buffer.from('EOTHA_MISSION_OFFER_V1', 'ascii'),
+    Buffer.from(`EOTHA_MISSION_OFFER_V${visibility ? 2 : 1}`, 'ascii'),
     str(offer.pilot_id),
     u64(offer.offered_at_ms),
     str(offer.mission_id),
@@ -209,7 +216,12 @@ export function signedOffer(pilot, overrides = {}, signer = rtseKey) {
           str(offer.resource_type), u32(offer.min_grade), u32(offer.quantity_m3), str(offer.source_body_id),
           str(offer.source_system_h3), str(offer.source_node_h3), f64(offer.source_lat), f64(offer.source_lng)
         ]
-      : [])
+      : []),
+    ...(visibility ? [
+      u32(visibility), u32(archetype), str(offer.opposed_faction_id ?? ''), i32(offer.opposed_reputation_change ?? 0),
+      u64(offer.clandestine_bonus_credits ?? 0), Buffer.from([offer.carries_contraband_or_operative ? 1 : 0]),
+      str(offer.required_flying_colors_faction_id ?? '')
+    ] : [])
   ]);
   return { ...offer, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }

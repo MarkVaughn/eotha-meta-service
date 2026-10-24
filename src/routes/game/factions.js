@@ -82,7 +82,7 @@ export default async function factionsRoutes(fastify) {
       return { ship, factions: { ...ship.factions, active_colors: factionId } };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
-    return { success: true, active_colors: factionId, factions: outcome.factions, token: tokenFor(request, outcome.ship, outcome.factions) };
+    return { success: true, active_colors: factionId, factions: outcome.factions, token: await tokenFor(request, outcome.ship, outcome.factions) };
   });
 
   // Gives up Paragon standing with a faction: it drops to NON_PARAGON_CAP_WHEN_PARAGON_ACTIVE, so
@@ -104,7 +104,7 @@ export default async function factionsRoutes(fastify) {
       success: true,
       [`${factionId}Score`]: outcome.standing,
       factions: outcome.factions,
-      token: tokenFor(request, outcome.ship, outcome.factions)
+      token: await tokenFor(request, outcome.ship, outcome.factions)
     };
   });
 }
