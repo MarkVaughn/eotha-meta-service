@@ -19,7 +19,8 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
-import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
+import { deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
+import { doctorCooldownReduction } from '../../config/crew-morale.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import {
   MISSION_ARCHETYPES, MISSION_TYPES, MISSION_VISIBILITIES, isCovert, isLegacyRow, missionOfferVersion, verifyMissionOffer
@@ -126,6 +127,8 @@ const completeSchema = {
     type: 'object',
     required: ['claim'],
     properties: {
+      // Take the mission's pay as the pilot's whole and owe the crew their cut (see deferCrewPay).
+      deferCrewPay: { type: 'boolean', default: false },
       claim: {
         type: 'object',
         required: [
@@ -427,7 +430,7 @@ export default async function missionsRoutes(fastify) {
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
   // the payout would overflow credits.
-  async function settle(request, active, claim) {
+  async function settle(request, active, claim, deferred = false) {
     const playerId = request.user.sub;
     const stationId = active.offer.origin_station_id;
     const missionId = active.mission_id;
@@ -461,7 +464,8 @@ export default async function missionsRoutes(fastify) {
         });
         // The crew aboard take their share of the signed reward; the pilot is credited the rest.
         // Guarded increment; throwing rolls back the mission delete and payout record.
-        const payout = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, claim.rewardCredits);
+        const payroll = await payrollCrewOf(tx, playerId, ship);
+        const payout = deductCrewRevenueShare(payroll, ship.traits, claim.rewardCredits, { deferred });
         const { count: credited } = await tx.player.updateMany({
           where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - payout.netCredits } },
           data: { credits: { increment: payout.netCredits } }
@@ -478,14 +482,22 @@ export default async function missionsRoutes(fastify) {
         await adjustMissionReputation(tx, playerId, factionId, reputationChange,
           covert && claim.wasDetected ? active.offer.opposed_faction_id : null,
           covert && claim.wasDetected ? claim.opposedReputationChange : 0, { reason, missionId });
-        await startCooldown(tx, playerId, stationId, Date.now(), MISSION_COOLDOWN_MS);
+        const cooldownMs = Math.round(MISSION_COOLDOWN_MS * (1 - doctorCooldownReduction(ship.crew)));
+        await startCooldown(tx, playerId, stationId, Date.now(), cooldownMs);
         const passengersAboard = unboarded(ship, active.offer.required_berths);
         await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
         const standings = await standingsOf(tx, playerId);
         const factions = await factionsClaim(tx, playerId);
         // Captain XP rides on the payout record above: a replayed claim never reaches this line.
         const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true });
-        return { credits: player.credits, payout, reputationChange, standings, factions, ship, passengersAboard, captain, ...(lots && { lots }) };
+        // Morale and seniority follow the settlement; the token below carries the crew as it now stands.
+        const settledCrew = await recordCrewSettlement(tx, ship, payroll, {
+          settlement: missionSettlement(active.offer), payout, deferred, captainXp: captain.xpGained
+        });
+        return {
+          credits: player.credits, payout, reputationChange, standings, factions, ship: { ...ship, crew: settledCrew.crew },
+          passengersAboard, captain, crewMorale: settledCrew.effects, ...(lots && { lots })
+        };
       });
     } catch (err) {
       if (err === OVERFLOW) return OVERFLOW;
@@ -559,7 +571,7 @@ export default async function missionsRoutes(fastify) {
     }
 
     // 5. Atomic settlement: payout (less the crew's share), reputation (with any Flying Colors bonus), cooldown, captain XP, and the passengers disembark.
-    const settled = await settle(request, active, claim);
+    const settled = await settle(request, active, claim, request.body.deferCrewPay);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
     if (settled.refusal) return reply.code(409).send(settled.refusal);
@@ -572,6 +584,7 @@ export default async function missionsRoutes(fastify) {
       reputation_change: settled.reputationChange,
       standings: settled.standings,
       ...settled.captain,
+      ...(settled.crewMorale.length > 0 && { crew_morale: settled.crewMorale }),
       ...(settled.lots && { lots: settled.lots }),
       token: await tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
     };

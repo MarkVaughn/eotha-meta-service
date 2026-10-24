@@ -7,8 +7,9 @@ import {
   verifyPlanetChartKey,
   verifySystemChartSignature
 } from '../../lib/chart-claim.js';
-import { deductCrewRevenueShare, payrollCrewOf } from '../../lib/crew.js';
-import { lockActiveShip } from '../../lib/ship.js';
+import { SETTLEMENT } from '../../config/crew-morale.js';
+import { deductCrewRevenueShare, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
+import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const PLANET_CHART_PAYOUT = 500;
 const SYSTEM_CHART_PAYOUT = 2500;
@@ -81,6 +82,8 @@ const sellSchema = {
     properties: {
       planetId: id,
       systemH3: { type: 'string', pattern: H3_PATTERN },
+      // Take the whole reward and owe the crew their cut (see POST /game/crew/pay-arrears).
+      deferCrewPay: { type: 'boolean', default: false },
       // Charts sell at any station; the id is only format-checked (there is no station registry).
       stationId: { type: 'string', pattern: STATION_PATTERN }
     }
@@ -257,7 +260,7 @@ export default async function chartsRoutes(fastify) {
   });
 
   fastify.post('/charts/sell', { schema: sellSchema }, async (request, reply) => {
-    const { planetId, systemH3 } = request.body;
+    const { planetId, systemH3, deferCrewPay } = request.body;
     const playerId = request.user.sub;
     if ((planetId === undefined) === (systemH3 === undefined)) {
       return reply.code(400).send({ error: 'Provide exactly one of planetId or systemH3.' });
@@ -278,15 +281,32 @@ export default async function chartsRoutes(fastify) {
       // Guarded on soldAt so a chart pays out at most once.
       const { count } = await txModel.updateMany({ where: { ...where, soldAt: null }, data: { soldAt: new Date() } });
       if (count !== 1) return null;
-      const payout = deductCrewRevenueShare(await payrollCrewOf(tx, playerId, ship), ship.traits, rewardCredits);
+      const payroll = await payrollCrewOf(tx, playerId, ship);
+      const payout = deductCrewRevenueShare(payroll, ship.traits, rewardCredits, { deferred: deferCrewPay });
       const player = await tx.player.update({
         where: { id: playerId },
         data: { credits: { increment: payout.netCredits } },
         select: { credits: true }
       });
-      return { payout, newBalance: player.credits };
+      const settled = await recordCrewSettlement(tx, ship, payroll, {
+        settlement: { kind: SETTLEMENT.CHART_SALE, chart: isPlanet ? 'PLANET' : 'SYSTEM' }, payout, deferred: deferCrewPay
+      });
+      return { payout, newBalance: player.credits, settled, ship };
     });
     if (sale === null) return reply.code(409).send({ error: 'Chart has already been sold.' });
-    return { sold: true, rewardCredits, newBalance: sale.newBalance, ...sale.payout };
+    // Morale moved: the token carries the crew as it now stands.
+    const moved = sale.settled.effects.length > 0;
+    return {
+      sold: true,
+      rewardCredits,
+      newBalance: sale.newBalance,
+      ...sale.payout,
+      ...(moved && {
+        crew_morale: sale.settled.effects,
+        token: await reissueToken(fastify, request,
+          toLoadout(sale.ship.id, sale.ship.components, sale.ship.passengersAboard, sale.ship.traits, sale.settled.crew).ship_attributes,
+          sale.ship.factions)
+      })
+    };
   });
 }
