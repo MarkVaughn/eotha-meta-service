@@ -80,7 +80,11 @@ model Captain {
 // only by promotion, a later phase); `wageShareBp` is the rank's base share at hire, the effective
 // share (quirk, captain traits) being derived when a payout settles. `morale`, `seniorityXp`,
 // `unutilizedStreak` and `unpaidArrearsCredits` are kept for the morale and seniority phases and stay
-// at their defaults until they exist.
+// at their defaults until they exist. `sourceCandidateId` is the board candidate the member was hired
+// as: the board leaves that candidate out and refuses a second hire of them while the member is on
+// the roster. It is null on members hired before it existed, who never match a candidate. It is not
+// unique: a unique index would make `db push` demand --accept-data-loss, and hires are already
+// serialised per pilot by the lock in lockActiveShip.
 model CrewMember {
   id                   String     @id @default(uuid()) @db.Uuid
   playerId             String     @db.Uuid
@@ -99,6 +103,7 @@ model CrewMember {
   unpaidArrearsCredits Int        @default(0)
   homeFactionId        String     @default("independent")
   hiredAtStationId     String
+  sourceCandidateId    String?
   hiredAt              DateTime   @default(now())
   updatedAt            DateTime   @updatedAt
 

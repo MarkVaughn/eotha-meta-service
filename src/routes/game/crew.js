@@ -9,7 +9,7 @@ import {
 } from '../../config/crew.js';
 import { UUID_PATTERN } from '../../config/patterns.js';
 import { candidateView, findCandidate, generateCrewBoard, unavailableReasons } from '../../lib/crew-generator.js';
-import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, primaryReason, standbyCrewOf } from '../../lib/crew.js';
+import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, primaryReason, standbyCrewOf } from '../../lib/crew.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { isLegacyRow } from '../../lib/mission-offer.js';
 import { standingsOf } from '../../lib/reputation.js';
@@ -53,6 +53,7 @@ const MESSAGES = {
   docked_receipt_invalid: 'The docked receipt is not valid for this pilot.',
   docked_receipt_wrong_station: 'The docked receipt is for a different station.',
   candidate_not_found: 'This station is not offering that candidate; its board may have refreshed.',
+  candidate_already_hired: 'That candidate is already on your roster.',
   crew_not_found: 'No such crew member on your roster.',
   hull_crew_cap_reached: "The hull cannot take more active crew.",
   insufficient_free_berths: 'There is no free life support berth for another crew member.',
@@ -67,6 +68,7 @@ const MESSAGES = {
 };
 const STATUS = {
   candidate_not_found: 404,
+  candidate_already_hired: 409,
   crew_not_found: 404,
   hull_crew_cap_reached: 400,
   insufficient_free_berths: 400,
@@ -134,7 +136,9 @@ export default async function crewRoutes(fastify) {
   });
 
   // The station's candidates this window, each with whether this pilot can hire them. The board is the
-  // same for every pilot and cannot be rerolled by refreshing, so it needs no receipt.
+  // same for every pilot and cannot be rerolled by refreshing, so it needs no receipt. Only a candidate
+  // already on this pilot's roster is left out, so the others keep their places and the board may show
+  // fewer than four.
   fastify.get('/crew/board', { schema: boardSchema }, async (request) => {
     const { stationId } = request.query;
     const nowMs = Date.now();
@@ -142,12 +146,17 @@ export default async function crewRoutes(fastify) {
     const ctx = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const player = await tx.player.findUnique({ where: { id: request.user.sub }, select: { credits: true } });
-      return { ship, credits: player.credits, standings: await standingsOf(tx, request.user.sub) };
+      return {
+        ship,
+        credits: player.credits,
+        standings: await standingsOf(tx, request.user.sub),
+        hired: await hiredCandidateIdsOf(tx, request.user.sub)
+      };
     });
     return {
       stationId,
       window: { startsAt: new Date(window.startsAtMs).toISOString(), expiresAt: new Date(window.expiresAtMs).toISOString() },
-      candidates: candidates.map((candidate) => candidateView(candidate, ctx)),
+      candidates: candidates.filter((candidate) => !ctx.hired.has(candidate.candidateId)).map((candidate) => candidateView(candidate, ctx)),
       credits: ctx.credits
     };
   });
@@ -163,6 +172,7 @@ export default async function crewRoutes(fastify) {
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const playerId = request.user.sub;
+      if ((await hiredCandidateIdsOf(tx, playerId)).has(candidate.candidateId)) return { refused: { code: 'candidate_already_hired' } };
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
       const reasons = unavailableReasons(candidate, { ship, credits: player.credits, standings: await standingsOf(tx, playerId) });
       if (reasons.length > 0) return { refused: reasonRefusal(primaryReason(reasons), reasons) };
@@ -183,7 +193,8 @@ export default async function crewRoutes(fastify) {
           morale: startingMorale(candidate.quirkId, ship.traits),
           wageShareBp: CREW_WAGE_SHARE_BP[candidate.rank],
           homeFactionId: candidate.homeFactionId,
-          hiredAtStationId: stationId
+          hiredAtStationId: stationId,
+          sourceCandidateId: candidate.candidateId
         }
       });
       return { ship, member, credits: player.credits - bonus, crew: await activeCrewOf(tx, ship.id) };
