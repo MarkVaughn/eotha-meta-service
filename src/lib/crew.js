@@ -216,11 +216,14 @@ export const missionSettlement = (offer) => ({
  * class's utilization predicate: a utilized one resets its idle streak, gains morale if the pay was
  * not deferred and, when a mission awarded the Captain `captainXp`, the same seniority XP; an idle one
  * counts a missed settlement and loses morale past its grace. When the pay was `deferred`, every
- * member of `payroll` owed a cut (`payout.crewPayouts`) goes into arrears for it and loses
+ * member of `payroll` goes into arrears for its cut (`payout.crewPayouts`) and loses
  * MORALE_DECAY_DEFERRED_PAY morale. Returns `{ crew, effects }`: the active crew as stored now (for the
  * token the caller reissues) and what happened to each member who changed.
  */
 export async function recordCrewSettlement(tx, ship, payroll, { settlement, payout, deferred, captainXp = 0 }) {
+  // All three payout routes share this marker; retries never reach settlement a second time.
+  await tx.spaceship.update({ where: { id: ship.id }, data: { crewPayoutSinceDock: true } });
+  ship.crewPayoutSinceDock = true;
   if (payroll.length === 0) return { crew: ship.crew, effects: [] };
   const aboard = new Set(ship.crew.map((member) => member.id));
   const attributes = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, ship.crew);
@@ -245,7 +248,7 @@ export async function recordCrewSettlement(tx, ship, payroll, { settlement, payo
       }
     }
     const deferredCredits = deferred ? owed.get(member.id) ?? 0 : 0;
-    if (deferredCredits > 0) {
+    if (deferred) {
       morale = moraleAfterLoss({ ...member, morale }, MORALE_DECAY_DEFERRED_PAY, ship.traits);
       unpaidArrearsCredits = Math.min(MAX_ARREARS_CREDITS, unpaidArrearsCredits + deferredCredits);
       effect.deferredCredits = deferredCredits;

@@ -1,7 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID, sign } from 'node:crypto';
-import { addCrew, app, call, closeApp, credits, json, newPilot, receiptAtOrigin, rtseKey, setCredits, signedOffer } from './helpers.js';
+import { addCrew, app, call, closeApp, credits, dockedReceipt, json, newPilot, receiptAtOrigin, rtseKey, setCredits, signedOffer } from './helpers.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 import { canonicalSaleRecordPayload } from '../src/lib/cargo.js';
 import { computeShipAttributes } from '../src/config/components.js';
@@ -69,8 +69,9 @@ describe('utilization and morale (pure)', () => {
     assert.deepEqual(out, { utilized: true, unutilizedStreak: 0, morale: 86 });
   });
 
-  test('a deferred settlement gains nothing', () => {
+  test('a deferred settlement gains nothing, and ordinary utilization cannot reverse resignation', () => {
     assert.equal(settleUtilization(member(), passage, ctx, { deferred: true, traits: [] }).morale, 75);
+    assert.equal(settleUtilization(member({ morale: 0 }), passage, ctx, { deferred: false, traits: [] }).morale, 0);
   });
 
   test('an idle member holds through the grace and then loses 6 a settlement', () => {
@@ -226,7 +227,10 @@ describe('mission settlement moves morale and seniority', () => {
   test('ASSERT-3.2.2: a Science officer idle for a third Passage loses 6 (75 -> 69)', async () => {
     const pilot = await newPilot('Idle');
     const crew = await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: NEUTRAL, morale: 75, unutilizedStreak: 2 });
-    assert.equal((await complete(pilot, await hold(pilot))).statusCode, 200);
+    const active = await hold(pilot);
+    // Acceptance also consumes shore leave; this assertion isolates the subsequent settlement.
+    await app.prisma.crewMember.update({ where: { id: crew.id }, data: { morale: 75 } });
+    assert.equal((await complete(pilot, active)).statusCode, 200);
     const after = await crewRow(crew.id);
     assert.deepEqual([after.unutilizedStreak, after.morale], [3, 69]);
   });
@@ -247,6 +251,7 @@ describe('mission settlement moves morale and seniority', () => {
     const pilot = await newPilot('Defer');
     const crew = await addCrew(pilot, { crewClass: 'PILOT', quirkId: NEUTRAL, morale: 75, wageShareBp: 500 });
     const active = await hold(pilot, { reward_credits: 2500 });
+    await app.prisma.crewMember.update({ where: { id: crew.id }, data: { morale: 75 } });
     const res = await complete(pilot, active, { deferCrewPay: true });
     assert.equal(res.statusCode, 200, res.body);
     const body = json(res);
@@ -255,6 +260,26 @@ describe('mission settlement moves morale and seniority', () => {
     const after = await crewRow(crew.id);
     assert.deepEqual([after.unpaidArrearsCredits, after.morale], [125, 50]);
     assert.equal(await credits(pilot), 2500);
+  });
+
+  test('optional dock receipt applies fatigue/recovery, not a stipend for this paid flight, and rejects tampering', async () => {
+    const pilot = await newPilot('MissionDock');
+    const crew = await addCrew(pilot, { crewClass: 'PILOT', quirkId: NEUTRAL, morale: 75 });
+    const active = await hold(pilot);
+    const at = Date.now() - 1000;
+    const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id, active: true } });
+    await app.prisma.spaceship.update({ where: { id: ship.id }, data: { lastCrewDockedAtMs: BigInt(at - 90 * 60_000) } });
+    const receipt = dockedReceipt(pilot, { dockedAtMs: at });
+    const bad = await complete(pilot, active, { dockedReceipt: { ...receipt, dockedAtMs: at - 1 } });
+    assert.equal(bad.statusCode, 403);
+    const res = await complete(pilot, active, { dockedReceipt: receipt });
+    assert.equal(res.statusCode, 200, res.body);
+    const body = json(res);
+    assert.equal(body.docking.effects[0].fatigueIntervals, 3);
+    assert.equal(body.docking.effects[0].stipendCredits, undefined);
+    assert.equal(body.credits, 2375);
+    assert.equal((await app.prisma.spaceship.findUnique({ where: { id: ship.id } })).crewPayoutSinceDock, false);
+    assert.ok(await crewRow(crew.id));
   });
 
   test('standby crew owed a deferred cut lose morale too, and are owed it', async () => {
@@ -309,6 +334,23 @@ describe('chart and cargo sales', () => {
     assert.ok(app.jwt.verify(body.token).ship_attributes);
   });
 
+  test('chart sale consumes a signed dock once, rejects a forged one, and suppresses the paid-flight stipend', async () => {
+    const pilot = await newPilot('ChartDock');
+    await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: NEUTRAL, morale: 70 });
+    await chart(pilot);
+    const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id, active: true } });
+    const at = Date.now() - 1000;
+    await app.prisma.spaceship.update({ where: { id: ship.id }, data: { lastCrewDockedAtMs: BigInt(at - 90 * 60_000) } });
+    const receipt = dockedReceipt(pilot, { dockedAtMs: at });
+    assert.equal((await sellChart(pilot, { dockedReceipt: { ...receipt, dockedAtMs: 0 } })).statusCode, 403);
+    const res = await sellChart(pilot, { dockedReceipt: receipt });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).docking.effects[0].fatigueIntervals, 3);
+    assert.equal(json(res).docking.effects[0].stipendCredits, undefined);
+    assert.equal(json(res).newBalance, 475);
+    assert.equal((await sellChart(pilot, { dockedReceipt: receipt })).statusCode, 409);
+  });
+
   test('a deferred chart sale pays the pilot in full and the crew into arrears', async () => {
     const pilot = await newPilot('ChartDefer');
     const crew = await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: NEUTRAL, morale: 70, wageShareBp: 500 });
@@ -317,6 +359,15 @@ describe('chart and cargo sales', () => {
     assert.deepEqual([body.newBalance, body.crewShareCredits, body.deferredCrewShareCredits], [500, 0, 25]);
     const after = await crewRow(crew.id);
     assert.deepEqual([after.morale, after.unpaidArrearsCredits], [45, 25]);
+  });
+
+  test('deferral still costs 25 morale when the wage cut rounds down to zero', async () => {
+    const pilot = await newPilot('TinyWage');
+    const crew = await addCrew(pilot, { crewClass: 'PILOT', quirkId: NEUTRAL, morale: 75, wageShareBp: 500 });
+    const active = await hold(pilot, { reward_credits: 1 });
+    await app.prisma.crewMember.update({ where: { id: crew.id }, data: { morale: 75 } });
+    assert.equal((await complete(pilot, active, { deferCrewPay: true })).statusCode, 200);
+    assert.deepEqual([(await crewRow(crew.id)).morale, (await crewRow(crew.id)).unpaidArrearsCredits], [50, 0]);
   });
 
   test('a crew-less chart sale answers exactly as before', async () => {
@@ -337,8 +388,15 @@ describe('chart and cargo sales', () => {
       leaseId: cargo.lease_id, sessionId: randomUUID(), seq: 1, remaining: []
     };
     const saleRecord = { ...fields, signature: sign(null, canonicalSaleRecordPayload(fields), rtseKey).toString('base64') };
-    const res = await call(pilot, 'POST', '/game/cargo/sell', { saleRecord });
+    const receipt = dockedReceipt(pilot);
+    const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id, active: true } });
+    await app.prisma.spaceship.update({ where: { id: ship.id }, data: { lastCrewDockedAtMs: BigInt(receipt.dockedAtMs - 90 * 60_000) } });
+    assert.equal((await call(pilot, 'POST', '/game/cargo/sell', { saleRecord, dockedReceipt: { ...receipt, dockedAtMs: 0 } })).statusCode, 403);
+    const res = await call(pilot, 'POST', '/game/cargo/sell', { saleRecord, dockedReceipt: receipt });
     assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).docking.effects[0].fatigueIntervals, 3);
+    assert.equal(json(res).docking.effects[0].stipendCredits, undefined);
+    assert.equal(json(res).credits, 950);
     assert.equal(json(res).crew_morale[0].morale, 74);
     assert.ok(json(res).token);
     assert.equal(json(res).ship, undefined);

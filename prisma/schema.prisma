@@ -154,6 +154,20 @@ model Spaceship {
   flightMsSinceLeave Int       @default(0)
   lastLeaveStationId String?
   lastLeaveAt        DateTime?
+  // Consecutive signed docking times approximate flight until receipts carry an undock time.
+  lastCrewDockedAtMs BigInt?
+  crewPayoutSinceDock Boolean @default(false)
+  shoreLeaveStations CrewShoreLeave[]
+}
+
+// Recovery is throttled per station, not merely at the most recently visited dock (A-B-A).
+model CrewShoreLeave {
+  spaceshipId String @db.Uuid
+  spaceship Spaceship @relation(fields: [spaceshipId], references: [id], onDelete: Cascade)
+  stationId String
+  lastLeaveAtMs BigInt
+
+  @@id([spaceshipId, stationId])
 }
 
 model ShipComponentRecord {

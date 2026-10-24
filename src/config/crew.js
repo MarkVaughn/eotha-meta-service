@@ -61,6 +61,14 @@ export const UNUTILIZED_GRACE_MISSIONS = 2;
 export const MORALE_DECAY_UNUTILIZED = 6;
 export const MORALE_DECAY_DEFERRED_PAY = 25;
 export const MORALE_GAIN_PAY_ARREARS = 15;
+export const SHORE_LEAVE_GRACE_MS = 2_700_000;
+export const SHORE_LEAVE_DECAY_INTERVAL_MS = 900_000;
+export const SHORE_LEAVE_STATION_GAIN = 15;
+export const SHORE_LEAVE_OUTPOST_GAIN = 5;
+export const SHORE_LEAVE_COOLDOWN_MS = 900_000;
+export const FLIGHT_STIPEND_AFTER_MS = 3_600_000;
+export const FLIGHT_STIPEND_CREDITS = Object.freeze({ NOVICE: 40, ADEPT: 80, MASTER: 150 });
+export const FLAKY_UNDOCK_LEAVE_CHANCE = 0.10;
 
 // Seniority XP a crew member needs to be promoted into a rank, and the training fee at a station.
 export const CREW_TRAINING_XP_REQ = Object.freeze({ ADEPT: 1500, MASTER: 5000 });

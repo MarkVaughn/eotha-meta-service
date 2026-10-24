@@ -15,6 +15,8 @@ import {
 import { SETTLEMENT } from '../../config/crew-morale.js';
 import { deductCrewRevenueShare, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
+import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
+import { recordCrewDock } from '../../lib/crew-docking.js';
 
 const manifestSchema = {
   body: { type: 'object', required: ['manifest'], properties: { manifest: cargoManifestSchema } }
@@ -25,7 +27,7 @@ const sellSchema = {
     type: 'object',
     required: ['saleRecord'],
     // `deferCrewPay` takes the whole sale and owes the crew their cut (see POST /game/crew/pay-arrears).
-    properties: { saleRecord: saleRecordSchema, deferCrewPay: { type: 'boolean', default: false } }
+    properties: { saleRecord: saleRecordSchema, deferCrewPay: { type: 'boolean', default: false }, dockedReceipt: dockedReceiptSchema }
   }
 };
 
@@ -90,7 +92,11 @@ export default async function cargoRoutes(fastify) {
   // the current balance.
   fastify.post('/cargo/sell', { schema: sellSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
-    const { saleRecord, deferCrewPay } = request.body;
+    const { saleRecord, deferCrewPay, dockedReceipt } = request.body;
+    if (dockedReceipt) {
+      const refused = dockedReceiptRefusal(dockedReceipt, { pilotId: playerId, publicKey: fastify.claimKey.key, nowMs: Date.now(), log: request.log });
+      if (refused) return reply.code(403).send(refused);
+    }
     if (saleRecord.pilotId !== playerId || !verifySaleRecord(saleRecord, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'The sale record is not valid for this pilot.', code: 'sale_record_invalid' });
     }
@@ -99,7 +105,7 @@ export default async function cargoRoutes(fastify) {
     let outcome;
     try {
       outcome = await prisma.$transaction(async (tx) => {
-        const ship = await lockActiveShip(tx, request.user);
+        let ship = await lockActiveShip(tx, request.user);
         // The lock serialises this lookup with every other sale of the pilot's.
         const sale = await tx.cargoSale.findUnique({ where: { nonce } });
         if (sale && sale.playerId !== playerId) {
@@ -107,6 +113,7 @@ export default async function cargoRoutes(fastify) {
         }
         let split;
         let settled;
+        let docking;
         if (!sale) {
           const { outcome: write } = await applyCargoWrite(tx, playerId, writeOf(saleRecord, toStoredLots(saleRecord.remaining)));
           if (CARGO_REFUSALS[write]) return { refusal: CARGO_REFUSALS[write] };
@@ -136,6 +143,8 @@ export default async function cargoRoutes(fastify) {
           settled = await recordCrewSettlement(tx, ship, payroll, {
             settlement: { kind: SETTLEMENT.CARGO_SALE }, payout: split, deferred: deferCrewPay
           });
+          ship = { ...ship, crew: settled.crew };
+          if (dockedReceipt) ({ ship, docking } = await recordCrewDock(tx, ship, dockedReceipt));
         }
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         const { lots } = holdView(await currentLease(tx, playerId));
@@ -151,7 +160,8 @@ export default async function cargoRoutes(fastify) {
           netCredits: grossCredits - crewShareCredits,
           ...(split && { crewPayouts: split.crewPayouts }),
           ...(split?.deferredCrewShareCredits !== undefined && { deferredCrewShareCredits: split.deferredCrewShareCredits }),
-          ...(settled?.effects.length && { crew_morale: settled.effects, ship: { ...ship, crew: settled.crew } }),
+          ...(settled?.effects.length && { crew_morale: settled.effects, ship }),
+          ...(docking && { docking, ship }),
           lots,
           replayed: Boolean(sale)
         };

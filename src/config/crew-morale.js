@@ -103,7 +103,8 @@ export function settleUtilization(member, settlement, ctx, { deferred, traits })
     return {
       utilized,
       unutilizedStreak: 0,
-      morale: deferred ? member.morale : moraleAfterGain(member, MORALE_GAIN_UTILIZED_PAID)
+      // Resignation is recovered only through the back-pay bonus, never a free payout gain.
+      morale: deferred || member.morale === 0 ? member.morale : moraleAfterGain(member, MORALE_GAIN_UTILIZED_PAID)
     };
   }
   const quirk = QUIRKS[member.quirkId];
