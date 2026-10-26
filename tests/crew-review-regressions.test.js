@@ -98,6 +98,20 @@ describe('AGY H1/M2: implicit docks never silently delete resigned crew', () => 
     assert.equal(await row(crew.id), null);
     assert.equal(await credits(pilot), 1000);
   });
+  test('a FLAKY Engineer whose budget backs the loadout stays aboard through the acceptance roll', async () => {
+    const { pilot } = await baseline({ withCrew: false, minutes: 10 });
+    const now = Date.now();
+    const offer = signedOffer(pilot, { required_berths: 0 });
+    let id;
+    do { id = randomUUID(); } while (![now, now + 900_000].every((at) => flakyDeparture({ id, quirkId: 'Q12', morale: 65 }, offer.origin_station_id, at)));
+    const engineer = await addCrew(pilot, { id, crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: 'Q12', morale: 65 });
+    const ship = await shipOf(pilot);
+    await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } }, data: { tier: 2 } });
+    const res = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).departed_crew, undefined);
+    assert.ok(await row(engineer.id));
+  });
   test('an already resigned FLAKY member cannot bypass explicit shore-leave resolution on acceptance', async () => {
     const { pilot } = await baseline({ withCrew: false });
     const offer = signedOffer(pilot, { required_berths: 0 });

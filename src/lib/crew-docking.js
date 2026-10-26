@@ -6,6 +6,7 @@ import {
   SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_OUTPOST_GAIN, SHORE_LEAVE_STATION_GAIN
 } from '../config/crew.js';
 import { moraleAfterCappedGain, moraleAfterLoss, restedMoraleCap } from '../config/crew-morale.js';
+import { computeShipAttributes, hullBudget, totalSubsystemPoints } from '../config/components.js';
 import { activeCrewOf, standbyCrewOf } from './crew.js';
 
 export const fatigueIntervals = (ms, member = {}) => Math.floor(Math.max(0,
@@ -33,7 +34,16 @@ export function flakyDeparture(member, stationId, nowMs) {
 // Only working crew roll at mission acceptance. Resigned members await explicit shore leave;
 // mining-only undocks still need a signed contracts/engine event. The approved roll is unchanged.
 export async function recordFlakyDeparture(tx, ship, receipt, nowMs, docking) {
-  const departed = ship.crew.filter((m) => m.morale > 0 && flakyDeparture(m, receipt.dockedEntityId, nowMs));
+  const departed = [];
+  let remaining = ship.crew;
+  for (const m of ship.crew) {
+    if (m.morale <= 0 || !flakyDeparture(m, receipt.dockedEntityId, nowMs)) continue;
+    const rest = remaining.filter((other) => other !== m);
+    const { hull_tier: hullTier } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, rest);
+    if (totalSubsystemPoints(ship.components) > hullBudget(hullTier, ship.traits, rest)) continue;
+    departed.push(m);
+    remaining = rest;
+  }
   if (departed.length) {
     const ids = departed.map((m) => m.id);
     await tx.crewMember.deleteMany({ where: { id: { in: ids } } });
