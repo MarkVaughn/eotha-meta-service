@@ -1,12 +1,15 @@
-import { computeShipAttributes, hullBudget, totalSubsystemPoints } from '../../config/components.js';
 import {
   CREW_STATUS,
   CREW_WAGE_SHARE_BP,
+  ENGINEER_JURY_RIG_TYPES,
+  engineerJuryRigSlots,
   MAX_STANDBY_CREW,
+  MORALE_GAIN_PAY_ARREARS,
   STANDBY_TRANSFER_FEE_CREDITS,
   signingBonusCredits,
   startingMorale
 } from '../../config/crew.js';
+import { moraleAfterCappedGain, moraleBand, promotionRefusal, promotionTerms, restedMoraleCap } from '../../config/crew-morale.js';
 import { UUID_PATTERN } from '../../config/patterns.js';
 import { candidateView, findCandidate, generateCrewBoard, unavailableReasons } from '../../lib/crew-generator.js';
 import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, primaryReason, standbyCrewOf } from '../../lib/crew.js';
@@ -14,6 +17,7 @@ import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } f
 import { isLegacyRow } from '../../lib/mission-offer.js';
 import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
+import { recordCrewDock } from '../../lib/crew-docking.js';
 
 // `dockedReceipt` is optional in the schema on purpose, like the captain trait route: its absence is
 // answered with the coded 403 `docked_receipt_required` rather than a generic schema 400.
@@ -48,6 +52,30 @@ const crewActionSchema = {
   }
 };
 
+const juryRigSchema = {
+  body: {
+    type: 'object', required: ['crewId', 'componentTypes'], additionalProperties: false,
+    properties: {
+      crewId: crewIdProperty,
+      componentTypes: { type: 'array', uniqueItems: true, maxItems: 2, items: { type: 'string', enum: ENGINEER_JURY_RIG_TYPES } },
+      ...receiptProperties
+    }
+  }
+};
+
+const payArrearsSchema = {
+  body: {
+    type: 'object',
+    additionalProperties: false,
+    properties: { crewId: crewIdProperty, ...receiptProperties }
+  }
+};
+const shoreLeaveSchema = {
+  body: { type: 'object', additionalProperties: false, properties: {
+    ...receiptProperties, payResignedArrears: { type: 'boolean', default: false }
+  } }
+};
+
 const MESSAGES = {
   docked_receipt_required: 'Crew can only be hired or moved in port, which needs a current docked receipt from the engine.',
   docked_receipt_invalid: 'The docked receipt is not valid for this pilot.',
@@ -61,10 +89,19 @@ const MESSAGES = {
   insufficient_faction_rep: "Your standing with the candidate's home faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
   crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
-  engineer_required_for_loadout: 'The installed components need the hull budget this Engineer provides; step a component down first.',
+  crew_not_engineer: 'Only an Engineer can configure component overdrive.',
+  jury_rig_slots_exceeded: 'That Engineer cannot overdrive that many components.',
+  COMPONENT_NOT_INSTALLED: 'Overdrive requires an installed component; Tier 0 is unequipped.',
+  jury_rig_already_max_tier: 'Tier 5 cannot be overdriven to Tier 6; select a lower-tier component.',
   standby_full: `Harbor Standby holds at most ${MAX_STANDBY_CREW} crew members.`,
   crew_not_on_standby: 'That crew member is not on Harbor Standby.',
-  crew_not_active: 'That crew member is not aboard.'
+  crew_not_active: 'That crew member is not aboard.',
+  crew_resigned: 'A resigned crew member must be recovered through shore leave before returning aboard.',
+  already_master: 'That crew member is already a Master.',
+  insufficient_seniority_xp: 'That crew member has not earned enough Seniority XP for the next rank.',
+  crew_refuses_promotion: 'A Mutinous crew member refuses training until their morale recovers.',
+  no_arrears: 'No crew pay is owed.',
+  resignation_requires_new_dock: 'Resigned crew require a new signed docking receipt and twice their arrears to stay.'
 };
 const STATUS = {
   candidate_not_found: 404,
@@ -76,10 +113,19 @@ const STATUS = {
   insufficient_faction_rep: 403,
   insufficient_credits: 402,
   crew_locked_by_active_mission: 409,
-  engineer_required_for_loadout: 409,
+  crew_not_engineer: 409,
+  jury_rig_slots_exceeded: 409,
+  COMPONENT_NOT_INSTALLED: 409,
+  jury_rig_already_max_tier: 409,
   standby_full: 409,
   crew_not_on_standby: 409,
-  crew_not_active: 409
+  crew_not_active: 409,
+  crew_resigned: 409,
+  already_master: 409,
+  insufficient_seniority_xp: 409,
+  crew_refuses_promotion: 409,
+  no_arrears: 409,
+  resignation_requires_new_dock: 409
 };
 
 // `{ error: <code>, message, ...details }`, the shape the crew routes answer refusals with.
@@ -181,6 +227,8 @@ export default async function crewRoutes(fastify) {
       // Guarded decrement: only succeeds while the stored balance still covers the bonus.
       const paid = await tx.player.updateMany({ where: { id: playerId, credits: { gte: bonus } }, data: { credits: { decrement: bonus } } });
       if (paid.count !== 1) return { refused: { code: 'insufficient_credits', requiredCredits: bonus } };
+      // Settle the old crew's leg before this candidate joins it.
+      const dock = await recordCrewDock(tx, ship, request.body.dockedReceipt);
       const member = await tx.crewMember.create({
         data: {
           playerId,
@@ -197,26 +245,21 @@ export default async function crewRoutes(fastify) {
           sourceCandidateId: candidate.candidateId
         }
       });
-      return { ship, member, credits: player.credits - bonus, crew: await activeCrewOf(tx, ship.id) };
+      const balance = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { ship: dock.ship, docking: dock.docking, member, credits: balance.credits, crew: await activeCrewOf(tx, ship.id) };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
 
     const { ship, member, credits, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits });
+    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits,
+      ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
-  // The guards both ways of taking a crew member off the ship share: no mission held (a pilot could
-  // otherwise fire the crew just before a payout to dodge their share) and, for an Engineer, the
-  // installed components still fit the hull budget without them. Returns a refusal or undefined.
-  async function leaveRefusal(tx, ship, member) {
+  // Keep the phase-2 mission wage-dodging guard. Engineer removal needs no loadout guard:
+  // only effective operation falls back; stored components, credits and hull budget never change.
+  async function leaveRefusal(tx, ship) {
     const held = await tx.playerMission.findMany({ where: { playerId: ship.playerId } });
     if (held.some((row) => !isLegacyRow(row))) return { code: 'crew_locked_by_active_mission' };
-    const remaining = ship.crew.filter((other) => other.id !== member.id);
-    const { hull_tier: hullTier } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, remaining);
-    const requiredBudget = totalSubsystemPoints(ship.components);
-    if (requiredBudget > hullBudget(hullTier, ship.traits, remaining)) {
-      return { code: 'engineer_required_for_loadout', requiredBudget, baseBudget: hullBudget(hullTier, ship.traits, remaining) };
-    }
     return undefined;
   }
 
@@ -227,7 +270,7 @@ export default async function crewRoutes(fastify) {
       const ship = await lockActiveShip(tx, request.user);
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
-      const refused = await leaveRefusal(tx, ship, member);
+      const refused = await leaveRefusal(tx, ship);
       if (refused) return { refused };
       await tx.crewMember.delete({ where: { id: member.id } });
       return { ship, crew: await activeCrewOf(tx, ship.id) };
@@ -245,7 +288,7 @@ export default async function crewRoutes(fastify) {
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
-      const refused = await leaveRefusal(tx, ship, member);
+      const refused = await leaveRefusal(tx, ship);
       if (refused) return { refused };
       if ((await standbyCrewOf(tx, playerId)).length >= MAX_STANDBY_CREW) return { refused: { code: 'standby_full', maxStandbyCrew: MAX_STANDBY_CREW } };
       const paid = await tx.player.updateMany({
@@ -271,13 +314,137 @@ export default async function crewRoutes(fastify) {
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.STANDBY) return { refused: { code: 'crew_not_on_standby' } };
+      if (member.morale === 0) return { refused: { code: 'crew_resigned' } };
       const reasons = boardingReasons(ship, member.crewClass);
       if (reasons.length > 0) return { refused: reasonRefusal(primaryReason(reasons), reasons) };
+      const dock = await recordCrewDock(tx, ship, request.body.dockedReceipt);
       const moved = await tx.crewMember.update({ where: { id: member.id }, data: { status: CREW_STATUS.ACTIVE, spaceshipId: ship.id } });
-      return { ship, member: moved, crew: await activeCrewOf(tx, ship.id) };
+      return { ship: dock.ship, docking: dock.docking, member: moved, crew: await activeCrewOf(tx, ship.id) };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     const { ship, member, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits) });
+    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits),
+      ...(outcome.docking.applied && { docking: outcome.docking }) });
+  });
+
+  // Configure an active Engineer's operation-only overdrive. Nothing purchases or mutates a stored
+  // component tier; the next signed attributes use selected components one tier higher while Nominal.
+  fastify.post('/crew/jury-rig', { schema: juryRigSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    if (!dockedStation(request, reply)) return reply;
+    const { crewId, componentTypes, dockedReceipt } = request.body;
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const member = await tx.crewMember.findFirst({ where: { id: crewId, playerId: request.user.sub } });
+      if (!member) return { refused: { code: 'crew_not_found' } };
+      if (member.crewClass !== 'ENGINEER') return { refused: { code: 'crew_not_engineer' } };
+      if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
+      const slots = engineerJuryRigSlots(member);
+      if (componentTypes.length > slots) return { refused: { code: 'jury_rig_slots_exceeded', slots } };
+      for (const type of componentTypes) {
+        const tier = ship.components.find((c) => c.type === type)?.tier ?? 0;
+        if (tier === 0) return { refused: { code: 'COMPONENT_NOT_INSTALLED', componentType: type } };
+        if (tier >= 5) return { refused: { code: 'jury_rig_already_max_tier', componentType: type } };
+      }
+      const dock = await recordCrewDock(tx, ship, dockedReceipt);
+      const updated = await tx.crewMember.update({ where: { id: crewId }, data: { juryRigComponentTypes: componentTypes } });
+      const player = await tx.player.findUnique({ where: { id: request.user.sub }, select: { credits: true } });
+      return { ship: dock.ship, member: updated, credits: player.credits, docking: dock.docking, crew: await activeCrewOf(tx, ship.id) };
+    });
+    if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
+    return respondWithShip(request, outcome.ship, outcome.crew, {
+      crew: crewMemberView(outcome.member, outcome.ship.traits), credits: outcome.credits,
+      ...(outcome.docking.applied && { docking: outcome.docking })
+    });
+  });
+
+  // Trains a crew member into the next rank at a station lounge: needs the Seniority XP for it and its
+  // fee, and a morale that has not fallen to Mutinous. Their wage share steps up with the rank.
+  fastify.post('/crew/promote', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    if (!dockedStation(request, reply)) return reply;
+    const playerId = request.user.sub;
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
+      if (!member) return { refused: { code: 'crew_not_found' } };
+      const refused = promotionRefusal(member);
+      if (refused) return { refused };
+      const { toRank, feeCredits } = promotionTerms(member);
+      // Guarded decrement, so concurrent spends cannot overdraw; the rank change rolls back with it.
+      const paid = await tx.player.updateMany({
+        where: { id: playerId, credits: { gte: feeCredits } },
+        data: { credits: { decrement: feeCredits } }
+      });
+      if (paid.count !== 1) return { refused: { code: 'insufficient_credits', requiredCredits: feeCredits } };
+      const promoted = await tx.crewMember.update({
+        where: { id: member.id },
+        data: { rank: toRank, wageShareBp: CREW_WAGE_SHARE_BP[toRank] }
+      });
+      const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { ship, member: promoted, credits: player.credits, feeCredits, crew: await activeCrewOf(tx, ship.id) };
+    });
+    if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
+    const { ship, member, credits, feeCredits, crew } = outcome;
+    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits, feeCredits });
+  });
+
+  fastify.post('/crew/shore-leave', { schema: shoreLeaveSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    if (!dockedStation(request, reply)) return reply;
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const result = await recordCrewDock(tx, ship, request.body.dockedReceipt, { ...request.body, allowDeparture: true });
+      const player = await tx.player.findUnique({ where: { id: request.user.sub }, select: { credits: true } });
+      return { ...result, credits: player.credits };
+    });
+    return respondWithShip(request, outcome.ship, outcome.ship.crew, {
+      docking: outcome.docking, credits: outcome.credits,
+      crew: outcome.ship.crew.map((m) => crewMemberView(m, outcome.ship.traits))
+    });
+  });
+
+  // Pays the wages a deferred settlement left owing, for one crew member or, without `crewId`, all of
+  // them, from the pilot's credits. Each paid member's morale recovers MORALE_GAIN_PAY_ARREARS, up to
+  // the rested cap. Working crew need no receipt; resigned crew need a new dock and twice back pay.
+  // Bulk requests without that proof pay working members and explicitly list skipped resignations.
+  fastify.post('/crew/pay-arrears', { schema: payArrearsSchema }, async (request, reply) => {
+    const playerId = request.user.sub;
+    if (request.body.dockedReceipt) {
+      if (!fastify.claimKey) return fastify.requireClaimKey(request, reply);
+      if (!dockedStation(request, reply)) return reply;
+    }
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const roster = [...ship.crew, ...(await standbyCrewOf(tx, playerId))];
+      const { crewId } = request.body;
+      if (crewId !== undefined && !roster.some((member) => member.id === crewId)) return { refused: { code: 'crew_not_found' } };
+      const receipt = request.body.dockedReceipt;
+      const newReceipt = receipt && (ship.lastCrewDockedAtMs == null || BigInt(receipt.dockedAtMs) > ship.lastCrewDockedAtMs);
+      const selected = roster.filter((member) => (member.unpaidArrearsCredits > 0 || member.morale === 0) && (crewId === undefined || member.id === crewId));
+      if (selected.length === 0) return { refused: { code: 'no_arrears' } };
+      const skipped = selected.filter((m) => m.morale === 0 && !newReceipt)
+        .map((m) => ({ crewId: m.id, reason: 'resignation_requires_new_dock' }));
+      if (crewId !== undefined && skipped.length) return { refused: { code: 'resignation_requires_new_dock' } };
+      const owed = selected.filter((m) => m.morale > 0 || newReceipt);
+      const cost = (m) => m.unpaidArrearsCredits * (m.morale === 0 ? 2 : 1);
+      const totalCredits = owed.reduce((sum, member) => sum + cost(member), 0);
+      if (totalCredits > 2_147_483_647) return { refused: { code: 'insufficient_credits', requiredCredits: totalCredits } };
+      const paid = await tx.player.updateMany({
+        where: { id: playerId, credits: { gte: totalCredits } },
+        data: { credits: { decrement: totalCredits } }
+      });
+      if (paid.count !== 1) return { refused: { code: 'insufficient_credits', requiredCredits: totalCredits } };
+      const cap = restedMoraleCap(ship.crew);
+      const settled = [];
+      for (const member of owed) {
+        const morale = moraleAfterCappedGain(member, MORALE_GAIN_PAY_ARREARS, cap);
+        await tx.crewMember.update({ where: { id: member.id }, data: { morale, unpaidArrearsCredits: 0 } });
+        settled.push({ crewId: member.id, paidCredits: cost(member), morale, moraleBand: moraleBand(morale, member.quirkId) });
+      }
+      const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { ship, settled, skipped, totalCredits, credits: player.credits, crew: await activeCrewOf(tx, ship.id) };
+    });
+    if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
+    const { ship, settled, totalCredits, credits, crew } = outcome;
+    return respondWithShip(request, ship, crew, { paid: settled, paidCredits: totalCredits, credits,
+      ...(outcome.skipped.length && { skipped: outcome.skipped }) });
   });
 }

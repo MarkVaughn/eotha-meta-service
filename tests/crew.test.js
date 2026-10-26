@@ -138,12 +138,12 @@ describe('computeShipAttributes with crew', () => {
     assert.deepEqual(crewShipEffects([crew('CHEF', 'MASTER'), crew('DOCTOR', 'MASTER')]), []);
   });
 
-  test('an Adept or Master Engineer adds hull budget', () => {
+  test('Engineer overdrive never adds general hull budget', () => {
     assert.equal(hullBudget(1), 6);
     assert.equal(hullBudget(1, [], [crew('ENGINEER', 'NOVICE')]), 6);
-    assert.equal(hullBudget(1, [], [crew('ENGINEER', 'ADEPT')]), 7);
-    assert.equal(hullBudget(1, [], [crew('ENGINEER', 'MASTER')]), 8);
-    assert.equal(hullBudget(1, ['H6_FLEET_CAPTAIN'], [crew('ENGINEER', 'MASTER')]), 9);
+    assert.equal(hullBudget(1, [], [crew('ENGINEER', 'ADEPT')]), 6);
+    assert.equal(hullBudget(1, [], [crew('ENGINEER', 'MASTER')]), 6);
+    assert.equal(hullBudget(1, ['H6_FLEET_CAPTAIN'], [crew('ENGINEER', 'MASTER')]), 7);
     assert.equal(hullBudget(1, [], [crew('ENGINEER', 'MASTER', { morale: 30 })]), 6); // Disgruntled: no jury-rig
   });
 });
@@ -560,24 +560,22 @@ describe('dismiss and standby', () => {
     assert.equal((await dismiss(pilot, member.id)).statusCode, 200);
   });
 
-  test('ASSERT-2.2.5: an Engineer cannot go while the installed components need the budget they provide', async () => {
-    const pilot = await newPilot('Budget');
-    await setCredits(pilot, 500);
-    const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800 });
-    await setComponent(pilot, 'RADAR', 2); // 7 points against a Tier 1 budget of 6 (7 with the Engineer)
-    const loadout = json(await call(pilot, 'GET', '/ship/loadout'));
-    assert.equal(loadout.ship_attributes.crew_aboard, 1);
+  test('Engineer dismissal/standby drops effective operation without blocking or rewriting legacy stored tiers', async () => {
     for (const act of [dismiss, standby]) {
+      const pilot = await newPilot('OverdriveLeave');
+      await setCredits(pilot, 500);
+      const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, juryRigComponentTypes: ['RADAR'] });
+      await setComponent(pilot, 'RADAR', 2); // Historical over-budget persisted loadouts are not downgraded.
+      const loadout = json(await call(pilot, 'GET', '/ship/loadout'));
+      assert.equal(loadout.ship_attributes.radar_range_m, 1800);
       const res = await act(pilot, engineer.id);
-      assert.equal(res.statusCode, 409);
-      assert.deepEqual({ error: json(res).error, requiredBudget: json(res).requiredBudget, baseBudget: json(res).baseBudget }, {
-        error: 'engineer_required_for_loadout', requiredBudget: 7, baseBudget: 6
-      });
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(tokenAttributes(res).radar_range_m, 1000);
+      assert.equal(tokenAttributes(res).crew_aboard, 0);
+      const after = json(await call(pilot, 'GET', '/ship/loadout'));
+      assert.deepEqual(after.components, loadout.components);
+      assert.equal(await credits(pilot), act === standby ? 450 : 500);
     }
-    assert.equal(await credits(pilot), 500);
-    // Stepping the component back down lets the Engineer go.
-    await setComponent(pilot, 'RADAR', 1);
-    assert.equal((await dismiss(pilot, engineer.id)).statusCode, 200);
   });
 
   test('standby charges 50 cr, frees the berth and keeps the crew member on the roster; activate brings them back', async () => {

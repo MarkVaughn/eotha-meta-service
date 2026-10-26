@@ -1,5 +1,5 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
-import { LIFE_SUPPORT_BERTHS_BY_TIER, crewHullBudgetBonus, crewShipEffects } from './crew.js';
+import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, crewResists, crewShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
@@ -86,11 +86,11 @@ export function defaultComponents() {
 // silently change balance; Tier 1 fits the default loadout (6 Tier 1 subsystems).
 const HULL_BUDGETS = [6, 10, 18, 27, 36];
 
-// `traits` are the captain's unlocked trait ids (H6_FLEET_CAPTAIN adds a point) and `crew` the active
-// crew (an Adept or Master Engineer adds one or two).
-export function hullBudget(hullTier, traits = [], crew = []) {
+// Only hull tier and captain traits set the installed subsystem budget. Engineer overdrive is
+// effective operation of selected components, not extra points or persisted upgrades.
+export function hullBudget(hullTier, traits = []) {
   const tier = Math.min(5, Math.max(1, Math.round(hullTier || 1)));
-  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits) + crewHullBudgetBonus(crew);
+  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits);
 }
 
 export function totalSubsystemPoints(components = []) {
@@ -106,8 +106,15 @@ export function clampPassengers(count, capacity) {
 }
 
 // Attributes no component sets: their values before captain traits and crew (eotha-contracts
-// ShipAttributes fields 21-23, matching the engine's `ShipAttributes::tier_one()`).
-const BASE_ATTRIBUTES = { docking_time_mult: 1.0, extraction_rate_mult: 1.0, tuning_tolerance_hz: 100.0 };
+// ShipAttributes fields 21-23, and 25-27, matching the engine's `ShipAttributes::tier_one()`).
+const BASE_ATTRIBUTES = {
+  docking_time_mult: 1.0,
+  extraction_rate_mult: 1.0,
+  tuning_tolerance_hz: 100.0,
+  ion_fog_shield_resist: 0,
+  node_interference_resist: 0,
+  crew_capability_flags: 0
+};
 
 /**
  * The berths still free on a ship with `attributes` (computeShipAttributes): its capacity less the
@@ -131,17 +138,21 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
   }
 
+  const overdrive = engineerJuryRigTypes(activeCrew);
   const attributes = {};
   for (const type of COMPONENT_TYPES) {
     const floor = OPTIONAL_COMPONENTS.includes(type) ? 0 : MIN_TIER;
     const raw = tiers[type];
-    const tier = Number.isInteger(raw) && raw >= floor && raw <= MAX_TIER ? raw : MIN_TIER;
+    const storedTier = Number.isInteger(raw) && raw >= floor && raw <= MAX_TIER ? raw : MIN_TIER;
+    // An absent/unequipped optional component never materializes through an Engineer's effect.
+    const tier = storedTier > 0 && overdrive.has(type) ? Math.min(storedTier + 1, MAX_TIER) : storedTier;
     for (const [attr, values] of Object.entries(TIER_TABLE[type])) {
       attributes[attr] = tier === 0 ? (ZERO_TIER_OVERRIDES[attr] ?? 0) : values[tier - 1];
     }
   }
   Object.assign(attributes, BASE_ATTRIBUTES);
   applyShipEffects(attributes, [...traitShipEffects(traits), ...crewShipEffects(activeCrew)]);
+  Object.assign(attributes, crewResists(activeCrew), { crew_capability_flags: crewCapabilityFlags(activeCrew) });
   attributes.crew_aboard = activeCrew.length;
   attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity - attributes.crew_aboard);
   return attributes;

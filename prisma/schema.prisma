@@ -75,12 +75,12 @@ model Captain {
 }
 
 // A crew member hired from a station board (src/config/crew.js, src/lib/crew-generator.js). ACTIVE
-// crew are aboard `spaceshipId` and take their wage share of every payout; STANDBY crew take theirs too but are on the
-// roster with no ship and no berth. `rank` and `quirkId` are fixed at hire (a rank changes
-// only by promotion, a later phase); `wageShareBp` is the rank's base share at hire, the effective
+// crew are aboard `spaceshipId`; active and STANDBY crew above zero morale share payouts. STANDBY crew are on the
+// roster with no ship and no berth. `quirkId` is fixed at hire and `rank` changes only by promotion
+// (POST /game/crew/promote); `wageShareBp` is the rank's base share, the effective
 // share (quirk, captain traits) being derived when a payout settles. `morale`, `seniorityXp`,
-// `unutilizedStreak` and `unpaidArrearsCredits` are kept for the morale and seniority phases and stay
-// at their defaults until they exist. `sourceCandidateId` is the board candidate the member was hired
+// `unutilizedStreak` and `unpaidArrearsCredits` are kept by the settlements that pay the crew
+// (src/lib/crew.js). `sourceCandidateId` is the board candidate the member was hired
 // as: the board leaves that candidate out and refuses a second hire of them while the member is on
 // the roster. It is null on members hired before it existed, who never match a candidate. It is not
 // unique: a unique index would make `db push` demand --accept-data-loss, and hires are already
@@ -101,6 +101,10 @@ model CrewMember {
   wageShareBp          Int        @default(500)
   unutilizedStreak     Int        @default(0)
   unpaidArrearsCredits Int        @default(0)
+  // A stipend deferred while a morale-zero member awaits explicit shore-leave consent.
+  pendingStipendCredits Int       @default(0)
+  // Dock-configured Engineer overdrive; operation only, never persisted component upgrades.
+  juryRigComponentTypes Json     @default("[]")
   homeFactionId        String     @default("independent")
   hiredAtStationId     String
   sourceCandidateId    String?
@@ -149,6 +153,26 @@ model Spaceship {
   components ShipComponentRecord[]
   // The crew aboard (status ACTIVE); a crew member on STANDBY has no ship.
   crewMembers CrewMember[]
+  // Shore leave (src/config/crew-morale.js): undocked flight time since the crew last had leave, the
+  // dock where leave was last granted and when. Additive; existing ships start with none.
+  flightMsSinceLeave Int       @default(0)
+  lastLeaveStationId String?
+  lastLeaveAt        DateTime?
+  // Consecutive signed docking times approximate flight until receipts carry an undock time.
+  lastCrewDockedAtMs BigInt?
+  crewPayoutSinceDock Boolean @default(false) // legacy compatibility; timestamps govern new settlements
+  lastCrewPayoutAtMs BigInt?
+  shoreLeaveStations CrewShoreLeave[]
+}
+
+// Recovery is throttled per station, not merely at the most recently visited dock (A-B-A).
+model CrewShoreLeave {
+  spaceshipId String @db.Uuid
+  spaceship Spaceship @relation(fields: [spaceshipId], references: [id], onDelete: Cascade)
+  stationId String
+  lastLeaveAtMs BigInt
+
+  @@id([spaceshipId, stationId])
 }
 
 model ShipComponentRecord {

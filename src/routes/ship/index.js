@@ -120,13 +120,13 @@ export default async function shipRoutes(fastify, opts) {
       const currentPoints = totalSubsystemPoints(ship.components);
 
       if (componentType === 'HULL') {
-        const budget = hullBudget(targetTier, ship.traits, ship.crew);
+        const budget = hullBudget(targetTier, ship.traits);
         if (currentPoints > budget) {
           return fail(400, `Upgrade exceeds Hull Tier ${targetTier} budget of ${budget} points (requested: ${currentPoints}).`);
         }
       } else {
         const projectedPoints = currentPoints - currentComponentTier + targetTier;
-        const budget = hullBudget(currentHullTier, ship.traits, ship.crew);
+        const budget = hullBudget(currentHullTier, ship.traits);
         if (projectedPoints > budget) {
           return fail(400, `Upgrade exceeds Hull Tier ${currentHullTier} budget of ${budget} points (requested: ${projectedPoints}).`);
         }
