@@ -112,6 +112,25 @@ describe('AGY H1/M2: implicit docks never silently delete resigned crew', () => 
     assert.equal(json(res).departed_crew, undefined);
     assert.ok(await row(engineer.id));
   });
+  test('explicit shore leave keeps a resigned Engineer whose budget backs the loadout', async () => {
+    const { pilot } = await baseline({ withCrew: false, minutes: 10 });
+    const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: NEUTRAL, morale: 0 });
+    const ship = await shipOf(pilot);
+    await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } }, data: { tier: 2 } });
+    const res = await shore(pilot, receipt(pilot));
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual(json(res).docking.departed, []);
+    assert.equal(json(res).docking.effects.find((e) => e.crewId === engineer.id).departureBlocked, true);
+    assert.equal((await row(engineer.id)).morale, 0);
+  });
+  test('explicit shore leave lets a resigned Engineer go once the loadout fits without them', async () => {
+    const { pilot } = await baseline({ withCrew: false, minutes: 10 });
+    const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: NEUTRAL, morale: 0 });
+    const res = await shore(pilot, receipt(pilot));
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual(json(res).docking.departed, [engineer.id]);
+    assert.equal(await row(engineer.id), null);
+  });
   test('an already resigned FLAKY member cannot bypass explicit shore-leave resolution on acceptance', async () => {
     const { pilot } = await baseline({ withCrew: false });
     const offer = signedOffer(pilot, { required_berths: 0 });

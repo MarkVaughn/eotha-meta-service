@@ -9,6 +9,12 @@ import { moraleAfterCappedGain, moraleAfterLoss, restedMoraleCap } from '../conf
 import { computeShipAttributes, hullBudget, totalSubsystemPoints } from '../config/components.js';
 import { activeCrewOf, standbyCrewOf } from './crew.js';
 
+const loadoutFitsWithout = (ship, leaving) => {
+  const rest = ship.crew.filter((m) => !leaving.includes(m.id));
+  const { hull_tier: hullTier } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, rest);
+  return totalSubsystemPoints(ship.components) <= hullBudget(hullTier, ship.traits, rest);
+};
+
 export const fatigueIntervals = (ms, member = {}) => Math.floor(Math.max(0,
   ms - SHORE_LEAVE_GRACE_MS * (QUIRKS[member.quirkId]?.enduranceMult ?? 1)) / SHORE_LEAVE_DECAY_INTERVAL_MS);
 
@@ -35,14 +41,10 @@ export function flakyDeparture(member, stationId, nowMs) {
 // mining-only undocks still need a signed contracts/engine event. The approved roll is unchanged.
 export async function recordFlakyDeparture(tx, ship, receipt, nowMs, docking) {
   const departed = [];
-  let remaining = ship.crew;
   for (const m of ship.crew) {
     if (m.morale <= 0 || !flakyDeparture(m, receipt.dockedEntityId, nowMs)) continue;
-    const rest = remaining.filter((other) => other !== m);
-    const { hull_tier: hullTier } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, rest);
-    if (totalSubsystemPoints(ship.components) > hullBudget(hullTier, ship.traits, rest)) continue;
+    if (!loadoutFitsWithout(ship, [...departed, m].map((d) => d.id))) continue;
     departed.push(m);
-    remaining = rest;
   }
   if (departed.length) {
     const ids = departed.map((m) => m.id);
@@ -128,7 +130,11 @@ export async function recordCrewDock(tx, ship, receipt, {
             rescued.add(member.id);
           }
         }
-        if (!saved) {
+        if (!saved && aboard.has(member.id) && !loadoutFitsWithout(ship, [...departed, member.id])) {
+          effect.departureBlocked = true;
+          member.pendingStipendCredits = stipend;
+          effect.resignationPending = true;
+        } else if (!saved) {
           await tx.crewMember.delete({ where: { id: member.id } });
           departed.push(member.id);
           effects.push({ ...effect, morale: 0, departed: true });
