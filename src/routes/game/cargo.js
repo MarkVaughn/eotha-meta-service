@@ -144,7 +144,7 @@ export default async function cargoRoutes(fastify) {
             settlement: { kind: SETTLEMENT.CARGO_SALE }, payout: split, deferred: deferCrewPay
           });
           ship = { ...ship, crew: settled.crew };
-          if (dockedReceipt) ({ ship, docking } = await recordCrewDock(tx, ship, dockedReceipt));
+          if (dockedReceipt) ({ ship, docking } = await recordCrewDock(tx, ship, dockedReceipt, { payoutSettled: true }));
         }
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         const { lots } = holdView(await currentLease(tx, playerId));

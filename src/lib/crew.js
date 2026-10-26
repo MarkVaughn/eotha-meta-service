@@ -51,9 +51,10 @@ export const REFUSAL_PRIORITY = Object.freeze([
 export const primaryReason = (reasons) =>
   reasons.reduce((best, reason) => (REFUSAL_PRIORITY.indexOf(reason.code) < REFUSAL_PRIORITY.indexOf(best.code) ? reason : best));
 
-// `db` is the Prisma client or an open transaction. Everyone on the pilot's payroll: the crew aboard
-// `ship` plus the crew on standby, who still take their share of a payout.
-export const payrollCrewOf = async (db, playerId, ship) => [...ship.crew, ...(await standbyCrewOf(db, playerId))];
+// `db` is the Prisma client or an open transaction. Working active and standby crew share payouts;
+// morale-zero members earn neither wages nor deferred wage arrears while awaiting resignation.
+export const payrollCrewOf = async (db, playerId, ship) =>
+  [...ship.crew, ...(await standbyCrewOf(db, playerId))].filter((member) => member.morale > 0);
 
 /**
  * What stops `ship` (lockActiveShip's result) taking aboard one more crew member of `crewClass`, as
@@ -156,6 +157,7 @@ export function crewMemberView(member, traits = []) {
     seniorityXp: member.seniorityXp,
     unutilizedStreak: member.unutilizedStreak,
     unpaidArrearsCredits: member.unpaidArrearsCredits,
+    pendingStipendCredits: member.pendingStipendCredits,
     promotion: promotionTerms(member),
     capabilities: capabilitiesView(member),
     homeFactionId: member.homeFactionId,
@@ -221,9 +223,10 @@ export const missionSettlement = (offer) => ({
  * token the caller reissues) and what happened to each member who changed.
  */
 export async function recordCrewSettlement(tx, ship, payroll, { settlement, payout, deferred, captainXp = 0 }) {
-  // All three payout routes share this marker; retries never reach settlement a second time.
-  await tx.spaceship.update({ where: { id: ship.id }, data: { crewPayoutSinceDock: true } });
-  ship.crewPayoutSinceDock = true;
+  // Preserve the payout time across dock consumption; a stale/pre-leg payout cannot waive a new leg.
+  const lastCrewPayoutAtMs = BigInt(Date.now());
+  await tx.spaceship.update({ where: { id: ship.id }, data: { crewPayoutSinceDock: true, lastCrewPayoutAtMs } });
+  Object.assign(ship, { crewPayoutSinceDock: true, lastCrewPayoutAtMs });
   if (payroll.length === 0) return { crew: ship.crew, effects: [] };
   const aboard = new Set(ship.crew.map((member) => member.id));
   const attributes = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, ship.crew);

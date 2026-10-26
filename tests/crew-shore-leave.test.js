@@ -144,14 +144,15 @@ describe('POST /game/crew/shore-leave', () => {
     await shore(f.pilot, makeReceipt(f.pilot, randomUUID(), f.end + 1));
     assert.equal((await row(f.crew.id)).morale, 97);
   });
-  test('morale-zero crew depart before leave can resurrect them; standby are unaffected', async () => {
+  test('morale-zero active and standby crew depart only through explicit leave', async () => {
     const f = await flight({ minutes: 10 });
     const doomed = await app.prisma.crewMember.update({ where: { id: f.crew.id }, data: { morale: 0 } });
     const standby = await addCrew(f.pilot, { morale: 0, status: 'STANDBY', spaceshipId: null });
     const body = json(await shore(f.pilot, f.receipt));
     assert.ok(body.docking.departed.includes(doomed.id));
     assert.equal(await row(doomed.id), null);
-    assert.equal((await row(standby.id)).morale, 0);
+    assert.equal(await row(standby.id), null);
+    assert.ok(body.docking.departed.includes(standby.id));
   });
   test('resignation rescue is explicit, costs twice debt, and clears arrears; insufficient funds means departure', async () => {
     for (const [balance, rescue, survives] of [[500, true, true], [199, true, false], [500, false, false]]) {
@@ -175,7 +176,8 @@ describe('POST /game/crew/shore-leave', () => {
     const sale = await call(f.pilot, 'POST', '/game/charts/sell', { planetId: 'paid-flight', stationId: 'station-alpha' });
     assert.equal(sale.statusCode, 200, sale.body);
     assert.equal((await shipOf(f.pilot)).crewPayoutSinceDock, true);
-    const res = json(await shore(f.pilot, f.receipt));
+    // The payout occurred before this arrival, not after the signed docking timestamp.
+    const res = json(await shore(f.pilot, makeReceipt(f.pilot, f.station, Date.now())));
     assert.equal(res.docking.effects[0].stipendCredits, undefined);
     assert.equal(res.credits, 1475);
     assert.equal((await shipOf(f.pilot)).crewPayoutSinceDock, false);

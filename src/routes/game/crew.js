@@ -81,6 +81,7 @@ const MESSAGES = {
   standby_full: `Harbor Standby holds at most ${MAX_STANDBY_CREW} crew members.`,
   crew_not_on_standby: 'That crew member is not on Harbor Standby.',
   crew_not_active: 'That crew member is not aboard.',
+  crew_resigned: 'A resigned crew member must be recovered through shore leave before returning aboard.',
   already_master: 'That crew member is already a Master.',
   insufficient_seniority_xp: 'That crew member has not earned enough Seniority XP for the next rank.',
   crew_refuses_promotion: 'A Mutinous crew member refuses training until their morale recovers.',
@@ -101,6 +102,7 @@ const STATUS = {
   standby_full: 409,
   crew_not_on_standby: 409,
   crew_not_active: 409,
+  crew_resigned: 409,
   already_master: 409,
   insufficient_seniority_xp: 409,
   crew_refuses_promotion: 409,
@@ -207,6 +209,8 @@ export default async function crewRoutes(fastify) {
       // Guarded decrement: only succeeds while the stored balance still covers the bonus.
       const paid = await tx.player.updateMany({ where: { id: playerId, credits: { gte: bonus } }, data: { credits: { decrement: bonus } } });
       if (paid.count !== 1) return { refused: { code: 'insufficient_credits', requiredCredits: bonus } };
+      // Settle the old crew's leg before this candidate joins it.
+      const dock = await recordCrewDock(tx, ship, request.body.dockedReceipt);
       const member = await tx.crewMember.create({
         data: {
           playerId,
@@ -223,12 +227,14 @@ export default async function crewRoutes(fastify) {
           sourceCandidateId: candidate.candidateId
         }
       });
-      return { ship, member, credits: player.credits - bonus, crew: await activeCrewOf(tx, ship.id) };
+      const balance = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { ship: dock.ship, docking: dock.docking, member, credits: balance.credits, crew: await activeCrewOf(tx, ship.id) };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
 
     const { ship, member, credits, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits });
+    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits,
+      ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
   // The guards both ways of taking a crew member off the ship share: no mission held (a pilot could
@@ -297,14 +303,17 @@ export default async function crewRoutes(fastify) {
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.STANDBY) return { refused: { code: 'crew_not_on_standby' } };
+      if (member.morale === 0) return { refused: { code: 'crew_resigned' } };
       const reasons = boardingReasons(ship, member.crewClass);
       if (reasons.length > 0) return { refused: reasonRefusal(primaryReason(reasons), reasons) };
+      const dock = await recordCrewDock(tx, ship, request.body.dockedReceipt);
       const moved = await tx.crewMember.update({ where: { id: member.id }, data: { status: CREW_STATUS.ACTIVE, spaceshipId: ship.id } });
-      return { ship, member: moved, crew: await activeCrewOf(tx, ship.id) };
+      return { ship: dock.ship, docking: dock.docking, member: moved, crew: await activeCrewOf(tx, ship.id) };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     const { ship, member, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits) });
+    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits),
+      ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
   // Trains a crew member into the next rank at a station lounge: needs the Seniority XP for it and its
@@ -341,7 +350,7 @@ export default async function crewRoutes(fastify) {
     if (!dockedStation(request, reply)) return reply;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
-      const result = await recordCrewDock(tx, ship, request.body.dockedReceipt, request.body);
+      const result = await recordCrewDock(tx, ship, request.body.dockedReceipt, { ...request.body, allowDeparture: true });
       const player = await tx.player.findUnique({ where: { id: request.user.sub }, select: { credits: true } });
       return { ...result, credits: player.credits };
     });
@@ -353,7 +362,8 @@ export default async function crewRoutes(fastify) {
 
   // Pays the wages a deferred settlement left owing, for one crew member or, without `crewId`, all of
   // them, from the pilot's credits. Each paid member's morale recovers MORALE_GAIN_PAY_ARREARS, up to
-  // the rested cap. Not a port service, so it needs no receipt.
+  // the rested cap. Working crew need no receipt; resigned crew need a new dock and twice back pay.
+  // Bulk requests without that proof pay working members and explicitly list skipped resignations.
   fastify.post('/crew/pay-arrears', { schema: payArrearsSchema }, async (request, reply) => {
     const playerId = request.user.sub;
     if (request.body.dockedReceipt) {
@@ -365,12 +375,14 @@ export default async function crewRoutes(fastify) {
       const roster = [...ship.crew, ...(await standbyCrewOf(tx, playerId))];
       const { crewId } = request.body;
       if (crewId !== undefined && !roster.some((member) => member.id === crewId)) return { refused: { code: 'crew_not_found' } };
-      const owed = roster.filter((member) => (member.unpaidArrearsCredits > 0 || member.morale === 0) && (crewId === undefined || member.id === crewId));
-      if (owed.length === 0) return { refused: { code: 'no_arrears' } };
       const receipt = request.body.dockedReceipt;
-      if (owed.some((m) => m.morale === 0) && (!receipt || (ship.lastCrewDockedAtMs != null && BigInt(receipt.dockedAtMs) <= ship.lastCrewDockedAtMs))) {
-        return { refused: { code: 'resignation_requires_new_dock' } };
-      }
+      const newReceipt = receipt && (ship.lastCrewDockedAtMs == null || BigInt(receipt.dockedAtMs) > ship.lastCrewDockedAtMs);
+      const selected = roster.filter((member) => (member.unpaidArrearsCredits > 0 || member.morale === 0) && (crewId === undefined || member.id === crewId));
+      if (selected.length === 0) return { refused: { code: 'no_arrears' } };
+      const skipped = selected.filter((m) => m.morale === 0 && !newReceipt)
+        .map((m) => ({ crewId: m.id, reason: 'resignation_requires_new_dock' }));
+      if (crewId !== undefined && skipped.length) return { refused: { code: 'resignation_requires_new_dock' } };
+      const owed = selected.filter((m) => m.morale > 0 || newReceipt);
       const cost = (m) => m.unpaidArrearsCredits * (m.morale === 0 ? 2 : 1);
       const totalCredits = owed.reduce((sum, member) => sum + cost(member), 0);
       if (totalCredits > 2_147_483_647) return { refused: { code: 'insufficient_credits', requiredCredits: totalCredits } };
@@ -387,10 +399,11 @@ export default async function crewRoutes(fastify) {
         settled.push({ crewId: member.id, paidCredits: cost(member), morale, moraleBand: moraleBand(morale, member.quirkId) });
       }
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { ship, settled, totalCredits, credits: player.credits, crew: await activeCrewOf(tx, ship.id) };
+      return { ship, settled, skipped, totalCredits, credits: player.credits, crew: await activeCrewOf(tx, ship.id) };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     const { ship, settled, totalCredits, credits, crew } = outcome;
-    return respondWithShip(request, ship, crew, { paid: settled, paidCredits: totalCredits, credits });
+    return respondWithShip(request, ship, crew, { paid: settled, paidCredits: totalCredits, credits,
+      ...(outcome.skipped.length && { skipped: outcome.skipped }) });
   });
 }

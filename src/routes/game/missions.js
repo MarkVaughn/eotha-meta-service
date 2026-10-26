@@ -326,7 +326,7 @@ export default async function missionsRoutes(fastify) {
       }
 
       const dock = await recordCrewDock(tx, ship, dockedReceipt);
-      const flaky = await recordFlakyDeparture(tx, dock.ship, dockedReceipt, nowMs);
+      const flaky = await recordFlakyDeparture(tx, dock.ship, dockedReceipt, nowMs, dock.docking);
       await deleteRows(tx, legacy);
       await tx.playerMission.create({
         data: {
@@ -344,8 +344,10 @@ export default async function missionsRoutes(fastify) {
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     return { active: toActiveMission(playerId, offer, acceptedAt),
-      ...(outcome.docking.effects?.length && { docking: outcome.docking }),
-      ...(outcome.departed.length && { departed_crew: outcome.departed }),
+      ...(outcome.docking.applied && { docking: outcome.docking }),
+      ...((outcome.docking.departed?.length || outcome.departed.length) && {
+        departed_crew: [...(outcome.docking.departed ?? []), ...outcome.departed]
+      }),
       token: await tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
@@ -415,6 +417,7 @@ export default async function missionsRoutes(fastify) {
       const dock = dockedReceipt ? await recordCrewDock(tx, ship, dockedReceipt) : { ship };
       return {
         ship: dock.ship,
+        docking: dock.docking,
         passengersAboard,
         missionId: row.missionId,
         reputationChange: terms.reputation,
@@ -430,6 +433,8 @@ export default async function missionsRoutes(fastify) {
       outcome: 'MISSION_ABANDON_OUTCOME_CANCELLED',
       reputation_change: outcome.reputationChange,
       standings: outcome.standings,
+      ...(outcome.docking?.applied && { docking: outcome.docking }),
+      ...(outcome.docking?.departed.length && { departed_crew: outcome.docking.departed }),
       token: await tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
     };
   });
@@ -502,7 +507,7 @@ export default async function missionsRoutes(fastify) {
           settlement: missionSettlement(active.offer), payout, deferred, captainXp: captain.xpGained
         });
         const currentShip = { ...ship, crew: settledCrew.crew };
-        const dock = request.body.dockedReceipt ? await recordCrewDock(tx, currentShip, request.body.dockedReceipt) : { ship: currentShip };
+        const dock = request.body.dockedReceipt ? await recordCrewDock(tx, currentShip, request.body.dockedReceipt, { payoutSettled: true }) : { ship: currentShip };
         const balance = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         return {
           credits: balance.credits, payout, reputationChange, standings, factions, ship: dock.ship,
@@ -599,7 +604,8 @@ export default async function missionsRoutes(fastify) {
       standings: settled.standings,
       ...settled.captain,
       ...(settled.crewMorale.length > 0 && { crew_morale: settled.crewMorale }),
-      ...(settled.docking && { docking: settled.docking }),
+      ...(settled.docking?.applied && { docking: settled.docking }),
+      ...(settled.docking?.departed.length && { departed_crew: settled.docking.departed }),
       ...(settled.lots && { lots: settled.lots }),
       token: await tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
     };

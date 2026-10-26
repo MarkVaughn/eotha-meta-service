@@ -300,7 +300,7 @@ export default async function chartsRoutes(fastify) {
         settlement: { kind: SETTLEMENT.CHART_SALE, chart: isPlanet ? 'PLANET' : 'SYSTEM' }, payout, deferred: deferCrewPay
       });
       const currentShip = { ...ship, crew: settled.crew };
-      const dock = dockedReceipt ? await recordCrewDock(tx, currentShip, dockedReceipt) : { ship: currentShip };
+      const dock = dockedReceipt ? await recordCrewDock(tx, currentShip, dockedReceipt, { payoutSettled: true }) : { ship: currentShip };
       return { payout, newBalance: player.credits, settled, ship: dock.ship, docking: dock.docking };
     });
     if (sale === null) return reply.code(409).send({ error: 'Chart has already been sold.' });

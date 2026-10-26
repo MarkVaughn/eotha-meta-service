@@ -75,7 +75,7 @@ model Captain {
 }
 
 // A crew member hired from a station board (src/config/crew.js, src/lib/crew-generator.js). ACTIVE
-// crew are aboard `spaceshipId` and take their wage share of every payout; STANDBY crew take theirs too but are on the
+// crew are aboard `spaceshipId`; active and STANDBY crew above zero morale share payouts. STANDBY crew are on the
 // roster with no ship and no berth. `quirkId` is fixed at hire and `rank` changes only by promotion
 // (POST /game/crew/promote); `wageShareBp` is the rank's base share, the effective
 // share (quirk, captain traits) being derived when a payout settles. `morale`, `seniorityXp`,
@@ -101,6 +101,8 @@ model CrewMember {
   wageShareBp          Int        @default(500)
   unutilizedStreak     Int        @default(0)
   unpaidArrearsCredits Int        @default(0)
+  // A stipend deferred while a morale-zero member awaits explicit shore-leave consent.
+  pendingStipendCredits Int       @default(0)
   homeFactionId        String     @default("independent")
   hiredAtStationId     String
   sourceCandidateId    String?
@@ -156,7 +158,8 @@ model Spaceship {
   lastLeaveAt        DateTime?
   // Consecutive signed docking times approximate flight until receipts carry an undock time.
   lastCrewDockedAtMs BigInt?
-  crewPayoutSinceDock Boolean @default(false)
+  crewPayoutSinceDock Boolean @default(false) // legacy compatibility; timestamps govern new settlements
+  lastCrewPayoutAtMs BigInt?
   shoreLeaveStations CrewShoreLeave[]
 }
 
