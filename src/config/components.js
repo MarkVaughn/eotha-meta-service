@@ -1,5 +1,5 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
-import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, crewHullBudgetBonus, crewResists, crewShipEffects } from './crew.js';
+import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, crewResists, crewShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
@@ -86,11 +86,11 @@ export function defaultComponents() {
 // silently change balance; Tier 1 fits the default loadout (6 Tier 1 subsystems).
 const HULL_BUDGETS = [6, 10, 18, 27, 36];
 
-// `traits` are the captain's unlocked trait ids (H6_FLEET_CAPTAIN adds a point) and `crew` the active
-// crew (an Adept or Master Engineer adds one or two).
-export function hullBudget(hullTier, traits = [], crew = []) {
+// Only hull tier and captain traits set the installed subsystem budget. Engineer overdrive is
+// effective operation of selected components, not extra points or persisted upgrades.
+export function hullBudget(hullTier, traits = []) {
   const tier = Math.min(5, Math.max(1, Math.round(hullTier || 1)));
-  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits) + crewHullBudgetBonus(crew);
+  return HULL_BUDGETS[tier - 1] + traitHullBudgetBonus(traits);
 }
 
 export function totalSubsystemPoints(components = []) {
@@ -138,11 +138,14 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
   }
 
+  const overdrive = engineerJuryRigTypes(activeCrew);
   const attributes = {};
   for (const type of COMPONENT_TYPES) {
     const floor = OPTIONAL_COMPONENTS.includes(type) ? 0 : MIN_TIER;
     const raw = tiers[type];
-    const tier = Number.isInteger(raw) && raw >= floor && raw <= MAX_TIER ? raw : MIN_TIER;
+    const storedTier = Number.isInteger(raw) && raw >= floor && raw <= MAX_TIER ? raw : MIN_TIER;
+    // An absent/unequipped optional component never materializes through an Engineer's effect.
+    const tier = storedTier > 0 && overdrive.has(type) ? Math.min(storedTier + 1, MAX_TIER) : storedTier;
     for (const [attr, values] of Object.entries(TIER_TABLE[type])) {
       attributes[attr] = tier === 0 ? (ZERO_TIER_OVERRIDES[attr] ?? 0) : values[tier - 1];
     }

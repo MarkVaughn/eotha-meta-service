@@ -8,11 +8,13 @@ import {
   MAX_STANDBY_CREW,
   MAX_TOTAL_WAGE_BP,
   MORALE_DECAY_DEFERRED_PAY,
+  NOMINAL_MORALE_THRESHOLD,
   RANKS,
   STANDBY_TRANSFER_FEE_CREDITS,
   classEffectsView,
   effectiveMoraleMult,
   effectiveWageShareBp,
+  engineerJuryRigSlots,
   maxActiveCrew,
   quirkView
 } from '../config/crew.js';
@@ -158,6 +160,11 @@ export function crewMemberView(member, traits = []) {
     unutilizedStreak: member.unutilizedStreak,
     unpaidArrearsCredits: member.unpaidArrearsCredits,
     pendingStipendCredits: member.pendingStipendCredits,
+    ...(member.crewClass === 'ENGINEER' && { juryRig: {
+      selectedComponentTypes: member.juryRigComponentTypes ?? [],
+      slots: engineerJuryRigSlots(member),
+      active: member.status === CREW_STATUS.ACTIVE && member.morale >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
+    } }),
     promotion: promotionTerms(member),
     capabilities: capabilitiesView(member),
     homeFactionId: member.homeFactionId,
@@ -232,7 +239,7 @@ export async function recordCrewSettlement(tx, ship, payroll, { settlement, payo
   const attributes = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, ship.crew);
   const ctx = {
     weaponsTier: ship.components.find((c) => c.type === 'WEAPONS')?.tier ?? 0,
-    subsystemUse: totalSubsystemPoints(ship.components) / hullBudget(attributes.hull_tier, ship.traits, ship.crew),
+    subsystemUse: totalSubsystemPoints(ship.components) / hullBudget(attributes.hull_tier, ship.traits),
     activeCrew: ship.crew.length
   };
   const owed = new Map(payout.crewPayouts.map((entry) => [entry.crewId, entry.deferredCredits ?? 0]));

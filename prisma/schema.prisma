@@ -103,6 +103,8 @@ model CrewMember {
   unpaidArrearsCredits Int        @default(0)
   // A stipend deferred while a morale-zero member awaits explicit shore-leave consent.
   pendingStipendCredits Int       @default(0)
+  // Dock-configured Engineer overdrive; operation only, never persisted component upgrades.
+  juryRigComponentTypes Json     @default("[]")
   homeFactionId        String     @default("independent")
   hiredAtStationId     String
   sourceCandidateId    String?

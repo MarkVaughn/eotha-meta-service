@@ -98,32 +98,35 @@ describe('AGY H1/M2: implicit docks never silently delete resigned crew', () => 
     assert.equal(await row(crew.id), null);
     assert.equal(await credits(pilot), 1000);
   });
-  test('a FLAKY Engineer whose budget backs the loadout stays aboard through the acceptance roll', async () => {
+  test('a FLAKY Engineer may depart; effective operation falls to the unchanged stored tier', async () => {
     const { pilot } = await baseline({ withCrew: false, minutes: 10 });
     const now = Date.now();
     const offer = signedOffer(pilot, { required_berths: 0 });
     let id;
     do { id = randomUUID(); } while (![now, now + 900_000].every((at) => flakyDeparture({ id, quirkId: 'Q12', morale: 65 }, offer.origin_station_id, at)));
-    const engineer = await addCrew(pilot, { id, crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: 'Q12', morale: 65 });
+    const engineer = await addCrew(pilot, { id, crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: 'Q12', morale: 65, juryRigComponentTypes: ['RADAR'] });
     const ship = await shipOf(pilot);
     await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } }, data: { tier: 2 } });
     const res = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
     assert.equal(res.statusCode, 200, res.body);
-    assert.equal(json(res).departed_crew, undefined);
-    assert.ok(await row(engineer.id));
+    assert.deepEqual(json(res).departed_crew, [engineer.id]);
+    assert.equal(await row(engineer.id), null);
+    assert.equal(app.jwt.verify(json(res).token).ship_attributes.radar_range_m, 1000);
+    assert.equal((await app.prisma.shipComponentRecord.findUnique({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } } })).tier, 2);
   });
-  test('explicit shore leave keeps a resigned Engineer whose budget backs the loadout', async () => {
+  test('explicit shore leave permits Engineer departure without a loadout block or stored downgrade', async () => {
     const { pilot } = await baseline({ withCrew: false, minutes: 10 });
     const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: NEUTRAL, morale: 0 });
     const ship = await shipOf(pilot);
     await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } }, data: { tier: 2 } });
     const res = await shore(pilot, receipt(pilot));
     assert.equal(res.statusCode, 200, res.body);
-    assert.deepEqual(json(res).docking.departed, []);
-    assert.equal(json(res).docking.effects.find((e) => e.crewId === engineer.id).departureBlocked, true);
-    assert.equal((await row(engineer.id)).morale, 0);
+    assert.deepEqual(json(res).docking.departed, [engineer.id]);
+    assert.equal(json(res).docking.effects.find((e) => e.crewId === engineer.id).departureBlocked, undefined);
+    assert.equal(await row(engineer.id), null);
+    assert.equal((await app.prisma.shipComponentRecord.findUnique({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } } })).tier, 2);
   });
-  test('explicit shore leave lets a resigned Engineer go once the loadout fits without them', async () => {
+  test('explicit shore leave lets a resigned Engineer go with the default stored loadout', async () => {
     const { pilot } = await baseline({ withCrew: false, minutes: 10 });
     const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: NEUTRAL, morale: 0 });
     const res = await shore(pilot, receipt(pilot));

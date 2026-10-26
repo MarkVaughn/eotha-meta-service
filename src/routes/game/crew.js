@@ -1,7 +1,8 @@
-import { computeShipAttributes, hullBudget, totalSubsystemPoints } from '../../config/components.js';
 import {
   CREW_STATUS,
   CREW_WAGE_SHARE_BP,
+  ENGINEER_JURY_RIG_TYPES,
+  engineerJuryRigSlots,
   MAX_STANDBY_CREW,
   MORALE_GAIN_PAY_ARREARS,
   STANDBY_TRANSFER_FEE_CREDITS,
@@ -51,6 +52,17 @@ const crewActionSchema = {
   }
 };
 
+const juryRigSchema = {
+  body: {
+    type: 'object', required: ['crewId', 'componentTypes'], additionalProperties: false,
+    properties: {
+      crewId: crewIdProperty,
+      componentTypes: { type: 'array', uniqueItems: true, maxItems: 2, items: { type: 'string', enum: ENGINEER_JURY_RIG_TYPES } },
+      ...receiptProperties
+    }
+  }
+};
+
 const payArrearsSchema = {
   body: {
     type: 'object',
@@ -77,7 +89,10 @@ const MESSAGES = {
   insufficient_faction_rep: "Your standing with the candidate's home faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
   crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
-  engineer_required_for_loadout: 'The installed components need the hull budget this Engineer provides; step a component down first.',
+  crew_not_engineer: 'Only an Engineer can configure component overdrive.',
+  jury_rig_slots_exceeded: 'That Engineer cannot overdrive that many components.',
+  COMPONENT_NOT_INSTALLED: 'Overdrive requires an installed component; Tier 0 is unequipped.',
+  jury_rig_already_max_tier: 'Tier 5 cannot be overdriven to Tier 6; select a lower-tier component.',
   standby_full: `Harbor Standby holds at most ${MAX_STANDBY_CREW} crew members.`,
   crew_not_on_standby: 'That crew member is not on Harbor Standby.',
   crew_not_active: 'That crew member is not aboard.',
@@ -98,7 +113,10 @@ const STATUS = {
   insufficient_faction_rep: 403,
   insufficient_credits: 402,
   crew_locked_by_active_mission: 409,
-  engineer_required_for_loadout: 409,
+  crew_not_engineer: 409,
+  jury_rig_slots_exceeded: 409,
+  COMPONENT_NOT_INSTALLED: 409,
+  jury_rig_already_max_tier: 409,
   standby_full: 409,
   crew_not_on_standby: 409,
   crew_not_active: 409,
@@ -237,18 +255,11 @@ export default async function crewRoutes(fastify) {
       ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
-  // The guards both ways of taking a crew member off the ship share: no mission held (a pilot could
-  // otherwise fire the crew just before a payout to dodge their share) and, for an Engineer, the
-  // installed components still fit the hull budget without them. Returns a refusal or undefined.
-  async function leaveRefusal(tx, ship, member) {
+  // Keep the phase-2 mission wage-dodging guard. Engineer removal needs no loadout guard:
+  // only effective operation falls back; stored components, credits and hull budget never change.
+  async function leaveRefusal(tx, ship) {
     const held = await tx.playerMission.findMany({ where: { playerId: ship.playerId } });
     if (held.some((row) => !isLegacyRow(row))) return { code: 'crew_locked_by_active_mission' };
-    const remaining = ship.crew.filter((other) => other.id !== member.id);
-    const { hull_tier: hullTier } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, remaining);
-    const requiredBudget = totalSubsystemPoints(ship.components);
-    if (requiredBudget > hullBudget(hullTier, ship.traits, remaining)) {
-      return { code: 'engineer_required_for_loadout', requiredBudget, baseBudget: hullBudget(hullTier, ship.traits, remaining) };
-    }
     return undefined;
   }
 
@@ -259,7 +270,7 @@ export default async function crewRoutes(fastify) {
       const ship = await lockActiveShip(tx, request.user);
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
-      const refused = await leaveRefusal(tx, ship, member);
+      const refused = await leaveRefusal(tx, ship);
       if (refused) return { refused };
       await tx.crewMember.delete({ where: { id: member.id } });
       return { ship, crew: await activeCrewOf(tx, ship.id) };
@@ -277,7 +288,7 @@ export default async function crewRoutes(fastify) {
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
-      const refused = await leaveRefusal(tx, ship, member);
+      const refused = await leaveRefusal(tx, ship);
       if (refused) return { refused };
       if ((await standbyCrewOf(tx, playerId)).length >= MAX_STANDBY_CREW) return { refused: { code: 'standby_full', maxStandbyCrew: MAX_STANDBY_CREW } };
       const paid = await tx.player.updateMany({
@@ -314,6 +325,36 @@ export default async function crewRoutes(fastify) {
     const { ship, member, crew } = outcome;
     return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits),
       ...(outcome.docking.applied && { docking: outcome.docking }) });
+  });
+
+  // Configure an active Engineer's operation-only overdrive. Nothing purchases or mutates a stored
+  // component tier; the next signed attributes use selected components one tier higher while Nominal.
+  fastify.post('/crew/jury-rig', { schema: juryRigSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    if (!dockedStation(request, reply)) return reply;
+    const { crewId, componentTypes, dockedReceipt } = request.body;
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const member = await tx.crewMember.findFirst({ where: { id: crewId, playerId: request.user.sub } });
+      if (!member) return { refused: { code: 'crew_not_found' } };
+      if (member.crewClass !== 'ENGINEER') return { refused: { code: 'crew_not_engineer' } };
+      if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
+      const slots = engineerJuryRigSlots(member);
+      if (componentTypes.length > slots) return { refused: { code: 'jury_rig_slots_exceeded', slots } };
+      for (const type of componentTypes) {
+        const tier = ship.components.find((c) => c.type === type)?.tier ?? 0;
+        if (tier === 0) return { refused: { code: 'COMPONENT_NOT_INSTALLED', componentType: type } };
+        if (tier >= 5) return { refused: { code: 'jury_rig_already_max_tier', componentType: type } };
+      }
+      const dock = await recordCrewDock(tx, ship, dockedReceipt);
+      const updated = await tx.crewMember.update({ where: { id: crewId }, data: { juryRigComponentTypes: componentTypes } });
+      const player = await tx.player.findUnique({ where: { id: request.user.sub }, select: { credits: true } });
+      return { ship: dock.ship, member: updated, credits: player.credits, docking: dock.docking, crew: await activeCrewOf(tx, ship.id) };
+    });
+    if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
+    return respondWithShip(request, outcome.ship, outcome.crew, {
+      crew: crewMemberView(outcome.member, outcome.ship.traits), credits: outcome.credits,
+      ...(outcome.docking.applied && { docking: outcome.docking })
+    });
   });
 
   // Trains a crew member into the next rank at a station lounge: needs the Seniority XP for it and its

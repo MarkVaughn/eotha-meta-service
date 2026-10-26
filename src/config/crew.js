@@ -98,8 +98,8 @@ export const HUB_RANK_WEIGHTS = Object.freeze([['ADEPT', 750], ['MASTER', 250]])
 
 // What a crew member of each class adds to the ship's signed attributes, by rank (index 0 Novice).
 // `pct` is a fractional change to the attribute and `add` an addition, both scaled by the member's
-// morale multiplier (effectiveMoraleMult); `hullBudget` is a subsystem budget point granted while the
-// member's morale is at least NOMINAL_MORALE_THRESHOLD. `capabilities` lists the CREW_CAPABILITY bits
+// morale multiplier (effectiveMoraleMult); `juryRigSlots` is the number of selected installed
+// components an Engineer may operate one tier higher while at NOMINAL_MORALE_THRESHOLD. `capabilities` lists the CREW_CAPABILITY bits
 // the class signs into the ship, each `[bit, rank it unlocks at]` (a higher rank keeps the lower ranks'),
 // and `resists` the 0 to 1 attributes (ion_fog_shield_resist, node_interference_resist) it raises by
 // rank, scaled by the morale multiplier; both need the member's morale at NOMINAL_MORALE_THRESHOLD or
@@ -107,11 +107,11 @@ export const HUB_RANK_WEIGHTS = Object.freeze([['ADEPT', 750], ['MASTER', 250]])
 // rules (shoreLeaveRestedCap, doctorCooldownReduction).
 const pct = (attr, values) => Object.freeze({ attr, pct: Object.freeze(values) });
 const add = (attr, values) => Object.freeze({ attr, add: Object.freeze(values) });
-const crewClass = (name, effects = [], hullBudget = [0, 0, 0], { capabilities = [], resists = {} } = {}) =>
+const crewClass = (name, effects = [], juryRigSlots = [0, 0, 0], { capabilities = [], resists = {} } = {}) =>
   Object.freeze({
     name,
     effects: Object.freeze(effects),
-    hullBudget: Object.freeze(hullBudget),
+    juryRigSlots: Object.freeze(juryRigSlots),
     capabilities: Object.freeze(capabilities.map((c) => Object.freeze(c))),
     resists: Object.freeze(resists)
   });
@@ -277,12 +277,18 @@ export function crewShipEffects(crew = []) {
   });
 }
 
-/** The hull subsystem budget points `crew` grants (an Engineer's Jury-Rig Grid). */
-export const crewHullBudgetBonus = (crew = []) =>
-  crew.reduce((sum, member) => {
-    const def = CREW_CLASSES[member.crewClass];
-    return sum + (def && isRank(member.rank) && member.morale >= NOMINAL_MORALE_THRESHOLD ? def.hullBudget[rankIndex(member.rank)] : 0);
-  }, 0);
+export const ENGINEER_JURY_RIG_TYPES = Object.freeze(['ENGINES', 'ENERGY', 'RADAR', 'SHIELDS']);
+
+/** Stored selections belong to the Engineer; standby/morale loss disables effects without erasing them. */
+export const engineerJuryRigSlots = (member) => member?.crewClass === 'ENGINEER' && isRank(member.rank)
+  ? CREW_CLASSES.ENGINEER.juryRigSlots[rankIndex(member.rank)] : 0;
+
+export function engineerJuryRigTypes(crew = []) {
+  const engineer = crew.find((m) => m.crewClass === 'ENGINEER' && m.status !== CREW_STATUS.STANDBY);
+  if (!engineer || engineer.morale < NOMINAL_MORALE_THRESHOLD) return new Set();
+  const selected = Array.isArray(engineer.juryRigComponentTypes) ? engineer.juryRigComponentTypes : [];
+  return new Set([...new Set(selected.filter((type) => ENGINEER_JURY_RIG_TYPES.includes(type)))].slice(0, engineerJuryRigSlots(engineer)));
+}
 
 // Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better.
 const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD;
@@ -348,6 +354,6 @@ export function classEffectsView(crewClassId, rank) {
     ...def.effects.map((e) => (e.add
       ? { attribute: e.attr, kind: 'add', value: e.add[i] }
       : { attribute: e.attr, kind: 'pct', value: e.pct[i] })),
-    ...(def.hullBudget[i] ? [{ attribute: 'hull_budget', kind: 'add', value: def.hullBudget[i] }] : [])
+    ...(def.juryRigSlots[i] ? [{ attribute: 'jury_rig_slots', kind: 'add', value: def.juryRigSlots[i] }] : [])
   ];
 }

@@ -6,14 +6,7 @@ import {
   SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_OUTPOST_GAIN, SHORE_LEAVE_STATION_GAIN
 } from '../config/crew.js';
 import { moraleAfterCappedGain, moraleAfterLoss, restedMoraleCap } from '../config/crew-morale.js';
-import { computeShipAttributes, hullBudget, totalSubsystemPoints } from '../config/components.js';
 import { activeCrewOf, standbyCrewOf } from './crew.js';
-
-const loadoutFitsWithout = (ship, leaving) => {
-  const rest = ship.crew.filter((m) => !leaving.includes(m.id));
-  const { hull_tier: hullTier } = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, rest);
-  return totalSubsystemPoints(ship.components) <= hullBudget(hullTier, ship.traits, rest);
-};
 
 export const fatigueIntervals = (ms, member = {}) => Math.floor(Math.max(0,
   ms - SHORE_LEAVE_GRACE_MS * (QUIRKS[member.quirkId]?.enduranceMult ?? 1)) / SHORE_LEAVE_DECAY_INTERVAL_MS);
@@ -43,7 +36,6 @@ export async function recordFlakyDeparture(tx, ship, receipt, nowMs, docking) {
   const departed = [];
   for (const m of ship.crew) {
     if (m.morale <= 0 || !flakyDeparture(m, receipt.dockedEntityId, nowMs)) continue;
-    if (!loadoutFitsWithout(ship, [...departed, m].map((d) => d.id))) continue;
     departed.push(m);
   }
   if (departed.length) {
@@ -130,11 +122,7 @@ export async function recordCrewDock(tx, ship, receipt, {
             rescued.add(member.id);
           }
         }
-        if (!saved && aboard.has(member.id) && !loadoutFitsWithout(ship, [...departed, member.id])) {
-          effect.departureBlocked = true;
-          member.pendingStipendCredits = stipend;
-          effect.resignationPending = true;
-        } else if (!saved) {
+        if (!saved) {
           await tx.crewMember.delete({ where: { id: member.id } });
           departed.push(member.id);
           effects.push({ ...effect, morale: 0, departed: true });
