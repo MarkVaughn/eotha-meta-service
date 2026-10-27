@@ -139,7 +139,8 @@ describe('factions phase 3 meta lifecycle', () => {
     assert.equal(jwt(abandoned).active_mission, undefined);
     assert.equal(jwt(await call(stalePilot, 'POST', '/game/cargo/lease')).active_mission, undefined);
     assert.equal(jwt(await login(pilot)).active_mission, undefined);
-    assert.equal((await take(pilot, covert(pilot))).active.offer.visibility, 'MISSION_VISIBILITY_COVERT');
+    // The abandoned passage's passengers are still aboard as hostages: one berth is left.
+    assert.equal((await take(pilot, covert(pilot, { required_berths: 1 }))).active.offer.visibility, 'MISSION_VISIBILITY_COVERT');
   });
 
   test('clean covert settlement pays signed bonus once including speed allowance and crew share, no rival loss', async () => {

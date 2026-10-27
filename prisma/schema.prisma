@@ -292,8 +292,13 @@ model CompletedMission {
 
 // One row per mission abandoned; the unique key means a mission is abandoned (and penalised) once,
 // and an abandoned mission is never accepted again. `reputationLoss` is the delta applied (0 or
-// negative). `reason`: in_port_origin, in_port_dock or in_flight (hostage_returned is reserved for
-// the passenger hostage drop-off).
+// negative). `reason`: in_port_origin, in_port_dock or in_flight, the place of the abandon, and
+// hostage_returned once a passage's hostages were disembarked. A passage abandoned away from its
+// origin leaves its passengers aboard: while `hostageBerths` is above 0 they are still there, and
+// `abandonedAt` is when the hostage state began. The disembark (src/routes/game/missions.js) sets
+// `hostageBerths` back to 0 and records `hostageMinutes` and the `reputationLoss` it applied. The
+// origin system and destination are what the drop-off place is judged against; they are set only for a
+// hostage state. The columns are additions only (existing rows have no hostages).
 model AbandonedMission {
   id              String   @id @default(uuid()) @db.Uuid
   playerId        String   @db.Uuid
@@ -304,6 +309,10 @@ model AbandonedMission {
   missionType     String   // PASSAGE, RESEARCH, GATHER
   reputationLoss  Int
   hostageMinutes  Int      @default(0)
+  hostageBerths   Int      @default(0)
+  originSystemH3  String?
+  destinationStationId String?
+  destinationSystemH3  String?
   abandonedAt     DateTime @default(now())
   reason          String
 

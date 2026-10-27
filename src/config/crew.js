@@ -64,6 +64,8 @@ export const MASTER_CHEF_RESTED_MORALE_CAP = 90;
 export const MORALE_GAIN_UTILIZED_PAID = 4;
 export const PERFECTIONIST_FAIL_PENALTY = 8;
 export const LOYALIST_BETRAYAL_PENALTY = 12;
+// The morale a LOYALIST loses when the mission abandoned was sponsored by its home faction.
+export const LOYALIST_ABANDON_PENALTY = 8;
 export const BY_THE_BOOK_COVERT_PENALTY = 8;
 export const UNUTILIZED_GRACE_MISSIONS = 2;
 export const MORALE_DECAY_UNUTILIZED = 6;
@@ -203,7 +205,9 @@ export const CREW_CLASS_IDS = Object.freeze(Object.keys(CREW_CLASSES));
 // and `betrayalPenalty` (LOYALIST: the morale a paid utilized mission restores instead of
 // MORALE_GAIN_UTILIZED_PAID, the seniority XP multiplier and the share added to the reputation gain
 // when the mission is for the home faction, and the morale lost when it is against it),
-// `lateMoralePenalty` (PERFECTIONIST: lost when a mission misses the speed bonus), `covertAcceptPenalty`
+// `lateMoralePenalty` (PERFECTIONIST: lost when a mission misses the speed bonus), `abandonPenalty`
+// (PERFECTIONIST: lost on any abandoned mission) and `homeAbandonPenalty` (LOYALIST: lost when the abandoned
+// mission was for its home faction), `covertAcceptPenalty`
 // (BY_THE_BOOK: lost on accepting a covert contract) and, for HOME_BOUND, the shore-leave terms in and
 // out of its home faction's space: `homeStationGain`, `homeOutpostGain`, `homeRestedCap`,
 // `awayStationGain`, `awayOutpostGain` and `awayFatigueMult` (on the flight time that tires it). The rest
@@ -247,10 +251,11 @@ export const QUIRKS = Object.freeze(Object.fromEntries([
     { wageBp: 50, enduranceMult: 1.5, outpostGain: 10 }),
   quirk('Q15', 'PERFECTIONIST', 'Perfectionist', 'CORE', 40,
     '+12% class modifiers and +10 Hz tuning tolerance when Inspired, which takes 88 morale; -8 morale on a failed or abandoned mission',
-    { stat: [{ delta: 0.12, minMorale: 88 }], inspiredAt: 88, lateMoralePenalty: PERFECTIONIST_FAIL_PENALTY }),
+    { stat: [{ delta: 0.12, minMorale: 88 }], inspiredAt: 88, lateMoralePenalty: PERFECTIONIST_FAIL_PENALTY, abandonPenalty: PERFECTIONIST_FAIL_PENALTY }),
   quirk('Q16', 'LOYALIST', 'Faction Loyalist', 'FACTION', 60,
     'For its home faction: +6 morale, +40% seniority XP, +10% class modifiers and +10% reputation gain; against it: -12 morale, capabilities off and double leak risk',
-    { homeMoraleGain: 6, homeXpMult: 1.4, homeReputationBonus: 0.1, betrayalPenalty: LOYALIST_BETRAYAL_PENALTY }),
+    { homeMoraleGain: 6, homeXpMult: 1.4, homeReputationBonus: 0.1, betrayalPenalty: LOYALIST_BETRAYAL_PENALTY,
+      homeAbandonPenalty: LOYALIST_ABANDON_PENALTY }),
   quirk('Q17', 'HOME_BOUND', 'Home-Bound', 'FACTION', 55,
     'In home-faction space shore leave restores +25 at stations and +12 at outposts, and rested morale reaches 86; elsewhere +8 and +2, with fatigue 20% faster',
     { homeStationGain: 25, homeOutpostGain: 12, homeRestedCap: 86, awayStationGain: 8, awayOutpostGain: 2, awayFatigueMult: 1.2 }),
