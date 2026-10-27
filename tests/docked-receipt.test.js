@@ -1,7 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPrivateKey, createPublicKey, sign } from 'node:crypto';
-import { app, call, closeApp, credits, dockedReceipt, json, loginKey, newPilot, setCredits } from './helpers.js';
+import { app, call, closeApp, credits, dockedReceipt, json, loginKey, newPilot, rtseKey, setCredits } from './helpers.js';
 import { DOCKED_RECEIPT_MAX_SKEW_MS, DOCKED_RECEIPT_TTL_MS } from '../src/config/docking.js';
 import { upgradeCost } from '../src/config/components.js';
 import {
@@ -10,10 +10,10 @@ import {
   verifyDockedReceipt
 } from '../src/lib/docked-receipt.js';
 
-// The fixed vector from eotha-contracts `scripts/check-docked-receipt-vector.js`: Ed25519 seed [7; 32],
-// the seed the RTSE verifier tests use.
-const VECTOR_HEX =
-  '454f5448415f444f434b45445f524543454950545f563107000000' +
+// The fixed vectors from eotha-contracts `scripts/check-docked-receipt-vector.js` (V2: the V1 layout plus
+// the signed governing faction): Ed25519 seed [7; 32], the seed the RTSE verifier tests use.
+const COMMON_HEX =
+  '454f5448415f444f434b45445f524543454950545f563207000000' +
   '70696c6f742d31' +
   '07070707-0707-4707-8707-070707070707'.replaceAll('-', '') +
   '0f000000' +
@@ -21,16 +21,24 @@ const VECTOR_HEX =
   'c0164230a1010000' +
   'f9464230a1010000' +
   'ab'.repeat(16);
+// A receipt at a station governed by `beta`, and one in an independent system, whose empty faction id
+// signs as a zero length prefix.
+const VECTOR_HEX = COMMON_HEX + '04000000' + '62657461';
 const VECTOR_SIGNATURE =
-  'pubRuytpx00HfJ6fr4CDzsMQWfHGN64Iv/oBUx/6PgH2Cdev5dz0bFDZu+ypVF8A3NZn6CN1b+/JPILEaQRRDA==';
-const vectorReceipt = () => ({
+  'zAX+lH5Sn6qFnydBRb61HVZNFhW9pQQvgOSxyIheWkQBHG9nE53w0r27x6kt0UcHVxaZpQCzwESHP1e+9DS+Dg==';
+const INDEPENDENT_VECTOR_HEX = COMMON_HEX + '00000000';
+const INDEPENDENT_SIGNATURE =
+  'V045UVf+bEShEp93eXJm6/Le4BnaBp0iVKOPpPtNLpRwMrR2YLZsKFmxmEs9B/3599RuDGw2/Nq1V7rTikoYBw==';
+const vectorReceipt = (overrides = {}) => ({
   pilotId: 'pilot-1',
   dockedEntityId: '07070707-0707-4707-8707-070707070707',
   systemH3: '8828308281fffff',
   dockedAtMs: 1791811000000,
   issuedAtMs: 1791811012345,
   nonce: Buffer.alloc(16, 0xab).toString('base64'),
-  signature: VECTOR_SIGNATURE
+  controllingFactionId: 'beta',
+  signature: VECTOR_SIGNATURE,
+  ...overrides
 });
 const vectorKey = createPrivateKey({
   key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, 7)]),
@@ -39,12 +47,45 @@ const vectorKey = createPrivateKey({
 });
 
 describe('docked receipt verifier', () => {
-  test('canonical payload and signature match the eotha-contracts vector', () => {
+  test('canonical payload and signature match the eotha-contracts vectors', () => {
     const payload = canonicalDockedReceiptPayload(vectorReceipt());
-    assert.equal(payload.length, 101);
+    assert.equal(payload.length, 109);
     assert.equal(payload.toString('hex'), VECTOR_HEX);
     assert.equal(sign(null, payload, vectorKey).toString('base64'), VECTOR_SIGNATURE);
     assert.equal(verifyDockedReceipt(vectorReceipt(), createPublicKey(vectorKey)), true);
+
+    const independent = vectorReceipt({ controllingFactionId: '', signature: INDEPENDENT_SIGNATURE });
+    const independentPayload = canonicalDockedReceiptPayload(independent);
+    assert.equal(independentPayload.length, 105);
+    assert.equal(independentPayload.toString('hex'), INDEPENDENT_VECTOR_HEX);
+    assert.equal(sign(null, independentPayload, vectorKey).toString('base64'), INDEPENDENT_SIGNATURE);
+    assert.equal(verifyDockedReceipt(independent, createPublicKey(vectorKey)), true);
+  });
+
+  test('the governing faction is signed: swapping it, or dropping it to independent, breaks the signature', () => {
+    const publicKey = createPublicKey(vectorKey);
+    for (const controllingFactionId of ['', 'alpha', 'gamma']) {
+      assert.equal(verifyDockedReceipt(vectorReceipt({ controllingFactionId }), publicKey), false, controllingFactionId);
+    }
+    assert.equal(verifyDockedReceipt(vectorReceipt({ controllingFactionId: undefined }), publicKey), false);
+  });
+
+  test('a faction id the engine never signs is rejected, even under a valid signature', () => {
+    for (const controllingFactionId of ['independent', 'delta', 'BETA']) {
+      const receipt = dockedReceipt('pilot-1', { controllingFactionId });
+      assert.equal(verifyDockedReceipt(receipt, app.claimKey.key), false, controllingFactionId);
+    }
+  });
+
+  test('a V1 receipt (no faction, old domain) is rejected, never read as independent', () => {
+    const v2 = dockedReceipt('pilot-1');
+    const v1Payload = Buffer.concat([
+      Buffer.from('EOTHA_DOCKED_RECEIPT_V1', 'ascii'),
+      canonicalDockedReceiptPayload(v2).subarray(23, -4)
+    ]);
+    const v1 = { ...v2, signature: sign(null, v1Payload, rtseKey).toString('base64') };
+    assert.equal(verifyDockedReceipt(v1, app.claimKey.key), false);
+    assert.equal(verifyDockedReceipt({ ...v1, controllingFactionId: undefined }, app.claimKey.key), false);
   });
 
   test('flipping any signed field breaks verification', () => {

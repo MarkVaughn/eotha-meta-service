@@ -90,7 +90,8 @@ export async function newPilot(prefix = 'Pilot') {
 /**
  * A docked receipt signed the way the engine signs it (eotha-contracts `DockedReceipt`): Ed25519 over
  * the domain, then the length-prefixed pilot id, the 16 raw bytes of the station id, the
- * length-prefixed system cell, both times as u64 LE and the 16-byte nonce. The bytes are assembled
+ * length-prefixed system cell, both times as u64 LE, the 16-byte nonce and the length-prefixed governing
+ * faction (V2; `''`, the default, is an independent station). The bytes are assembled
  * here, not with src/lib/docked-receipt.js, so the verifier is checked against an independent
  * encoder. `overrides` replace any field before signing; pass `signer` to sign with another key.
  * `pilot` is a newPilot() result, a guest session, or a bare player id.
@@ -104,6 +105,7 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
     dockedAtMs: nowMs - 2_000,
     issuedAtMs: nowMs,
     nonce: randomBytes(16).toString('base64'),
+    controllingFactionId: '',
     ...overrides
   };
   const str = (value) => {
@@ -118,13 +120,14 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
     return buf;
   };
   const payload = Buffer.concat([
-    Buffer.from('EOTHA_DOCKED_RECEIPT_V1', 'ascii'),
+    Buffer.from('EOTHA_DOCKED_RECEIPT_V2', 'ascii'),
     str(receipt.pilotId),
     Buffer.from(receipt.dockedEntityId.replaceAll('-', ''), 'hex'),
     str(receipt.systemH3),
     u64(receipt.dockedAtMs),
     u64(receipt.issuedAtMs),
-    Buffer.from(receipt.nonce, 'base64')
+    Buffer.from(receipt.nonce, 'base64'),
+    str(receipt.controllingFactionId)
   ]);
   return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }

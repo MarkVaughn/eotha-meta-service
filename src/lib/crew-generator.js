@@ -11,6 +11,8 @@ import {
   HOME_FACTION_WEIGHTS,
   HUB_RANK_WEIGHTS,
   HUB_SLOT_INDEX,
+  INDEPENDENT_STATION_REP_REQ_SCORE,
+  INDEPENDENT_STATION_STANDING,
   QUIRKS,
   QUIRK_IDS,
   STANDARD_RANK_WEIGHTS,
@@ -90,20 +92,23 @@ export function generateCrewBoard(stationId, nowMs) {
 
 /**
  * Every reason `candidate` cannot be hired right now, as `{ code, label, ...details }`, in the order
- * the board lists them. `ctx` is the pilot's side: `{ ship, credits, standings }`, where `ship` is
- * lockActiveShip's result (components, passengersAboard, traits, active crew) and `standings` maps
- * faction ids to standings.
+ * the board lists them. `ctx` is the pilot's side: `{ ship, credits, standings, stationFactionId }`,
+ * where `ship` is lockActiveShip's result (components, passengersAboard, traits, active crew),
+ * `standings` maps faction ids to standings and `stationFactionId` is the faction governing the station,
+ * as its verified docked receipt signs it (`''` for an independent station). The candidate's rank is
+ * judged against the pilot's standing with that faction, whatever the candidate's own home faction.
  */
-export function unavailableReasons(candidate, { ship, credits, standings }) {
+export function unavailableReasons(candidate, { ship, credits, standings, stationFactionId }) {
   const bonus = signingBonusCredits(candidate.rank, candidate.quirkId, ship.traits);
-  const required = CREW_REP_REQ_SCORE[candidate.rank];
-  const standing = standings[candidate.homeFactionId] ?? 0;
+  const independent = !stationFactionId;
+  const required = (independent ? INDEPENDENT_STATION_REP_REQ_SCORE : CREW_REP_REQ_SCORE)[candidate.rank];
+  const standing = independent ? INDEPENDENT_STATION_STANDING : standings[stationFactionId] ?? 0;
   const reasons = [];
   if (standing < required) {
     reasons.push({
       code: UNAVAILABLE.INSUFFICIENT_FACTION_REP,
-      label: `Requires ${REP_TIER_LABEL[candidate.rank]} (${required}) standing with ${candidate.homeFactionId} (current: ${standing})`,
-      factionId: candidate.homeFactionId,
+      label: `Requires ${REP_TIER_LABEL[candidate.rank]} (${required}) standing with ${stationFactionId} (current: ${standing})`,
+      factionId: stationFactionId,
       requiredScore: required,
       currentScore: standing
     });
