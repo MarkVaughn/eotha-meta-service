@@ -1,7 +1,9 @@
 import { computeShipAttributes, freeBerths, hullBudget, totalSubsystemPoints } from '../config/components.js';
 import {
+  CLANDESTINE_BASE_BONUS_RATE,
   CREW_CAPABILITY,
   CREW_CLASSES,
+  CREW_PERK,
   CREW_STATUS,
   MAX_ACTIVE_CREW_PER_CLASS,
   MAX_ARREARS_CREDITS,
@@ -14,10 +16,12 @@ import {
   classEffectsView,
   effectiveMoraleMult,
   effectiveWageShareBp,
+  crewPerk,
   engineerJuryRigSlots,
   maxActiveCrew,
   quirkView
 } from '../config/crew.js';
+import { MAX_REWARD_CREDITS } from '../config/missions.js';
 import {
   SETTLEMENT,
   addSeniorityXp,
@@ -217,13 +221,30 @@ export function deductCrewRevenueShare(crew, traits, grossCredits, { deferred = 
   return { grossCredits, crewShareCredits, netCredits: grossCredits - crewShareCredits, crewPayouts };
 }
 
+// The credits a payout of `signedCredits` is raised by, never past MAX_REWARD_CREDITS in all.
+const cappedBonus = (signedCredits, bonus) => Math.max(0, Math.min(bonus, MAX_REWARD_CREDITS - signedCredits));
+
+/** The credits the active `crew`'s Quartermaster adds to an ore sale the engine signed for `signedCredits`. */
+export const oreSaleBonusCredits = (crew, signedCredits) =>
+  cappedBonus(signedCredits, Math.round(signedCredits * crewPerk(crew, CREW_PERK.ORE_SALE_BONUS)));
+
+/**
+ * The credits the active `crew`'s Smuggler adds to a clean covert mission whose signed offer carries
+ * `cleanBonusCredits` (at CLANDESTINE_BASE_BONUS_RATE of its reward) and whose claim paid `signedCredits`:
+ * the bonus is paid at the Smuggler's rate instead.
+ */
+export const clandestineBonusCredits = (crew, signedCredits, cleanBonusCredits) =>
+  cappedBonus(signedCredits, Math.round(cleanBonusCredits * crewPerk(crew, CREW_PERK.CLANDESTINE_BONUS_RATE, CLANDESTINE_BASE_BONUS_RATE) / CLANDESTINE_BASE_BONUS_RATE));
+
 // What the utilization predicates read of a mission's signed offer.
 export const missionSettlement = (offer) => ({
   kind: SETTLEMENT.MISSION,
   type: offer.type,
   distanceHexes: offer.distance_hexes ?? 0,
   requiredBerths: offer.required_berths ?? 0,
-  covert: isCovert(offer)
+  covert: isCovert(offer),
+  reputationChange: offer.reputation_change ?? 0,
+  factionId: offer.faction_id ?? ''
 });
 
 /**

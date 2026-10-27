@@ -8,6 +8,7 @@ import {
   isFactionId
 } from '../config/factions.js';
 import { DEFAULT_FACTION_ID } from '../config/missions.js';
+import { CREW_PERK, crewPerk } from '../config/crew.js';
 
 // What a ReputationLedger row's `reason` records.
 export const LEDGER_REASONS = Object.freeze({
@@ -20,6 +21,16 @@ export const LEDGER_REASONS = Object.freeze({
 
 // The faction a mission's reputation goes to: its signed sponsor, else DEFAULT_FACTION_ID.
 export const missionFaction = (offer) => offer.faction_id || DEFAULT_FACTION_ID;
+
+// `delta` as the active `crew` change it: a gain is raised by a Diplomat's reputation bonus. A loss is
+// never raised.
+export const withCrewReputationBonus = (delta, crew) =>
+  delta > 0 ? Math.round(delta * (1 + crewPerk(crew, CREW_PERK.REPUTATION_GAIN_BONUS))) : delta;
+
+// The harm `delta` (negative) a mission does to its rival faction as the active `crew` soften it: a
+// Diplomat's reduction takes a share off (never past none).
+export const withCrewRivalHarmCut = (delta, crew) =>
+  delta < 0 ? Math.round(delta * (1 - Math.min(1, crewPerk(crew, CREW_PERK.RIVAL_HARM_REDUCTION)))) : delta;
 
 const DELTA_COLUMNS = { alpha: 'alphaDelta', beta: 'betaDelta', gamma: 'gammaDelta' };
 

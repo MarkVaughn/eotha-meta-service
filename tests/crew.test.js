@@ -79,7 +79,10 @@ describe('crew config', () => {
     assert.equal(MAX_TOTAL_WAGE_BP, 5000);
     assert.equal(CREW_BOARD_OFFER_COUNT, 4);
     assert.equal(CREW_BOARD_WINDOW_MS, 30 * 60_000);
-    assert.deepEqual(CREW_CLASS_IDS, ['PILOT', 'NAVIGATOR', 'SCIENCE', 'ENGINEER', 'CHEF', 'DOCTOR', 'GUNNER']);
+    assert.deepEqual(CREW_CLASS_IDS, [
+      'PILOT', 'NAVIGATOR', 'SCIENCE', 'ENGINEER', 'CHEF', 'DOCTOR', 'GUNNER',
+      'QUARTERMASTER', 'COMMS_OFFICER', 'DIPLOMAT', 'SMUGGLER'
+    ]);
   });
 
   test('the quirk catalog is Q01 to Q20 with weights summing to 1000', () => {
@@ -189,7 +192,7 @@ describe('crew board generator', () => {
     }
     assert.equal(seen.quirks.size, 20);
     assert.equal(seen.ranks.size, 3);
-    assert.equal(seen.classes.size, 7);
+    assert.equal(seen.classes.size, CREW_CLASS_IDS.length);
   });
 });
 

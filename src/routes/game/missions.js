@@ -19,7 +19,7 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
-import { deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
+import { clandestineBonusCredits, deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
 import { doctorCooldownReduction } from '../../config/crew-morale.js';
 import { recordCrewDock, recordFlakyDeparture } from '../../lib/crew-docking.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
@@ -28,7 +28,10 @@ import {
 } from '../../lib/mission-offer.js';
 import { fromStoredOffer, toActiveMission } from '../../lib/active-mission.js';
 import { withColorsBonus } from '../../config/factions.js';
-import { LEDGER_REASONS, adjustMissionReputation, adjustReputation, factionsClaim, missionFaction, standingsOf } from '../../lib/reputation.js';
+import {
+  LEDGER_REASONS, adjustMissionReputation, adjustReputation, factionsClaim, missionFaction, standingsOf,
+  withCrewReputationBonus, withCrewRivalHarmCut
+} from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
@@ -439,7 +442,7 @@ export default async function missionsRoutes(fastify) {
     };
   });
 
-  // Returns `{ credits, payout, reputationChange, standings, factions, ship, passengersAboard, captain }` (`payout` the crew's split of the reward, see deductCrewRevenueShare; plus the stored `lots` for a gather claim), null
+  // Returns `{ credits, payout, reputationChange, standings, factions, ship, passengersAboard, captain, clandestineBonusCredits }` (`payout` the crew's split of the reward, see deductCrewRevenueShare; plus the stored `lots` for a gather claim), null
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
   // the payout would overflow credits.
@@ -472,28 +475,34 @@ export default async function missionsRoutes(fastify) {
         const { count } = await tx.playerMission.deleteMany({ where: { playerId, missionId } });
         if (count !== 1) return null;
         const factionId = missionFaction(active.offer);
+        const covert = isCovert(active.offer);
+        // A clean covert mission pays the active Smuggler's rate on its clandestine bonus: the credits
+        // beyond the signed reward are paid (and shared with the crew) like the rest of it.
+        const clandestineBonus = covert && !claim.wasDetected
+          ? clandestineBonusCredits(ship.crew, claim.rewardCredits, active.offer.clandestine_bonus_credits ?? 0) : 0;
+        const rewardCredits = claim.rewardCredits + clandestineBonus;
         await tx.completedMission.create({
-          data: { playerId, missionId, factionId, rewardCredits: claim.rewardCredits, reputationChange: claim.reputationChange }
+          data: { playerId, missionId, factionId, rewardCredits, reputationChange: claim.reputationChange }
         });
-        // The crew aboard take their share of the signed reward; the pilot is credited the rest.
+        // The crew aboard take their share of the reward; the pilot is credited the rest.
         // Guarded increment; throwing rolls back the mission delete and payout record.
         const payroll = await payrollCrewOf(tx, playerId, ship);
-        const payout = deductCrewRevenueShare(payroll, ship.traits, claim.rewardCredits, { deferred });
+        const payout = deductCrewRevenueShare(payroll, ship.traits, rewardCredits, { deferred });
         const { count: credited } = await tx.player.updateMany({
           where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - payout.netCredits } },
           data: { credits: { increment: payout.netCredits } }
         });
         if (credited !== 1) throw OVERFLOW;
         // The signed reputation, negative for a late enough completion, goes to the sponsor: a gain
-        // for the faction whose colors the pilot flies is multiplied (withColorsBonus).
-        const reputationChange = withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors);
-        const covert = isCovert(active.offer);
+        // for the faction whose colors the pilot flies is multiplied (withColorsBonus), and the active
+        // Diplomat raises any gain and softens the harm to the rival.
+        const reputationChange = withCrewReputationBonus(withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors), ship.crew);
         const reason = covert
           ? (claim.wasDetected ? LEDGER_REASONS.COMPLETE_COVERT_DETECTED : LEDGER_REASONS.COMPLETE_COVERT_CLEAN)
           : LEDGER_REASONS.MISSION_COMPLETED;
         await adjustMissionReputation(tx, playerId, factionId, reputationChange,
           covert && claim.wasDetected ? active.offer.opposed_faction_id : null,
-          covert && claim.wasDetected ? claim.opposedReputationChange : 0, { reason, missionId });
+          covert && claim.wasDetected ? withCrewRivalHarmCut(claim.opposedReputationChange, ship.crew) : 0, { reason, missionId });
         const cooldownMs = Math.round(MISSION_COOLDOWN_MS * (1 - doctorCooldownReduction(ship.crew)));
         await startCooldown(tx, playerId, stationId, Date.now(), cooldownMs);
         const passengersAboard = unboarded(ship, active.offer.required_berths);
@@ -511,7 +520,7 @@ export default async function missionsRoutes(fastify) {
         const balance = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         return {
           credits: balance.credits, payout, reputationChange, standings, factions, ship: dock.ship,
-          passengersAboard, captain, crewMorale: settledCrew.effects, ...(dock.docking && { docking: dock.docking }), ...(lots && { lots })
+          passengersAboard, captain, clandestineBonusCredits: clandestineBonus, crewMorale: settledCrew.effects, ...(dock.docking && { docking: dock.docking }), ...(lots && { lots })
         };
       });
     } catch (err) {
@@ -597,9 +606,11 @@ export default async function missionsRoutes(fastify) {
     return {
       success: true,
       credits: settled.credits,
-      // `payout` is the signed reward; the crew's share comes out of it before the pilot is credited.
-      payout: claim.rewardCredits,
+      // `payout` is the signed reward and any Smuggler bonus; the crew's share comes out of it before the
+      // pilot is credited.
+      payout: settled.payout.grossCredits,
       ...settled.payout,
+      ...(settled.clandestineBonusCredits > 0 && { clandestineBonusCredits: settled.clandestineBonusCredits }),
       reputation_change: settled.reputationChange,
       standings: settled.standings,
       ...settled.captain,

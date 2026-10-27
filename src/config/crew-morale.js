@@ -60,7 +60,8 @@ export function moraleAfterCappedGain(member, raw, cap) {
 }
 
 // What a settlement is, for the utilization predicates: a mission (`{ kind, type, distanceHexes,
-// requiredBerths, covert }`, from its signed offer), a cargo sale (an ore sale) or a chart sale
+// requiredBerths, covert, reputationChange, factionId }`, from its signed offer), a cargo sale (an ore
+// sale) or a chart sale
 // (`{ kind, chart: 'PLANET' | 'SYSTEM' }`).
 export const SETTLEMENT = Object.freeze({
   MISSION: 'MISSION',
@@ -84,7 +85,11 @@ const UTILIZED_BY = Object.freeze({
   ENGINEER: (s, ctx) => missionTypeIs(s, 'MISSION_TYPE_GATHER') || s.kind === SETTLEMENT.CARGO_SALE || ctx.subsystemUse >= 0.8,
   CHEF: (s, ctx) => berths(s) >= 1 || ctx.activeCrew >= 2,
   DOCTOR: (s) => berths(s) >= 1 || (isMission(s) && s.covert),
-  GUNNER: (s, ctx) => (missionTypeIs(s, 'MISSION_TYPE_GATHER') || s.kind === SETTLEMENT.CARGO_SALE) && ctx.weaponsTier >= 1
+  GUNNER: (s, ctx) => (missionTypeIs(s, 'MISSION_TYPE_GATHER') || s.kind === SETTLEMENT.CARGO_SALE) && ctx.weaponsTier >= 1,
+  QUARTERMASTER: (s) => missionTypeIs(s, 'MISSION_TYPE_GATHER') || s.kind === SETTLEMENT.CARGO_SALE,
+  COMMS_OFFICER: (s) => isMission(s) && s.covert,
+  DIPLOMAT: (s) => missionTypeIs(s, 'MISSION_TYPE_PASSAGE') || (isMission(s) && s.reputationChange !== 0),
+  SMUGGLER: (s) => isMission(s) && (s.covert || s.factionId === 'gamma')
 });
 
 /** Whether `settlement` used the skills of a `crewClass` member. */
