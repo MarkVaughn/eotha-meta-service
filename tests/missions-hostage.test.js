@@ -1,13 +1,15 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
-import { addCrew, app, call, closeApp, dockedReceipt, json, newPilot, receiptAtOrigin, setCredits, signedOffer } from './helpers.js';
+import { randomUUID, sign } from 'node:crypto';
+import { addCrew, app, call, closeApp, dockedReceipt, json, newPilot, receiptAtOrigin, rtseKey, setCredits, signedOffer } from './helpers.js';
 import {
   HOSTAGE_BASE_PENALTY, HOSTAGE_MINUTES_PER_POINT, HOSTAGE_TIME_PENALTY_CAP
 } from '../src/config/missions.js';
 import { LOYALIST_ABANDON_PENALTY, PERFECTIONIST_FAIL_PENALTY, QUIRKS } from '../src/config/crew.js';
 import { abandonPenalty } from '../src/config/crew-morale.js';
 import { generateCrewBoard } from '../src/lib/crew-generator.js';
+import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
+import { missionOfferVersion } from '../src/lib/mission-offer.js';
 import { accruedPenalty, basePenalty, disembarkPlace, hostageState } from '../src/lib/hostage.js';
 
 before(async () => { await app.ready(); });
@@ -378,14 +380,104 @@ describe('POST /game/missions/disembark', () => {
     assert.equal(await aboard(pilot), 3);
   });
 
-  test('a faction sponsor goes through the standing caps and Flying Colors floor like any other loss', async () => {
-    const pilot = await newPilot('Faction');
-    await app.prisma.playerReputation.create({ data: { playerId: pilot.id, factionId: 'alpha', standing: 100 } });
-    const offer = await holdHostages(pilot, { faction_id: 'alpha', required_berths: 1 });
-    const res = await disembark(pilot, offer.mission_id);
-    assert.equal(res.statusCode, 200, res.body);
-    assert.equal(await standingOf(pilot, 'alpha'), 80);
-    assert.equal(json(res).standings.alpha, 80);
+  describe('on a faction sponsor', () => {
+    const colorsOf = async (pilot) => (await app.prisma.player.findUnique({ where: { id: pilot.id } })).activeColorsFactionId;
+    const setStanding = (pilot, factionId, standing) =>
+      app.prisma.playerReputation.upsert({
+        where: { playerId_factionId: { playerId: pilot.id, factionId } }, update: { standing }, create: { playerId: pilot.id, factionId, standing }
+      });
+
+    test('the loss lowers the standing and the ledger records it', async () => {
+      const pilot = await newPilot('Faction');
+      await setStanding(pilot, 'alpha', 100);
+      const offer = await holdHostages(pilot, { faction_id: 'alpha', required_berths: 1 });
+      const res = await disembark(pilot, offer.mission_id);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(await standingOf(pilot, 'alpha'), 80);
+      assert.equal(json(res).standings.alpha, 80);
+    });
+
+    test('a standing that falls below 500 stops the Flying Colors, in the database and in the reissued token', async () => {
+      const pilot = await newPilot('Colors');
+      await setStanding(pilot, 'alpha', 505);
+      await app.prisma.player.update({ where: { id: pilot.id }, data: { activeColorsFactionId: 'alpha' } });
+      const offer = await holdHostages(pilot, { faction_id: 'alpha', required_berths: 1 });
+      assert.equal(await colorsOf(pilot), 'alpha');
+      const res = await disembark(pilot, offer.mission_id);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).reputation_change, -20);
+      assert.equal(await standingOf(pilot, 'alpha'), 485);
+      assert.equal(await colorsOf(pilot), null);
+      assert.deepEqual(app.jwt.verify(json(res).token).factions, { alpha: 485, beta: 0, gamma: 0, active_colors: null });
+    });
+
+    test('the standing never falls below -1000', async () => {
+      const pilot = await newPilot('Floor');
+      await setStanding(pilot, 'alpha', -990);
+      const offer = await holdHostages(pilot, { faction_id: 'alpha', required_berths: 1 });
+      const res = await disembark(pilot, offer.mission_id);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(await standingOf(pilot, 'alpha'), -1000);
+      assert.equal(json(res).standings.alpha, -1000);
+      assert.equal(app.jwt.verify(json(res).token).factions.alpha, -1000);
+    });
+  });
+
+  describe('with a receipt for a dock already recorded', () => {
+    // A receipt's `dockedAtMs` is fixed for a docking session, so a second action at that dock reuses it.
+    const claimFor = (pilot, active) => {
+      const claim = {
+        missionId: active.mission_id, playerShipId: pilot.id, destinationStationId: active.offer.destination_station_id,
+        acceptedAtMs: active.accepted_at_ms, completedAtMs: active.accepted_at_ms + 60_000, durationTakenMs: 60_000,
+        rewardCredits: active.offer.reward_credits, reputationChange: active.offer.reputation_change,
+        wasDetected: false, exposureScoreMilli: 0, opposedReputationChange: 0, bribePaidCredits: 0
+      };
+      claim.signature = sign(null, canonicalClaimPayload(claim, false, missionOfferVersion(active.offer)), rtseKey).toString('base64');
+      return claim;
+    };
+
+    test('disembarking at the dock where the passage was abandoned answers instead of failing after it committed', async () => {
+      const pilot = await newPilot('Samedock');
+      const offer = passage(pilot, { required_berths: 1 });
+      const active = await hold(pilot, offer);
+      const receipt = dockedReceipt(pilot);
+      const abandoned = await abandon(pilot, active.mission_id, receipt);
+      assert.equal(abandoned.statusCode, 200, abandoned.body);
+      assert.equal(json(abandoned).docking.applied, true);
+
+      const res = await disembark(pilot, offer.mission_id, receipt);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).docking, undefined);
+      assert.equal(json(res).departed_crew, undefined);
+      assert.equal(json(res).reputation_change, -20);
+      assert.equal(tokenAboard(res), 0);
+      assert.equal((await abandonedRow(pilot, offer.mission_id)).reason, 'hostage_returned');
+    });
+
+    test('cancelling a passage at the origin it was accepted at answers too', async () => {
+      const pilot = await newPilot('Samehome');
+      const offer = passage(pilot, { required_berths: 1 });
+      const receipt = receiptAtOrigin(pilot, offer);
+      const accepted = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receipt });
+      assert.equal(accepted.statusCode, 200, accepted.body);
+      const res = await abandon(pilot, offer.mission_id, receipt);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).outcome, 'MISSION_ABANDON_OUTCOME_CANCELLED');
+      assert.equal(json(res).docking, undefined);
+      assert.equal(tokenAboard(res), 0);
+    });
+
+    test('completing a mission at the dock it was accepted at answers too', async () => {
+      const pilot = await newPilot('Samedone');
+      const offer = research(pilot);
+      const receipt = receiptAtOrigin(pilot, offer);
+      const accepted = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receipt });
+      assert.equal(accepted.statusCode, 200, accepted.body);
+      const res = await call(pilot, 'POST', '/game/missions/complete', { claim: claimFor(pilot, json(accepted).active), dockedReceipt: receipt });
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).docking, undefined);
+      assert.equal(json(res).success, true);
+    });
   });
 
   test('a second disembark, a held mission and a mission cancelled in port are NOT_HOSTAGE', async () => {

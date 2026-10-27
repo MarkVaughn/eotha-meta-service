@@ -481,7 +481,7 @@ export default async function missionsRoutes(fastify) {
       standings: outcome.standings,
       ...(outcome.crewMorale.length > 0 && { crew_morale: outcome.crewMorale }),
       ...(outcome.docking?.applied && { docking: outcome.docking }),
-      ...(outcome.docking?.departed.length && { departed_crew: outcome.docking.departed }),
+      ...(outcome.docking?.departed?.length && { departed_crew: outcome.docking.departed }),
       token: await tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
     };
   });
@@ -565,7 +565,7 @@ export default async function missionsRoutes(fastify) {
       reputation_change: outcome.reputationChange,
       standings: outcome.standings,
       ...(outcome.docking?.applied && { docking: outcome.docking }),
-      ...(outcome.docking?.departed.length && { departed_crew: outcome.docking.departed }),
+      ...(outcome.docking?.departed?.length && { departed_crew: outcome.docking.departed }),
       token: await tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
     };
   });
@@ -748,7 +748,7 @@ export default async function missionsRoutes(fastify) {
       ...settled.captain,
       ...(settled.crewMorale.length > 0 && { crew_morale: settled.crewMorale }),
       ...(settled.docking?.applied && { docking: settled.docking }),
-      ...(settled.docking?.departed.length && { departed_crew: settled.docking.departed }),
+      ...(settled.docking?.departed?.length && { departed_crew: settled.docking.departed }),
       ...(settled.lots && { lots: settled.lots }),
       token: await tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
     };

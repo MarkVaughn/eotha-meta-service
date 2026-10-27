@@ -10,7 +10,8 @@ export const MAX_OFFER_FUTURE_SKEW_MS = 5_000;
 
 // Most missions of each type (the offer's `type`) a pilot may hold at once. The types are
 // independent, so a pilot may hold one passage, three research and one gather mission together.
-// One passage at a time means that passage owns every passenger aboard.
+// A held passage owns its own `required_berths` passengers; the passengers of an abandoned one stay
+// aboard as hostages until dropped (HOSTAGE_*), so a pilot may hold a passage beside them.
 export const MISSION_LIMITS = Object.freeze({
   MISSION_TYPE_PASSAGE: 1,
   MISSION_TYPE_RESEARCH: 3,
