@@ -24,14 +24,14 @@ export async function ensureCaptain(db, playerId, name) {
 export const captainTraits = (captain) => knownTraits(captain?.unlockedTraits);
 
 // `db` is the Prisma client or an open transaction. The ids of the Legacy Doctrines in force for the
-// pilot: those of its retired captains marked active, whoever commands now.
+// pilot, each once: those of its retired captains marked active, whoever commands now.
 export async function activeDoctrineIdsOf(db, playerId) {
   const rows = await db.retiredCaptain.findMany({
     where: { playerId, activeDoctrine: true, legacyDoctrineId: { not: null } },
     orderBy: [{ retiredAt: 'asc' }, { id: 'asc' }],
     select: { legacyDoctrineId: true }
   });
-  return rows.map((row) => row.legacyDoctrineId).filter((id) => Object.hasOwn(LEGACY_DOCTRINES, id));
+  return [...new Set(rows.map((row) => row.legacyDoctrineId))].filter((id) => Object.hasOwn(LEGACY_DOCTRINES, id));
 }
 
 // The effect ids computeShipAttributes, the wage terms and the XP award read as the captain's

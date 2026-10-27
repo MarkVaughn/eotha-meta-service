@@ -79,13 +79,12 @@ describe('retirement config', () => {
     assert.deepEqual(['EARLY_DISCHARGE', 'HONORS', 'MASTER'].map(doctrineTierLimit), [0, 1, 2]);
   });
 
-  test('four perks, each in two tiers, the second twice as strong', () => {
-    assert.equal(LEGACY_DOCTRINE_IDS.length, 8);
+  test('three perks, each in two tiers, the second twice as strong', () => {
+    assert.equal(LEGACY_DOCTRINE_IDS.length, 6);
     assert.equal(LEGACY_DOCTRINES.LEGACY_XP_BOOST.xpMult, 1.1);
     assert.equal(LEGACY_DOCTRINES.LEGACY_XP_BOOST_II.xpMult, 1.2);
     assert.equal(LEGACY_DOCTRINES.LEGACY_DOCKING_SPEED.ship.docking_time_mult.mult, 0.9);
     assert.equal(LEGACY_DOCTRINES.LEGACY_WAGE_CUT.crew.wageMult, 0.9);
-    assert.equal(LEGACY_DOCTRINES.LEGACY_PAYOUT_BOOST.payoutMult, 1.05);
     assert.deepEqual(LEGACY_DOCTRINE_IDS.filter((id) => LEGACY_DOCTRINES[id].tier === 2), LEGACY_DOCTRINE_IDS.filter((id) => id.endsWith('_II')));
   });
 
@@ -332,14 +331,14 @@ describe('POST /game/captain/retire', () => {
     for (const [factionId, standing] of [['alpha', 480], ['beta', -210], ['gamma', 120]]) {
       await app.prisma.playerReputation.create({ data: { playerId: pilot.id, factionId, standing } });
     }
-    const res = await retire(pilot, { legacyDoctrineId: 'LEGACY_PAYOUT_BOOST_II' });
+    const res = await retire(pilot, { legacyDoctrineId: 'LEGACY_XP_BOOST_II' });
     assert.equal(res.statusCode, 200, res.body);
     const [row] = await retiredRows(pilot);
     assert.equal(row.capstoneTraitId, 'S6_ASTROGATOR_PRIME');
     assert.deepEqual(row.factionStandingsSnapshot, { alpha: 480, beta: -210, gamma: 120 });
     assert.equal(row.primaryFactionId, 'alpha');
     assert.equal(row.retirementTier, 'MASTER');
-    assert.equal(row.legacyDoctrineId, 'LEGACY_PAYOUT_BOOST_II');
+    assert.equal(row.legacyDoctrineId, 'LEGACY_XP_BOOST_II');
     // Standings belong to the pilot, not the captain.
     assert.equal((await app.prisma.playerReputation.findUnique({ where: { playerId_factionId: { playerId: pilot.id, factionId: 'alpha' } } })).standing, 480);
   });
@@ -602,7 +601,7 @@ describe('POST /game/captain/retire', () => {
     assert.equal(body.retiredCaptains[1].legacyDoctrine, null);
     assert.deepEqual(body.activeDoctrineIds, ['LEGACY_XP_BOOST']);
     assert.equal(body.maxActiveDoctrines, 2);
-    assert.equal(body.doctrines.length, 8);
+    assert.equal(body.doctrines.length, 6);
     assert.equal(body.retiredCaptains[0].assignmentStatus, 'RETIRED_IDLE');
 
     const stranger = await newPilot('Stranger');
@@ -639,6 +638,26 @@ describe('Legacy Doctrines', () => {
     assert.equal(off.statusCode, 200, off.body);
     assert.deepEqual(json(off).activeDoctrineIds, ['LEGACY_DOCKING_SPEED']);
     assert.equal((await retire(pilot, { legacyDoctrineId: 'LEGACY_WAGE_CUT' })).statusCode, 200);
+  });
+
+  test('the same doctrine held by several retired captains counts once for its effect and for the limit', async () => {
+    const pilot = await pilotWith(LV8);
+    assert.equal((await retireEighth(pilot, 'LEGACY_DOCKING_SPEED')).statusCode, 200);
+    const same = await retireEighth(pilot, 'LEGACY_DOCKING_SPEED');
+    assert.equal(same.statusCode, 200, same.body);
+    assert.deepEqual(json(same).activeDoctrineIds, ['LEGACY_DOCKING_SPEED']);
+    assert.equal(tokenClaims(same).ship_attributes.docking_time_mult, 0.9);
+
+    const other = await retireEighth(pilot, 'LEGACY_XP_BOOST');
+    assert.equal(other.statusCode, 200, other.body);
+    assert.deepEqual(json(other).activeDoctrineIds.sort(), ['LEGACY_DOCKING_SPEED', 'LEGACY_XP_BOOST']);
+
+    const atCap = await retireEighth(pilot, 'LEGACY_DOCKING_SPEED');
+    assert.equal(atCap.statusCode, 200, atCap.body);
+    assert.equal(tokenClaims(atCap).ship_attributes.docking_time_mult, 0.9);
+    const third = await retireEighth(pilot, 'LEGACY_WAGE_CUT');
+    assert.equal(third.statusCode, 409);
+    assert.equal(json(third).error, 'doctrine_limit_reached');
   });
 
   test('POST /game/captain/doctrine switches a doctrine on and off and re-signs the token', async () => {

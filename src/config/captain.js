@@ -149,9 +149,8 @@ export const capstoneOf = (traitIds) => traitIds.find((id) => TRAITS[id]?.tier =
 
 // Legacy Doctrines: a perk a retired captain's slot holds for the pilot's whole account while it is
 // active, whoever commands. An honors retirement unlocks a Tier I doctrine, a master retirement Tier I
-// or II (the same four perks, twice as strong). `ship` and `crew` work like a trait's; `xpMult` scales
-// the Captain XP a claim awards (src/lib/captain.js awardCaptainXp). `payoutMult` is the mission payout
-// bonus: stored and shown but not applied, like the payout traits (S4, S5, C6), until payouts apply them.
+// or II (the same three perks, twice as strong). `ship` and `crew` work like a trait's; `xpMult` scales
+// the Captain XP a claim awards (src/lib/captain.js awardCaptainXp).
 const doctrine = (id, name, tier, summary, effects = {}) =>
   Object.freeze({
     id,
@@ -160,17 +159,14 @@ const doctrine = (id, name, tier, summary, effects = {}) =>
     summary,
     ship: Object.freeze(effects.ship ?? {}),
     crew: Object.freeze(effects.crew ?? {}),
-    xpMult: effects.xpMult ?? 1,
-    payoutMult: effects.payoutMult ?? 1
+    xpMult: effects.xpMult ?? 1
   });
 
 export const LEGACY_DOCTRINES = Object.freeze(Object.fromEntries([
-  doctrine('LEGACY_PAYOUT_BOOST', 'Legacy Contracts', 1, '+5% mission payouts', { payoutMult: 1.05 }),
   doctrine('LEGACY_DOCKING_SPEED', 'Legacy Docking Speed', 1, '-10% docking and undocking duration',
     { ship: { docking_time_mult: { mult: 0.9 } } }),
   doctrine('LEGACY_XP_BOOST', 'Legacy Tutelage', 1, '+10% Captain XP for every successor', { xpMult: 1.1 }),
   doctrine('LEGACY_WAGE_CUT', 'Legacy Loyalty', 1, '-10% crew wage shares', { crew: { wageMult: 0.9 } }),
-  doctrine('LEGACY_PAYOUT_BOOST_II', 'Legacy Contracts II', 2, '+10% mission payouts', { payoutMult: 1.1 }),
   doctrine('LEGACY_DOCKING_SPEED_II', 'Legacy Docking Speed II', 2, '-20% docking and undocking duration',
     { ship: { docking_time_mult: { mult: 0.8 } } }),
   doctrine('LEGACY_XP_BOOST_II', 'Legacy Tutelage II', 2, '+20% Captain XP for every successor', { xpMult: 1.2 }),

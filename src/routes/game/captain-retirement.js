@@ -213,7 +213,7 @@ export default async function captainRetirementRoutes(fastify) {
         if (limit === 0) return { refused: { code: 'doctrine_not_available', retirementTier: eligibleTier } };
         if (LEGACY_DOCTRINES[legacyDoctrineId].tier > limit) return { refused: { code: 'doctrine_tier_locked', legacyDoctrineId } };
         const activeDoctrineIds = await activeDoctrineIdsOf(tx, playerId);
-        if (activeDoctrineIds.length >= MAX_ACTIVE_LEGACY_DOCTRINES) {
+        if (!activeDoctrineIds.includes(legacyDoctrineId) && activeDoctrineIds.length >= MAX_ACTIVE_LEGACY_DOCTRINES) {
           return { refused: { code: 'doctrine_limit_reached', maxActiveDoctrines: MAX_ACTIVE_LEGACY_DOCTRINES, activeDoctrineIds } };
         }
       }
@@ -346,7 +346,7 @@ export default async function captainRetirementRoutes(fastify) {
       }
       if (active && !row.activeDoctrine) {
         const activeDoctrineIds = await activeDoctrineIdsOf(tx, playerId);
-        if (activeDoctrineIds.length >= MAX_ACTIVE_LEGACY_DOCTRINES) {
+        if (!activeDoctrineIds.includes(doctrineId) && activeDoctrineIds.length >= MAX_ACTIVE_LEGACY_DOCTRINES) {
           return { refused: { code: 'doctrine_limit_reached', maxActiveDoctrines: MAX_ACTIVE_LEGACY_DOCTRINES, activeDoctrineIds } };
         }
       }

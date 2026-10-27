@@ -542,16 +542,15 @@ Everything commits together under the pilot's lock or not at all: the fee (a gua
 
 The captain's own traits do not carry over; with them go their berths, crew slots and hull budget point. Crew already aboard stay even if the hull's new limit is lower.
 
-**Legacy Doctrines.** An honors retirement unlocks one slot on its `RetiredCaptain`, a master retirement one that may hold a Tier II doctrine. Name `legacyDoctrineId` in the retire body to fill it and switch it on, or fill it later with `POST /game/captain/doctrine`. At most `MAX_ACTIVE_LEGACY_DOCTRINES = 2` are active across the account, whoever commands. A retirement naming a doctrine while two are active is `409 doctrine_limit_reached` and changes nothing; switch one off first.
+**Legacy Doctrines.** An honors retirement unlocks one slot on its `RetiredCaptain`, a master retirement one that may hold a Tier II doctrine. Name `legacyDoctrineId` in the retire body to fill it and switch it on, or fill it later with `POST /game/captain/doctrine`. At most `MAX_ACTIVE_LEGACY_DOCTRINES = 2` distinct doctrines are active across the account, whoever commands; several retired captains holding the same doctrine count it once, for its effects and for the limit. A retirement naming a doctrine that is not already in force while two others are is `409 doctrine_limit_reached` and changes nothing; switch one off first.
 
 | Doctrine (Tier I / II) | Effect | Applied |
 |---|---|---|
 | `LEGACY_XP_BOOST` / `_II` | `+10%` / `+20%` Captain XP (rounded down) | XP awards; crew Seniority XP follows the XP awarded |
 | `LEGACY_DOCKING_SPEED` / `_II` | `docking_time_mult x 0.9` / `x 0.8` | signed ship attributes |
 | `LEGACY_WAGE_CUT` / `_II` | crew wage shares `x 0.9` / `x 0.8` (the 2.5% floor holds) | revenue share and the roster |
-| `LEGACY_PAYOUT_BOOST` / `_II` | `+5%` / `+10%` mission payouts | stored and listed only, like the payout traits, until payouts apply them |
 
-- `POST /game/captain/doctrine`: `{ retiredCaptainId, active, legacyDoctrineId?, dockedReceipt, stationId? }` (docked like a trait unlock, since the signed attributes change). `legacyDoctrineId` fills an empty slot once (`409 doctrine_already_chosen` afterwards, `400 doctrine_tier_locked`, `409 no_doctrine_slot` after an early discharge); `active` switches the slot on (`409 doctrine_limit_reached` at two) or off. Another pilot's `retiredCaptainId` is `404 retired_captain_not_found`. Returns `{ retiredCaptain, activeDoctrineIds, ship_attributes, token }`.
+- `POST /game/captain/doctrine`: `{ retiredCaptainId, active, legacyDoctrineId?, dockedReceipt, stationId? }` (docked like a trait unlock, since the signed attributes change). `legacyDoctrineId` fills an empty slot once (`409 doctrine_already_chosen` afterwards, `400 doctrine_tier_locked`, `409 no_doctrine_slot` after an early discharge); `active` switches the slot on (`409 doctrine_limit_reached` for a third distinct doctrine) or off. Another pilot's `retiredCaptainId` is `404 retired_captain_not_found`. Returns `{ retiredCaptain, activeDoctrineIds, ship_attributes, token }`.
 - `POST /game/captain/jury-rig`: see [Engineer captains](#engineer-captains-overdrive).
 - `GET /game/captain/retired`: the Hall of Command, `{ retiredCaptains, activeDoctrineIds, maxActiveDoctrines, doctrines }`, oldest first, with the doctrine catalog.
 
