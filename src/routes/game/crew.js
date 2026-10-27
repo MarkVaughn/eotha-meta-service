@@ -84,7 +84,7 @@ const MESSAGES = {
   hull_crew_cap_reached: "The hull cannot take more active crew.",
   insufficient_free_berths: 'There is no free life support berth for another crew member.',
   class_already_active: 'A crew member of that class is already aboard.',
-  insufficient_faction_rep: "Your standing with the candidate's home faction is too low to hire them.",
+  insufficient_faction_rep: "Your standing with this station's governing faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
   crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
   crew_not_engineer: 'Only an Engineer can configure component overdrive.',
