@@ -1,5 +1,5 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
-import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, crewResists, crewShipEffects, innateShipEffects } from './crew.js';
+import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, innateJuryRigTypes, crewResists, crewShipEffects, innateShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
@@ -139,7 +139,7 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
   }
 
-  const overdrive = engineerJuryRigTypes(activeCrew);
+  const overdrive = new Set([...engineerJuryRigTypes(activeCrew), ...innateJuryRigTypes(traits)]);
   const attributes = {};
   for (const type of COMPONENT_TYPES) {
     const floor = OPTIONAL_COMPONENTS.includes(type) ? 0 : MIN_TIER;

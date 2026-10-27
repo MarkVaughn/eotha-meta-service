@@ -8,7 +8,7 @@ import {
   levelForXp,
   traitPointsForLevel
 } from '../config/captain.js';
-import { innateEffectId } from '../config/crew.js';
+import { ENGINEER_JURY_RIG_TYPES, engineerJuryRigSlots, innateEffectId } from '../config/crew.js';
 
 // `db` is the Prisma client or an open transaction. Returns the pilot's Captain, creating the Level 1
 // starter (named after the pilot) if there is none yet. The insert skips an existing row instead of
@@ -42,6 +42,10 @@ export function effectIdsFor(captain, doctrineIds = []) {
   return [...captainTraits(captain), ...doctrineIds, ...(innate ? [innate] : [])];
 }
 
+// The component types an innate Engineer captain has selected to overdrive, as stored.
+const jurySelection = (captain) =>
+  Array.isArray(captain.juryRigComponentTypes) ? captain.juryRigComponentTypes.filter((t) => ENGINEER_JURY_RIG_TYPES.includes(t)) : [];
+
 // What the client shows of a captain.
 export function captainView(captain) {
   const traits = captainTraits(captain);
@@ -50,7 +54,15 @@ export function captainView(captain) {
   return {
     name: captain.name,
     originType: captain.originType,
-    ...(innate && { innate: { crewClass: captain.innateClass, rank: captain.innateRank, quirkId: captain.quirkId } }),
+    ...(innate && { innate: {
+      crewClass: captain.innateClass,
+      rank: captain.innateRank,
+      quirkId: captain.quirkId,
+      ...(captain.innateClass === 'ENGINEER' && { juryRig: {
+        slots: engineerJuryRigSlots({ crewClass: 'ENGINEER', rank: captain.innateRank }),
+        selectedComponentTypes: jurySelection(captain)
+      } })
+    } }),
     level,
     xp: captain.xp,
     xpForLevel: LEVEL_XP[level - 1],

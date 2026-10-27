@@ -71,6 +71,7 @@ model Captain {
   innateClass        String?
   innateRank         String?
   quirkId            String?
+  juryRigComponentTypes Json  @default("[]") // an innate Engineer's overdriven components
   missionsCompleted  Int      @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt

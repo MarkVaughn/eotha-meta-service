@@ -21,7 +21,7 @@ import {
   retirementTierForLevel
 } from '../src/config/captain.js';
 import { computeShipAttributes } from '../src/config/components.js';
-import { innateEffectId } from '../src/config/crew.js';
+import { innateEffectId, innateJuryRigTypes } from '../src/config/crew.js';
 import { awardCaptainXp, effectIdsFor } from '../src/lib/captain.js';
 
 before(async () => { await app.ready(); });
@@ -197,7 +197,9 @@ describe('POST /game/captain/retire', () => {
     assert.equal(body.retirementTier, 'MASTER');
     assert.equal(body.captain.name, 'Mara Vell');
     assert.equal(body.captain.originType, 'PROMOTED_CREW');
-    assert.deepEqual(body.captain.innate, { crewClass: 'ENGINEER', rank: 'MASTER', quirkId: COOL_HEADED });
+    assert.deepEqual(body.captain.innate, {
+      crewClass: 'ENGINEER', rank: 'MASTER', quirkId: COOL_HEADED, juryRig: { slots: 2, selectedComponentTypes: [] }
+    });
     assert.equal(body.promoted.crewId, engineer.id);
 
     assert.equal((await retiredRows(pilot)).length, 1);
@@ -746,5 +748,133 @@ describe('Legacy Doctrines', () => {
     const wrong = await doctrine(pilot, { retiredCaptainId: row.id, active: false, stationId: randomUUID() });
     assert.equal(json(wrong).error, 'docked_receipt_wrong_station');
     assert.equal(await snapshot(pilot), before);
+  });
+});
+
+describe('an innate Master Engineer overdrives two components', () => {
+  const shipOf = (pilot) => app.prisma.spaceship.findFirst({ where: { playerId: pilot.id, active: true } });
+  const setTier = async (pilot, type, tier) => app.prisma.shipComponentRecord.update({
+    where: { spaceshipId_type: { spaceshipId: (await shipOf(pilot)).id, type } }, data: { tier }
+  });
+  const loadout = async (pilot) => json(await call(pilot, 'GET', '/ship/loadout')).components;
+  const rig = (pilot, componentTypes, body = {}, receipt = dockedReceipt(pilot)) =>
+    call(pilot, 'POST', '/game/captain/jury-rig', { componentTypes, dockedReceipt: receipt, ...body });
+
+  // A pilot whose captain was promoted from a crew Engineer of `rank`.
+  async function engineerCaptain(rank = 'MASTER') {
+    const pilot = await pilotWith(LV10);
+    const engineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank, morale: 90, quirkId: NEUTRAL_QUIRK });
+    const res = await retire(pilot, { successorType: 'PROMOTED_CREW', successorCrewId: engineer.id });
+    assert.equal(res.statusCode, 200, res.body);
+    return pilot;
+  }
+
+  test('the innate id carries the selection, cut to the rank\'s slots, and only for an Engineer', () => {
+    const innate = { innateClass: 'ENGINEER', innateRank: 'MASTER', quirkId: NEUTRAL_QUIRK };
+    const id = innateEffectId({ ...innate, juryRigComponentTypes: ['ENGINES', 'RADAR'] });
+    assert.deepEqual([...innateJuryRigTypes([id])], ['ENGINES', 'RADAR']);
+    assert.deepEqual([...innateJuryRigTypes([innateEffectId({ ...innate, juryRigComponentTypes: ['ENGINES', 'RADAR', 'ENERGY'] })])], ['ENGINES', 'RADAR']);
+    assert.deepEqual([...innateJuryRigTypes([innateEffectId({ ...innate, innateRank: 'ADEPT', juryRigComponentTypes: ['ENGINES', 'RADAR'] })])], ['ENGINES']);
+    assert.equal(innateJuryRigTypes([innateEffectId({ ...innate, innateRank: 'NOVICE', juryRigComponentTypes: ['ENGINES'] })]).size, 0);
+    assert.equal(innateJuryRigTypes([innateEffectId({ ...innate, innateClass: 'PILOT', juryRigComponentTypes: ['ENGINES'] })]).size, 0);
+    assert.equal(innateJuryRigTypes([innateEffectId({ ...innate, juryRigComponentTypes: ['HULL'] })]).size, 0);
+    assert.equal(innateJuryRigTypes(['H1_TRIM_THRUSTERS']).size, 0);
+  });
+
+  test('selecting two installed components signs each one tier higher; the stored tiers and hull budget stay', async () => {
+    const pilot = await engineerCaptain();
+    const base = computeShipAttributes(await loadout(pilot), 0, effectIdsFor(await captainRow(pilot)), []);
+    const res = await rig(pilot, ['ENGINES', 'RADAR']);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual(json(res).captain.innate.juryRig, { slots: 2, selectedComponentTypes: ['ENGINES', 'RADAR'] });
+    assert.deepEqual((await captainRow(pilot)).juryRigComponentTypes, ['ENGINES', 'RADAR']);
+
+    const components = await loadout(pilot);
+    const higher = components.map((c) => (['ENGINES', 'RADAR'].includes(c.type) ? { ...c, tier: c.tier + 1 } : c));
+    const signed = tokenClaims(res).ship_attributes;
+    // The same ship as one whose ENGINES and RADAR were stored a tier higher, under the same captain.
+    const noRig = effectIdsFor({ ...(await captainRow(pilot)), juryRigComponentTypes: [] });
+    assert.deepEqual(signed, computeShipAttributes(higher, 0, noRig, []));
+    assert.ok(signed.max_speed_mps > base.max_speed_mps || signed.radar_range_m > base.radar_range_m);
+    assert.deepEqual(await loadout(pilot), components); // stored tiers unchanged
+    assert.equal(signed.crew_aboard, 0);
+
+    // Clearing the selection puts it back; a fresh login signs the selection again.
+    assert.deepEqual(tokenClaims(await rig(pilot, [])).ship_attributes, base);
+    await rig(pilot, ['RADAR']);
+    const login = await app.inject({
+      method: 'POST', url: '/auth/login', headers: attestationHeaders,
+      payload: { email: pilot.email, password: PASSWORD, deviceId: 'innate-rig-login-device' }
+    });
+    assert.ok(tokenClaims(login).ship_attributes.radar_range_m > base.radar_range_m);
+    assert.equal(tokenClaims(login).ship_attributes.max_speed_mps, base.max_speed_mps);
+    assert.equal(json(await call(pilot, 'GET', '/game/captain')).captain.innate.juryRig.selectedComponentTypes[0], 'RADAR');
+  });
+
+  test('matches the Phase 3 crew Engineer rule for the same selection, and joining it never stacks a second tier', async () => {
+    const pilot = await engineerCaptain();
+    await rig(pilot, ['ENGINES', 'RADAR']);
+    const crewEngineer = await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'MASTER', morale: 90, quirkId: NEUTRAL_QUIRK, juryRigComponentTypes: ['RADAR', 'ENERGY'] });
+    assert.ok(crewEngineer);
+    const components = await loadout(pilot);
+    const withCrew = computeShipAttributes(components, 0, effectIdsFor(await captainRow(pilot)), await app.prisma.crewMember.findMany({ where: { playerId: pilot.id } }));
+    const tiersUp = (types) => computeShipAttributes(
+      components.map((c) => (types.includes(c.type) ? { ...c, tier: Math.min(c.tier + 1, 5) } : c)), 0, [], []);
+    const plain = tiersUp([]);
+    const up = tiersUp(['ENGINES', 'RADAR', 'ENERGY']);
+    assert.equal(withCrew.radar_range_m, up.radar_range_m); // RADAR from both sources: one tier up
+    assert.ok(withCrew.radar_range_m > plain.radar_range_m);
+    assert.equal(withCrew.energy_capacity, up.energy_capacity);
+  });
+
+  test('refuses what the Phase 3 rule refuses: slots, uninstalled and Tier 5 components, other captains', async () => {
+    const pilot = await engineerCaptain();
+    const before = await snapshot(pilot);
+    assert.equal((await rig(pilot, ['ENGINES', 'RADAR', 'ENERGY'])).statusCode, 400); // schema: at most 2
+    assert.equal((await rig(pilot, ['RADAR', 'RADAR'])).statusCode, 400);
+    assert.equal((await rig(pilot, ['HULL'])).statusCode, 400);
+    const zero = await rig(pilot, ['SHIELDS']);
+    assert.equal(zero.statusCode, 409, zero.body);
+    assert.equal(json(zero).error, 'COMPONENT_NOT_INSTALLED');
+    await setTier(pilot, 'RADAR', 5);
+    const maximum = await rig(pilot, ['ENGINES', 'RADAR']);
+    assert.equal(maximum.statusCode, 409);
+    assert.equal(json(maximum).error, 'jury_rig_already_max_tier');
+    assert.equal(await snapshot(pilot), before);
+
+    const adept = await engineerCaptain('ADEPT');
+    const tooMany = await rig(adept, ['ENGINES', 'RADAR']);
+    assert.equal(tooMany.statusCode, 409);
+    assert.deepEqual([json(tooMany).error, json(tooMany).slots], ['jury_rig_slots_exceeded', 1]);
+    assert.equal((await rig(adept, ['RADAR'])).statusCode, 200);
+
+    const starter = await pilotWith(LV1);
+    assert.equal(json(await rig(starter, ['RADAR'])).error, 'captain_not_engineer');
+    const pilotCaptain = await pilotWith(LV10);
+    const pilotCrew = await addCrew(pilotCaptain, { crewClass: 'PILOT', rank: 'MASTER', morale: 90 });
+    await retire(pilotCaptain, { successorType: 'PROMOTED_CREW', successorCrewId: pilotCrew.id });
+    assert.equal(json(await rig(pilotCaptain, ['RADAR'])).error, 'captain_not_engineer');
+  });
+
+  test('needs a login and a fresh docked receipt for this pilot', async () => {
+    const pilot = await engineerCaptain();
+    assert.equal((await app.inject({ method: 'POST', url: '/game/captain/jury-rig', payload: { componentTypes: [] } })).statusCode, 401);
+    const before = await snapshot(pilot);
+    assert.equal(json(await call(pilot, 'POST', '/game/captain/jury-rig', { componentTypes: ['RADAR'] })).error, 'docked_receipt_required');
+    assert.equal(json(await rig(pilot, ['RADAR'], {}, dockedReceipt('someone-else'))).error, 'docked_receipt_invalid');
+    assert.equal(json(await rig(pilot, ['RADAR'], { stationId: randomUUID() })).error, 'docked_receipt_wrong_station');
+    assert.equal(await snapshot(pilot), before);
+  });
+
+  test('a successor starts with no overdrive selection, and the retired Engineer\'s is not kept', async () => {
+    const pilot = await engineerCaptain();
+    await rig(pilot, ['ENGINES', 'RADAR']);
+    await app.prisma.captain.update({ where: { playerId: pilot.id }, data: { xp: LV10, level: 10 } });
+    const res = await retire(pilot);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.deepEqual((await captainRow(pilot)).juryRigComponentTypes, []);
+    const base = computeShipAttributes(await loadout(pilot), 0, [], []);
+    assert.deepEqual(tokenClaims(res).ship_attributes, base);
+    assert.equal(json(res).captain.innate, undefined);
   });
 });

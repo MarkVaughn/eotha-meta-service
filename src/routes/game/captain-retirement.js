@@ -10,7 +10,7 @@ import {
   retirementFeeCredits,
   retirementTierForLevel
 } from '../../config/captain.js';
-import { QUIRKS, RANKS } from '../../config/crew.js';
+import { ENGINEER_JURY_RIG_TYPES, QUIRKS, RANKS, engineerJuryRigSlots } from '../../config/crew.js';
 import { UUID_PATTERN } from '../../config/patterns.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { activeDoctrineIdsOf, captainView, effectIdsFor } from '../../lib/captain.js';
@@ -61,7 +61,23 @@ const doctrineSchema = {
   }
 };
 
+const juryRigSchema = {
+  body: {
+    type: 'object',
+    required: ['componentTypes'],
+    additionalProperties: false,
+    properties: {
+      componentTypes: { type: 'array', uniqueItems: true, maxItems: 2, items: { type: 'string', enum: ENGINEER_JURY_RIG_TYPES } },
+      ...receiptProperties
+    }
+  }
+};
+
 const MESSAGES = {
+  captain_not_engineer: 'Only a captain promoted from the Engineers can overdrive components.',
+  jury_rig_slots_exceeded: 'That captain cannot overdrive that many components.',
+  COMPONENT_NOT_INSTALLED: 'Overdrive requires an installed component; Tier 0 is unequipped.',
+  jury_rig_already_max_tier: 'Tier 5 cannot be overdriven to Tier 6; select a lower-tier component.',
   docked_receipt_required: 'Retiring a captain or setting a doctrine requires a current docked receipt from the engine.',
   docked_receipt_invalid: 'The docked receipt is not valid for this pilot.',
   docked_receipt_wrong_station: 'The docked receipt is for a different station.',
@@ -85,6 +101,10 @@ const MESSAGES = {
   doctrine_already_chosen: 'That retired captain\'s Legacy Doctrine slot already holds another doctrine.'
 };
 const STATUS = {
+  captain_not_engineer: 409,
+  jury_rig_slots_exceeded: 409,
+  COMPONENT_NOT_INSTALLED: 409,
+  jury_rig_already_max_tier: 409,
   docked_receipt_stale: 403,
   captain_locked_by_active_mission: 409,
   retirement_tier_required: 400,
@@ -253,7 +273,8 @@ export default async function captainRetirementRoutes(fastify) {
           promotedFromCrewId: successor?.id ?? null,
           innateClass: successor?.crewClass ?? null,
           innateRank: successor?.rank ?? null,
-          quirkId: successor?.quirkId ?? null
+          quirkId: successor?.quirkId ?? null,
+          juryRigComponentTypes: []
         }
       });
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
@@ -340,6 +361,38 @@ export default async function captainRetirementRoutes(fastify) {
     return respondWithShip(request, ship, effectIdsFor(ship.captain, outcome.doctrineIds), ship.crew, {
       retiredCaptain: retiredCaptainView(retired),
       activeDoctrineIds: outcome.doctrineIds
+    });
+  });
+
+  // Selects the components an Engineer captain overdrives, replacing the earlier selection. It is the
+  // Phase 3 crew Engineer rule (POST /game/crew/jury-rig) applied to the innate rank: at most
+  // engineerJuryRigSlots (a Master's 2) of the installed ENGINES, ENERGY, RADAR or SHIELDS, none at Tier 5,
+  // each signed one tier higher (to Tier 5 at most) with no hull budget change. Like a trait it changes
+  // the signed attributes, so it needs a dock.
+  fastify.post('/captain/jury-rig', { schema: juryRigSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    const receipt = dockedReceiptOf(request, reply);
+    if (!receipt) return reply;
+    const { componentTypes } = request.body;
+
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      if (staleReceipt(ship, receipt)) return { refused: { code: 'docked_receipt_stale' } };
+      const { captain } = ship;
+      if (captain.innateClass !== 'ENGINEER') return { refused: { code: 'captain_not_engineer' } };
+      const slots = engineerJuryRigSlots({ crewClass: 'ENGINEER', rank: captain.innateRank });
+      if (componentTypes.length > slots) return { refused: { code: 'jury_rig_slots_exceeded', slots } };
+      for (const type of componentTypes) {
+        const tier = ship.components.find((c) => c.type === type)?.tier ?? 0;
+        if (tier === 0) return { refused: { code: 'COMPONENT_NOT_INSTALLED', componentType: type } };
+        if (tier >= 5) return { refused: { code: 'jury_rig_already_max_tier', componentType: type } };
+      }
+      const updated = await tx.captain.update({ where: { id: captain.id }, data: { juryRigComponentTypes: componentTypes } });
+      return { ship, captain: updated, doctrineIds: await activeDoctrineIdsOf(tx, request.user.sub) };
+    });
+    if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
+
+    return respondWithShip(request, outcome.ship, effectIdsFor(outcome.captain, outcome.doctrineIds), outcome.ship.crew, {
+      captain: captainView(outcome.captain)
     });
   });
 }
