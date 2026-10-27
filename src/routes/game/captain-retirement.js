@@ -170,7 +170,7 @@ export default async function captainRetirementRoutes(fastify) {
       const rows = await retiredCaptainsOf(tx, request.user.sub);
       return {
         retiredCaptains: rows.map(retiredCaptainView),
-        activeDoctrineIds: rows.filter((row) => row.activeDoctrine).map((row) => row.legacyDoctrineId),
+        activeDoctrineIds: await activeDoctrineIdsOf(tx, request.user.sub),
         maxActiveDoctrines: MAX_ACTIVE_LEGACY_DOCTRINES,
         doctrines: Object.values(LEGACY_DOCTRINES).map(({ id, name, tier, summary }) => ({ id, name, tier, summary }))
       };

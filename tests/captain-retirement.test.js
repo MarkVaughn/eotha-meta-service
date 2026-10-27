@@ -658,6 +658,9 @@ describe('Legacy Doctrines', () => {
     const third = await retireEighth(pilot, 'LEGACY_WAGE_CUT');
     assert.equal(third.statusCode, 409);
     assert.equal(json(third).error, 'doctrine_limit_reached');
+
+    const hall = json(await call(pilot, 'GET', '/game/captain/retired'));
+    assert.deepEqual([...hall.activeDoctrineIds].sort(), ['LEGACY_DOCKING_SPEED', 'LEGACY_XP_BOOST']);
   });
 
   test('POST /game/captain/doctrine switches a doctrine on and off and re-signs the token', async () => {
