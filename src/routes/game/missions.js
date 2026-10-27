@@ -19,7 +19,10 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
-import { clandestineBonusCredits, deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
+import {
+  activeCrewOf, clandestineBonusCredits, deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCovertAcceptance,
+  recordCrewSettlement
+} from '../../lib/crew.js';
 import { doctorCooldownReduction } from '../../config/crew-morale.js';
 import { recordCrewDock, recordFlakyDeparture } from '../../lib/crew-docking.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
@@ -342,7 +345,13 @@ export default async function missionsRoutes(fastify) {
       });
       const passengersAboard = attributes.passengers_aboard + offer.required_berths;
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
-      return { ship: flaky.ship, passengersAboard, docking: dock.docking, departed: flaky.departed };
+      // The crew as it now stands: a covert contract costs the By-the-Book their morale, and a Loyalist
+      // sent against its home faction loses its capabilities for as long as the mission is held.
+      const accepted = await recordCovertAcceptance(tx, ship.id, ship.traits, isCovert(offer));
+      return {
+        ship: { ...flaky.ship, crew: accepted.crew }, passengersAboard, docking: dock.docking, departed: flaky.departed,
+        crewMorale: accepted.effects
+      };
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
@@ -351,6 +360,7 @@ export default async function missionsRoutes(fastify) {
       ...((outcome.docking.departed?.length || outcome.departed.length) && {
         departed_crew: [...(outcome.docking.departed ?? []), ...outcome.departed]
       }),
+      ...(outcome.crewMorale.length > 0 && { crew_morale: outcome.crewMorale }),
       token: await tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });
 
@@ -419,7 +429,8 @@ export default async function missionsRoutes(fastify) {
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       const dock = dockedReceipt ? await recordCrewDock(tx, ship, dockedReceipt) : { ship };
       return {
-        ship: dock.ship,
+        // The crew as stored now: a Loyalist's capabilities return with the mission that turned them off gone.
+        ship: { ...dock.ship, crew: await activeCrewOf(tx, ship.id) },
         docking: dock.docking,
         passengersAboard,
         missionId: row.missionId,
@@ -496,7 +507,7 @@ export default async function missionsRoutes(fastify) {
         // The signed reputation, negative for a late enough completion, goes to the sponsor: a gain
         // for the faction whose colors the pilot flies is multiplied (withColorsBonus), and the active
         // Diplomat raises any gain and softens the harm to the rival.
-        const reputationChange = withCrewReputationBonus(withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors), ship.crew);
+        const reputationChange = withCrewReputationBonus(withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors), ship.crew, factionId);
         const reason = covert
           ? (claim.wasDetected ? LEDGER_REASONS.COMPLETE_COVERT_DETECTED : LEDGER_REASONS.COMPLETE_COVERT_CLEAN)
           : LEDGER_REASONS.MISSION_COMPLETED;
@@ -512,8 +523,12 @@ export default async function missionsRoutes(fastify) {
         // Captain XP rides on the payout record above: a replayed claim never reaches this line.
         const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true, traits: ship.traits });
         // Morale and seniority follow the settlement; the token below carries the crew as it now stands.
+        // The speed bonus is earned when the claim paid above the offered reward, not counting the clean
+        // covert bonus the engine adds after the speed and late terms.
+        const cleanBonus = covert && !claim.wasDetected ? active.offer.clandestine_bonus_credits ?? 0 : 0;
         const settledCrew = await recordCrewSettlement(tx, ship, payroll, {
-          settlement: missionSettlement(active.offer), payout, deferred, captainXp: captain.xpGained
+          settlement: missionSettlement(active.offer, { speedBonus: claim.rewardCredits - cleanBonus > active.offer.reward_credits }),
+          payout, deferred, captainXp: captain.xpGained
         });
         const currentShip = { ...ship, crew: settledCrew.crew };
         const dock = request.body.dockedReceipt ? await recordCrewDock(tx, currentShip, request.body.dockedReceipt, { payoutSettled: true }) : { ship: currentShip };
