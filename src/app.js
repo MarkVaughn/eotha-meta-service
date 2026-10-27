@@ -15,6 +15,7 @@ import chartsRoutes from './routes/game/charts.js';
 import cargoRoutes from './routes/game/cargo.js';
 import captainRoutes from './routes/game/captain.js';
 import crewRoutes from './routes/game/crew.js';
+import captainRetirementRoutes from './routes/game/captain-retirement.js';
 import factionsRoutes from './routes/game/factions.js';
 import shipRoutes from './routes/ship/index.js';
 
@@ -44,6 +45,7 @@ await fastify.register(missionsRoutes, { prefix: '/game' });
 await fastify.register(chartsRoutes, { prefix: '/game' });
 await fastify.register(cargoRoutes, { prefix: '/game' });
 await fastify.register(captainRoutes, { prefix: '/game' });
+await fastify.register(captainRetirementRoutes, { prefix: '/game' });
 await fastify.register(crewRoutes, { prefix: '/game' });
 await fastify.register(factionsRoutes, { prefix: '/game' });
 await fastify.register(shipRoutes, { prefix: '/ship' });

@@ -27,7 +27,7 @@ import {
   seniorityXpGain,
   settleUtilization
 } from '../config/crew-morale.js';
-import { isCovert } from './mission-offer.js';
+import { isCovert, isLegacyRow } from './mission-offer.js';
 
 // Why a ship cannot take a crew member aboard, or a pilot hire one. `code` is the structured reason
 // (lowercased, it is also the `error` of a refused request).
@@ -105,6 +105,13 @@ export function crewLimits(ship) {
     maxStandbyCrew: MAX_STANDBY_CREW,
     standbyTransferFeeCredits: STANDBY_TRANSFER_FEE_CREDITS
   };
+}
+
+// `db` is the Prisma client or an open transaction. Whether the pilot holds a mission that locks its
+// crew roster: leaving crew could otherwise dodge the wage share of the payout to come.
+export async function holdsActiveMission(db, playerId) {
+  const held = await db.playerMission.findMany({ where: { playerId } });
+  return held.some((row) => !isLegacyRow(row));
 }
 
 // `db` is the Prisma client or an open transaction. The crew aboard `shipId`, in the order they were hired.

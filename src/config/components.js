@@ -1,5 +1,5 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
-import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, crewResists, crewShipEffects } from './crew.js';
+import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, crewResists, crewShipEffects, innateShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
   'HULL', 'RADAR', 'CARGO', 'STEALTH', 'SHIELDS', 'WEAPONS', 'ENERGY', 'COMMS', 'ENGINES', 'LIFE_SUPPORT', 'SENSORS'
@@ -128,9 +128,10 @@ export function freeBerths(attributes) {
  * Deterministically derive ship attributes from a list of `{ type, tier }`
  * components. Missing components (and invalid tiers) default to Tier 1. `passengersAboard` is the
  * ship's persisted manifest count; it is clamped to the life support's passenger_capacity.
- * `traits` are the captain's unlocked trait ids, whose ship effects are folded in (src/config/captain.js),
- * and `activeCrew` the crew aboard, whose class effects are too and which occupy `crew_aboard` of the
- * berths (src/config/crew.js).
+ * `traits` are the effect ids in force: the captain's unlocked trait ids, the active Legacy Doctrines'
+ * ids and a promoted captain's innate class (innateEffectId), whose ship effects are folded in
+ * (src/config/captain.js, src/config/crew.js), and `activeCrew` the crew aboard, whose class effects
+ * are too and which occupy `crew_aboard` of the berths (src/config/crew.js).
  */
 export function computeShipAttributes(components = [], passengersAboard = 0, traits = [], activeCrew = []) {
   const tiers = {};
@@ -151,7 +152,7 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     }
   }
   Object.assign(attributes, BASE_ATTRIBUTES);
-  applyShipEffects(attributes, [...traitShipEffects(traits), ...crewShipEffects(activeCrew)]);
+  applyShipEffects(attributes, [...traitShipEffects(traits), ...innateShipEffects(traits), ...crewShipEffects(activeCrew)]);
   Object.assign(attributes, crewResists(activeCrew), { crew_capability_flags: crewCapabilityFlags(activeCrew) });
   attributes.crew_aboard = activeCrew.length;
   attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity - attributes.crew_aboard);

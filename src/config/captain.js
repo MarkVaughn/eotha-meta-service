@@ -5,10 +5,14 @@ export const TOTAL_TRAITS_DEFINED = 18;
 // Points already spent in a branch before its Tier II traits, and its Tier III capstone, can be unlocked.
 export const TIER_2_BRANCH_PREREQ = 2;
 export const TIER_3_BRANCH_PREREQ = 4;
-// Retirement (a later phase) reads these; nothing in this phase does.
+// Retirement (POST /game/captain/retire): the level an honors retirement needs, the fee of retiring
+// before it, how many Legacy Doctrines may be in force at once, and the crew morale a member needs
+// to be promoted to succeed the captain. Every retired captain is kept (RETAIN_ALL_RETIRED_CAPTAINS).
 export const HONORS_RETIRE_MIN_LEVEL = 8;
 export const EARLY_DISCHARGE_FEE_CREDITS = 1000;
 export const MAX_ACTIVE_LEGACY_DOCTRINES = 2;
+export const PROMOTE_CREW_MIN_MORALE = 80;
+export const RETAIN_ALL_RETIRED_CAPTAINS = true;
 
 // Captain.xp is a 32-bit Int; XP past it is not kept (Level 10 is reached long before).
 export const MAX_CAPTAIN_XP = 2_147_483_647;
@@ -68,6 +72,25 @@ export function levelForXp(xp) {
 // One trait point per level from 2 to MAX_CAPTAIN_LEVEL.
 export const traitPointsForLevel = (level) => Math.max(0, Math.min(level, MAX_CAPTAIN_LEVEL) - 1);
 
+export const RETIREMENT_TIERS = Object.freeze({
+  EARLY_DISCHARGE: 'EARLY_DISCHARGE',
+  HONORS: 'HONORS',
+  MASTER: 'MASTER'
+});
+
+// The retirement a captain at `level` can take: the cap is a master retirement, HONORS_RETIRE_MIN_LEVEL
+// and above an honors one, anything below an early discharge.
+export const retirementTierForLevel = (level) =>
+  level >= MAX_CAPTAIN_LEVEL ? RETIREMENT_TIERS.MASTER
+    : level >= HONORS_RETIRE_MIN_LEVEL ? RETIREMENT_TIERS.HONORS
+      : RETIREMENT_TIERS.EARLY_DISCHARGE;
+
+export const retirementFeeCredits = (tier) => (tier === RETIREMENT_TIERS.EARLY_DISCHARGE ? EARLY_DISCHARGE_FEE_CREDITS : 0);
+
+export const SUCCESSOR_TYPES = Object.freeze({ ACADEMY_RECRUIT: 'ACADEMY_RECRUIT', PROMOTED_CREW: 'PROMOTED_CREW' });
+export const ASSIGNMENT_STATUS_RETIRED_IDLE = 'RETIRED_IDLE';
+export const ACADEMY_RECRUIT_NAME = 'Academy Recruit';
+
 export const BRANCHES = Object.freeze(['HELMSMAN', 'ASTROGATION', 'COMMAND']);
 
 // `ship` lists the ship attribute effects computeShipAttributes folds in (`mult` multiplies, `add`
@@ -120,6 +143,50 @@ export const TRAITS = Object.freeze(Object.fromEntries([
 
 export const TRAIT_IDS = Object.freeze(Object.keys(TRAITS));
 
+// The Tier III capstone a captain holding `traitIds` has unlocked, or null. A captain's nine points
+// cannot pay for two capstones, so there is at most one.
+export const capstoneOf = (traitIds) => traitIds.find((id) => TRAITS[id]?.tier === 3) ?? null;
+
+// Legacy Doctrines: a perk a retired captain's slot holds for the pilot's whole account while it is
+// active, whoever commands. An honors retirement unlocks a Tier I doctrine, a master retirement Tier I
+// or II (the same four perks, twice as strong). `ship` and `crew` work like a trait's; `xpMult` scales
+// the Captain XP a claim awards (src/lib/captain.js awardCaptainXp). `payoutMult` is the mission payout
+// bonus: stored and shown but not applied, like the payout traits (S4, S5, C6), until payouts apply them.
+const doctrine = (id, name, tier, summary, effects = {}) =>
+  Object.freeze({
+    id,
+    name,
+    tier,
+    summary,
+    ship: Object.freeze(effects.ship ?? {}),
+    crew: Object.freeze(effects.crew ?? {}),
+    xpMult: effects.xpMult ?? 1,
+    payoutMult: effects.payoutMult ?? 1
+  });
+
+export const LEGACY_DOCTRINES = Object.freeze(Object.fromEntries([
+  doctrine('LEGACY_PAYOUT_BOOST', 'Legacy Contracts', 1, '+5% mission payouts', { payoutMult: 1.05 }),
+  doctrine('LEGACY_DOCKING_SPEED', 'Legacy Docking Speed', 1, '-10% docking and undocking duration',
+    { ship: { docking_time_mult: { mult: 0.9 } } }),
+  doctrine('LEGACY_XP_BOOST', 'Legacy Tutelage', 1, '+10% Captain XP for every successor', { xpMult: 1.1 }),
+  doctrine('LEGACY_WAGE_CUT', 'Legacy Loyalty', 1, '-10% crew wage shares', { crew: { wageMult: 0.9 } }),
+  doctrine('LEGACY_PAYOUT_BOOST_II', 'Legacy Contracts II', 2, '+10% mission payouts', { payoutMult: 1.1 }),
+  doctrine('LEGACY_DOCKING_SPEED_II', 'Legacy Docking Speed II', 2, '-20% docking and undocking duration',
+    { ship: { docking_time_mult: { mult: 0.8 } } }),
+  doctrine('LEGACY_XP_BOOST_II', 'Legacy Tutelage II', 2, '+20% Captain XP for every successor', { xpMult: 1.2 }),
+  doctrine('LEGACY_WAGE_CUT_II', 'Legacy Loyalty II', 2, '-20% crew wage shares', { crew: { wageMult: 0.8 } })
+].map((d) => [d.id, d])));
+
+export const LEGACY_DOCTRINE_IDS = Object.freeze(Object.keys(LEGACY_DOCTRINES));
+
+// The doctrine tiers a retirement tier unlocks: none for an early discharge.
+export const doctrineTierLimit = (retirementTier) =>
+  retirementTier === RETIREMENT_TIERS.MASTER ? 2 : retirementTier === RETIREMENT_TIERS.HONORS ? 1 : 0;
+
+// The Captain XP multiplier of the doctrines among `effectIds`.
+export const doctrineXpMult = (effectIds) =>
+  effectIds.reduce((mult, id) => mult * (LEGACY_DOCTRINES[id]?.xpMult ?? 1), 1);
+
 // Trait ids from a stored `unlockedTraits` value, unknown or repeated entries dropped.
 export function knownTraits(value) {
   return Array.isArray(value) ? [...new Set(value.filter((id) => Object.hasOwn(TRAITS, id)))] : [];
@@ -155,13 +222,13 @@ const ATTRIBUTE_FLOORS = { docking_time_mult: 0.5, extraction_rate_mult: 0.5, tu
 // Arithmetic on attributes is rounded to this many decimals so 0.8 + 0.15 signs as 0.95.
 const round6 = (value) => Math.round(value * 1e6) / 1e6;
 
-// What the crew terms of `traitIds` add up to: `crewSlots` extra active crew, `wageMult` and
+// What the crew terms of `traitIds` (a captain's trait ids and its active Legacy Doctrines' ids) add up to: `crewSlots` extra active crew, `wageMult` and
 // `signingMult` on crew wage shares and signing bonuses, `startMorale` added to new crew's morale and
 // `moraleDecayMult` on every morale loss.
 export function traitCrewTerms(traitIds) {
   const terms = { crewSlots: 0, wageMult: 1, signingMult: 1, startMorale: 0, moraleDecayMult: 1 };
   for (const id of traitIds) {
-    const crew = TRAITS[id]?.crew ?? {};
+    const crew = TRAITS[id]?.crew ?? LEGACY_DOCTRINES[id]?.crew ?? {};
     terms.crewSlots += crew.crewSlots ?? 0;
     terms.wageMult *= crew.wageMult ?? 1;
     terms.signingMult *= crew.signingMult ?? 1;
@@ -172,7 +239,7 @@ export function traitCrewTerms(traitIds) {
 }
 
 // The ship effects of `traitIds` as `[attribute, { mult } | { add }]` entries.
-export const traitShipEffects = (traitIds) => traitIds.flatMap((id) => Object.entries(TRAITS[id]?.ship ?? {}));
+export const traitShipEffects = (traitIds) => traitIds.flatMap((id) => Object.entries(TRAITS[id]?.ship ?? LEGACY_DOCTRINES[id]?.ship ?? {}));
 
 // Folds `effects` (`[attribute, { mult } | { add }]` entries, from the traits and the crew) into
 // `attributes` (mutated and returned), multipliers before additions so an addition is never scaled.

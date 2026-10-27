@@ -48,7 +48,8 @@ eotha-meta-service/
 │   ├── lib/
 │   │   ├── attestation/        # Device-attestation verifier registry, Play Integrity policy
 │   │   ├── auth.js             # Better Auth instance (Player as user, anonymous plugin)
-│   │   ├── captain.js          # Lazy captain creation, XP awards, captain view
+│   │   ├── captain.js          # Lazy captain creation, XP awards, captain view, the effect ids in force
+│   │   ├── retirement.js       # RetiredCaptain snapshot and view
 │   │   ├── cargo.js            # Verifies signed cargo manifests and sale records; the cargo fencing rule
 │   │   ├── claim-key.js        # Loads the public key engine-signed claims verify against
 │   │   ├── crew-generator.js   # The deterministic hiring board of a station and why a candidate is unavailable
@@ -73,6 +74,7 @@ eotha-meta-service/
 │   │   │   └── schema.js       # Fastify JSON request/response schemas
 │   │   └── game/
 │   │       ├── captain.js      # Captain view and docked trait unlocks
+│       ├── captain-retirement.js # Docked captain retirement, succession and Legacy Doctrines
 │   │       ├── cargo.js        # Cargo lease, stored hold, manifest relay and ore sale routes
 │   │       ├── crew.js         # Crew roster, hiring board, hire, dismiss, standby and activate
 │   │       ├── factions.js     # Docked Flying Colors toggle and Paragon renouncement
@@ -219,9 +221,11 @@ All Protected. See [Mission offers](#mission-offers).
 ### Captain
 All Protected. See [Captain progression](#captain-progression).
 - `GET /game/captain`
-  - `{ captain: { name, level, xp, xpForLevel, xpForNextLevel, unlockedTraits, traitPoints, traitPointsAvailable, missionsCompleted } }` (`xpForNextLevel` is `null` at Level 10).
+  - `{ captain: { name, originType, innate?, level, xp, xpForLevel, xpForNextLevel, unlockedTraits, traitPoints, traitPointsAvailable, missionsCompleted } }` (`xpForNextLevel` is `null` at Level 10; `innate` is `{ crewClass, rank, quirkId }` for a captain promoted from the crew).
 - `POST /game/captain/trait`
   - Body `{ traitId, dockedReceipt, stationId? }`. Spends one trait point on `traitId` while docked. Returns `{ captain, ship_attributes, token }`, the token re-signed with the new attributes. Refusals answer `{ error: <code>, message, ... }`: `403 docked_receipt_required` (no receipt, or an expired one), `403 docked_receipt_invalid`, `403 docked_receipt_wrong_station` (`stationId` sent and not the receipt's `dockedEntityId`), `409 trait_already_unlocked`, `400 prerequisite_not_met` (with `requiredPointsInBranch` and `currentPoints`), `409 no_trait_points` (with `traitPointsAvailable`), a schema `400` for an unknown trait, and `503 CLAIM_KEY_NOT_CONFIGURED`.
+- `POST /game/captain/retire`, `POST /game/captain/doctrine`, `GET /game/captain/retired`
+  - See [Retirement, succession and Legacy Doctrines](#retirement-succession-and-legacy-doctrines-phase-4).
 
 ### Crew
 All Protected. See [Crew](#crew).
@@ -483,7 +487,7 @@ A pilot hires up to one crew member per class (Pilot, Navigator, Science, Engine
 - **Board.** Four candidates per station per 30-minute window, seeded by `SHA256("crew_board_v1" || stationId || window_30m || slotIndex)` (window as a big-endian u64, slot as one byte), so every pilot sees the same people and refreshing cannot reroll them. Slot 3 is the hub specialist (Adept or Master only). Rank odds are 65/30/5 % (Novice/Adept/Master); the home faction is `alpha` 30 %, `beta` 30 %, `gamma` 20 %, `independent` 20 %; the quirk is one of Q01-Q20 with weights summing to 1000. A candidate the pilot cannot hire is still listed, with the reasons.
 - **Hiring terms.** Rank sets the signing bonus (500 / 1500 / 4000 cr, non-refundable), the wage share (5 / 8 / 12 % of every payout) and the standing needed with the candidate's home faction (-499 / -149 / +450). Quirks move the wage share and bonus (and `C1_HARD_BARGAINER` takes 15 % off wages and 25 % off bonuses, `C2_SHORE_CONTACTS` adds 10 starting morale), and a quirk's effect is shown on the board before hiring.
 - **Revenue share.** Every payout the pilot is credited from a signed claim (`POST /game/missions/complete`, `POST /game/cargo/sell`, `POST /game/charts/sell`) is split under the pilot's lock: each crew member with morale above zero, active or on Harbor Standby, takes `floor(gross x effective wage share)`, all together at most 50 %, scaled down in proportion when they would ask for more. Standby crew take a share but still count for no berth or class effect. The responses carry `grossCredits`, `crewShareCredits`, `netCredits` and `crewPayouts`; the pilot's balance rises by `netCredits`.
-- **Effects today.** Class modifiers act on `ship_attributes` through `computeShipAttributes` and scale with morale (Inspired x1.15, Nominal x1, Disgruntled x0.6, Mutinous 0), including quirk adjustments. An Adept or Master Engineer may overdrive 1 or 2 selected installed components by one effective operation tier while Nominal or better; this adds no hull budget. Morale, seniority, promotions, shore leave and the assigned capability bits are active (below). Chef and Doctor apply meta-service recovery/cooldown overrides. Retirement and the quirk text for later faction/customs features remain future work.
+- **Effects today.** Class modifiers act on `ship_attributes` through `computeShipAttributes` and scale with morale (Inspired x1.15, Nominal x1, Disgruntled x0.6, Mutinous 0), including quirk adjustments. An Adept or Master Engineer may overdrive 1 or 2 selected installed components by one effective operation tier while Nominal or better; this adds no hull budget. Morale, seniority, promotions, shore leave and the assigned capability bits are active (below). Chef and Doctor apply meta-service recovery/cooldown overrides. Retirement is described under [Retirement, succession and Legacy Doctrines](#retirement-succession-and-legacy-doctrines-phase-4); the quirk text for later faction/customs features remains future work.
 - **Abuse guards.** Dismiss and standby are refused while any mission is held, so the crew cannot be fired just before a payout. Engineer departure never blocks on the loadout: effective operation falls to stored tiers without changing or removing installed components or refunding credits. Hire, dismiss, standby and activate all run under the pilot's lock, so berths, the class slot and credits are never over-spent.
 
 `CrewMember` and `CargoSale.crewShareCredits` (default `0`, so a replayed sale reports its own split) are additions only, so existing databases pick them up with `npx prisma db push` (there are no migration files). `CrewMember.sourceCandidateId` (the board candidate the member was hired as; null on existing rows, which never match a candidate) is likewise a nullable addition with no unique constraint, so plain `db push` applies it; a hire checks it under the pilot's lock.
@@ -517,6 +521,40 @@ An active Nominal-or-better Doctor shortens newly started completion cooldowns b
 **FLAKY phase-3 scope:** evaluated on **successful mission acceptance only**, as authorized by the captain. Active Q12 crew below 85 morale roll a 10% departure chance, deterministically seeded by SHA-256 of the UTF-8 concatenation `flaky_undock_v1 + crewId + dockedEntityId + decimal floor(nowMs / 900000)`. The first four digest bytes, unsigned big-endian, divided by 2^32, are compared with 0.10. Retrying/reconnecting within the window cannot reroll; departures persist in the same transaction and the response token loses their attributes. Shore leave itself never rolls. **Mining-only departures need a signed-undock contracts/engine followup**; no unsigned departure notification is trusted.
 
 Deployment uses plain `npx prisma db push` (no migrations). Additions are `Spaceship.flightMsSinceLeave` (default 0), `lastLeaveStationId`/`lastLeaveAt` (nullable), `lastCrewDockedAtMs`/`lastCrewPayoutAtMs` (nullable), legacy `crewPayoutSinceDock` (default false), `CrewMember.pendingStipendCredits` (default 0), `CrewMember.juryRigComponentTypes` (JSON, default `[]`), and the per-ship/station `CrewShoreLeave` cooldown table. They preserve existing rows. Standby/dismiss during an outstanding mission still return the phase-2 `409`; replacing that refusal with a morale cost awaits a separate decision.
+
+## Retirement, succession and Legacy Doctrines (phase 4)
+
+A captain retires while docked with `POST /game/captain/retire`, and a successor takes the seat at Level 1 with no traits. Everything is in `src/config/captain.js` and `src/routes/game/captain-retirement.js`.
+
+**`RetiredCaptain`** is a new table (`npx prisma db push` creates it; the existing `Captain` columns for promoted crew were already there) and **nothing deletes a row** (`RETAIN_ALL_RETIRED_CAPTAINS`) but the account itself. It snapshots the captain as it left: name, origin and innate class, `finalLevel`, `finalXp`, `missionsCompleted`, `unlockedTraits`, `capstoneTraitId` (the Tier III trait held, if any), `factionStandingsSnapshot` `{ alpha, beta, gamma }`, `primaryFactionId` (the faction stood highest with, or `null` when none is above neutral), the station and system retired at, `assignmentStatus = "RETIRED_IDLE"` and a null `assignedSpaceshipId` (hooks for fleet features). Beyond the plan's columns it stores `receiptNonce`, unique per pilot, which keys retry safety (below). Standings themselves belong to the pilot and are not reset.
+
+| Level | Tier | Fee | Doctrine |
+|---|---|---|---|
+| 1-7 | `EARLY_DISCHARGE` | 1,000 cr | none |
+| 8-9 | `HONORS` | free | one Tier I slot |
+| 10 | `MASTER` | free | one slot, Tier I or II |
+
+The body is `{ successorType: "ACADEMY_RECRUIT" | "PROMOTED_CREW", successorCrewId?, successorName?, retirementTier?, legacyDoctrineId?, dockedReceipt, stationId? }`. `retirementTier`, when sent, must be the one the level qualifies for (`400 retirement_tier_mismatch` with `eligibleTier`); an early discharge must be named (`400 retirement_tier_required`), so a retried request can never discharge the new Level 1 captain by accident. The receipt is checked like a trait unlock's (`403 docked_receipt_required | _invalid | _wrong_station`), and a receipt for a dock older than the last the ship's crew settled at is `403 docked_receipt_stale`. A held mission refuses retirement (`409 captain_locked_by_active_mission`, the guard that keeps crew from being shed before a payout).
+
+Everything commits together under the pilot's lock or not at all: the fee (a guarded decrement; `402 insufficient_credits` otherwise), the archive row, the successor, the crew leaving and the doctrine. **The docked receipt's nonce makes it idempotent**: the same receipt sent again (a lost response, a concurrent duplicate) answers `200` with `replayed: true`, the archived captain and a token for the pilot's current state, and changes and charges nothing.
+
+**Successors.** `ACADEMY_RECRUIT` (the default name is `Academy Recruit`, or `successorName`) has no innate class. `PROMOTED_CREW` names `successorCrewId`, one of the pilot's own crew, active or on standby, who must be an Adept or Master (`400 insufficient_rank_for_promotion`) with morale of at least 80 (`400 insufficient_morale_for_promotion` with `minMorale` and `currentMorale`); an unknown or another pilot's id is `404 crew_not_found`. The member leaves the roster (its berth and wage share with it), and the Captain becomes `originType = "PROMOTED_CREW"` with `promotedFromCrewId`, `innateClass`, `innateRank` and the member's `quirkId` (the stored `Q01`-`Q20` id; the plan's names such as `COOL_HEADED` are the quirk `key`s). The innate class is signed into the ship attributes with the effects of that class at that rank at the Nominal morale band plus the quirk's additive class terms (so a Master Engineer with Cool-Headed adds `50 x 1.03` Hz of tuning tolerance), with no wage share, berth, capability bit or resistance. Any Master with the AMBITIOUS quirk (`Q11`) on the ship **or on standby** who is not the successor resigns at once and appears in the response's `resigned`.
+
+The captain's own traits do not carry over; with them go their berths, crew slots and hull budget point. Crew already aboard stay even if the hull's new limit is lower.
+
+**Legacy Doctrines.** An honors retirement unlocks one slot on its `RetiredCaptain`, a master retirement one that may hold a Tier II doctrine. Name `legacyDoctrineId` in the retire body to fill it and switch it on, or fill it later with `POST /game/captain/doctrine`. At most `MAX_ACTIVE_LEGACY_DOCTRINES = 2` are active across the account, whoever commands. A retirement naming a doctrine while two are active is `409 doctrine_limit_reached` and changes nothing; switch one off first.
+
+| Doctrine (Tier I / II) | Effect | Applied |
+|---|---|---|
+| `LEGACY_XP_BOOST` / `_II` | `+10%` / `+20%` Captain XP (rounded down) | XP awards; crew Seniority XP follows the XP awarded |
+| `LEGACY_DOCKING_SPEED` / `_II` | `docking_time_mult x 0.9` / `x 0.8` | signed ship attributes |
+| `LEGACY_WAGE_CUT` / `_II` | crew wage shares `x 0.9` / `x 0.8` (the 2.5% floor holds) | revenue share and the roster |
+| `LEGACY_PAYOUT_BOOST` / `_II` | `+5%` / `+10%` mission payouts | stored and listed only, like the payout traits, until payouts apply them |
+
+- `POST /game/captain/doctrine`: `{ retiredCaptainId, active, legacyDoctrineId?, dockedReceipt, stationId? }` (docked like a trait unlock, since the signed attributes change). `legacyDoctrineId` fills an empty slot once (`409 doctrine_already_chosen` afterwards, `400 doctrine_tier_locked`, `409 no_doctrine_slot` after an early discharge); `active` switches the slot on (`409 doctrine_limit_reached` at two) or off. Another pilot's `retiredCaptainId` is `404 retired_captain_not_found`. Returns `{ retiredCaptain, activeDoctrineIds, ship_attributes, token }`.
+- `GET /game/captain/retired`: the Hall of Command, `{ retiredCaptains, activeDoctrineIds, maxActiveDoctrines, doctrines }`, oldest first, with the doctrine catalog.
+
+Every response that changes state (retire, doctrine) carries `ship_attributes` and a `token` re-signed for the pilot as it now stands; login tokens include the active doctrines and the innate class too.
 
 ## Authentication model
 

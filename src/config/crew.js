@@ -277,6 +277,26 @@ export function crewShipEffects(crew = []) {
   });
 }
 
+// A crew member promoted to Captain keeps its class: the ship effects of its class at its rank, scaled
+// as if at INNATE_MORALE (a captain has no morale, so its quirk's additive class terms apply on top of
+// the Nominal band), with no wage share, berth, capability bit or resistance. The Captain carries it as
+// `innateClass`, `innateRank` and `quirkId`; computeShipAttributes receives it as the effect id
+// innateEffectId builds, next to the captain's trait ids.
+export const INNATE_MORALE = INITIAL_CREW_MORALE;
+const INNATE_PREFIX = 'INNATE:';
+
+export const innateEffectId = ({ innateClass, innateRank, quirkId } = {}) =>
+  CREW_CLASSES[innateClass] && isRank(innateRank) ? `${INNATE_PREFIX}${innateClass}:${innateRank}:${quirkId ?? ''}` : null;
+
+const innateMember = (effectId) => {
+  if (!effectId.startsWith(INNATE_PREFIX)) return null;
+  const [crewClass, rank, quirkId] = effectId.slice(INNATE_PREFIX.length).split(':');
+  return CREW_CLASSES[crewClass] && isRank(rank) ? { crewClass, rank, quirkId, morale: INNATE_MORALE } : null;
+};
+
+/** The ship attribute effects of the innate class among `effectIds` (a captain's trait and doctrine ids too). */
+export const innateShipEffects = (effectIds = []) => crewShipEffects(effectIds.map(innateMember).filter(Boolean));
+
 export const ENGINEER_JURY_RIG_TYPES = Object.freeze(['ENGINES', 'ENERGY', 'RADAR', 'SHIELDS']);
 
 /** Stored selections belong to the Engineer; standby/morale loss disables effects without erasing them. */
