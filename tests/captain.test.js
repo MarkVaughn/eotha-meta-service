@@ -203,7 +203,7 @@ describe('captain over HTTP', () => {
     assert.equal(row.name, pilot.callsign);
     assert.deepEqual([row.level, row.xp, row.unlockedTraits, row.originType, row.missionsCompleted], [1, 0, [], 'STARTER', 0]);
     assert.deepEqual(await getCaptain(pilot), {
-      name: pilot.callsign, level: 1, xp: 0, xpForLevel: 0, xpForNextLevel: 200,
+      name: pilot.callsign, originType: 'STARTER', level: 1, xp: 0, xpForLevel: 0, xpForNextLevel: 200,
       unlockedTraits: [], traitPoints: 0, traitPointsAvailable: 0, missionsCompleted: 0
     });
     assert.equal(await app.prisma.captain.count({ where: { playerId: pilot.id } }), 1);

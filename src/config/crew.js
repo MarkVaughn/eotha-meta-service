@@ -277,6 +277,33 @@ export function crewShipEffects(crew = []) {
   });
 }
 
+// A crew member promoted to Captain keeps its class: the ship effects of its class at its rank, scaled
+// as if at INNATE_MORALE (a captain has no morale, so its quirk's additive class terms apply on top of
+// the Nominal band), with no wage share, berth, capability bit or resistance. The Captain carries it as
+// `innateClass`, `innateRank` and `quirkId`; computeShipAttributes receives it as the effect id
+// innateEffectId builds, next to the captain's trait ids. An innate Engineer also carries the
+// components the captain overdrives (`juryRigComponentTypes`, the Phase 3 Engineer rule: see
+// innateJuryRigTypes), as the last part of the id.
+export const INNATE_MORALE = INITIAL_CREW_MORALE;
+const INNATE_PREFIX = 'INNATE:';
+
+export const innateEffectId = ({ innateClass, innateRank, quirkId, juryRigComponentTypes } = {}) => {
+  if (!CREW_CLASSES[innateClass] || !isRank(innateRank)) return null;
+  const overdriven = innateClass === 'ENGINEER' && Array.isArray(juryRigComponentTypes) ? juryRigComponentTypes.join('+') : '';
+  return `${INNATE_PREFIX}${innateClass}:${innateRank}:${quirkId ?? ''}:${overdriven}`;
+};
+
+const innateMember = (effectId) => {
+  if (!effectId.startsWith(INNATE_PREFIX)) return null;
+  const [crewClass, rank, quirkId, overdriven = ''] = effectId.slice(INNATE_PREFIX.length).split(':');
+  return CREW_CLASSES[crewClass] && isRank(rank)
+    ? { crewClass, rank, quirkId, morale: INNATE_MORALE, juryRigComponentTypes: overdriven ? overdriven.split('+') : [] }
+    : null;
+};
+
+/** The ship attribute effects of the innate class among `effectIds` (a captain's trait and doctrine ids too). */
+export const innateShipEffects = (effectIds = []) => crewShipEffects(effectIds.map(innateMember).filter(Boolean));
+
 export const ENGINEER_JURY_RIG_TYPES = Object.freeze(['ENGINES', 'ENERGY', 'RADAR', 'SHIELDS']);
 
 /** Stored selections belong to the Engineer; standby/morale loss disables effects without erasing them. */
@@ -288,6 +315,22 @@ export function engineerJuryRigTypes(crew = []) {
   if (!engineer || engineer.morale < NOMINAL_MORALE_THRESHOLD) return new Set();
   const selected = Array.isArray(engineer.juryRigComponentTypes) ? engineer.juryRigComponentTypes : [];
   return new Set([...new Set(selected.filter((type) => ENGINEER_JURY_RIG_TYPES.includes(type)))].slice(0, engineerJuryRigSlots(engineer)));
+}
+
+/**
+ * The components a promoted Engineer captain overdrives: the Phase 3 Engineer rule applied to the
+ * innate rank, so the selection is cut to `engineerJuryRigSlots` (a Master's 2) and, like a crew
+ * Engineer's, works at INNATE_MORALE, which is Nominal. It is a set of component types, so it joins an
+ * Engineer crew member's: a component is raised one tier at most, never one per source.
+ */
+export function innateJuryRigTypes(effectIds = []) {
+  const types = new Set();
+  for (const member of effectIds.map(innateMember)) {
+    if (member?.crewClass !== 'ENGINEER') continue;
+    const selected = [...new Set(member.juryRigComponentTypes.filter((type) => ENGINEER_JURY_RIG_TYPES.includes(type)))];
+    for (const type of selected.slice(0, engineerJuryRigSlots(member))) types.add(type);
+  }
+  return types;
 }
 
 // Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better.

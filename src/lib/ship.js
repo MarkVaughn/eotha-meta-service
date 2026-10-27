@@ -5,7 +5,7 @@ import {
   computeShipAttributes,
   defaultComponents
 } from '../config/components.js';
-import { captainTraits, ensureCaptain } from './captain.js';
+import { activeDoctrineIdsOf, effectIdsFor, ensureCaptain } from './captain.js';
 import { activeCrewOf } from './crew.js';
 import { factionsClaim } from './reputation.js';
 import { activeMissionClaim } from './active-mission.js';
@@ -13,8 +13,10 @@ import { activeMissionClaim } from './active-mission.js';
 // Inside transaction `tx`: takes the per-player advisory lock, so concurrent requests cannot
 // create duplicate active ships or interleave a check with its write, and returns the pilot's
 // active ship with its components, creating the default ship if there is none yet. The ship also
-// carries the pilot's `captain` (created at Level 1 if there is none yet), its unlocked `traits`, the
-// active `crew` aboard and its `factions` claim as of the lock (factionsClaim).
+// carries the pilot's `captain` (created at Level 1 if there is none yet), its `traits` (the effect ids
+// in force: the captain's unlocked traits, the pilot's active Legacy Doctrines and a promoted
+// captain's innate class, see effectIdsFor), the active `crew` aboard and its `factions` claim as of
+// the lock (factionsClaim).
 export async function lockActiveShip(tx, user) {
   const playerId = user.sub;
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${playerId}))`;
@@ -32,11 +34,11 @@ export async function lockActiveShip(tx, user) {
     include: { components: true }
   });
   const captain = await ensureCaptain(tx, playerId, user.callsign);
-  return { ...ship, captain, traits: captainTraits(captain), crew: await activeCrewOf(tx, ship.id), factions: await factionsClaim(tx, playerId) };
+  return { ...ship, captain, traits: effectIdsFor(captain, await activeDoctrineIdsOf(tx, playerId)), crew: await activeCrewOf(tx, ship.id), factions: await factionsClaim(tx, playerId) };
 }
 
-// `traits` are the captain's unlocked trait ids and `crew` the active crew (lockActiveShip's
-// `ship.traits` and `ship.crew`).
+// `traits` are the effect ids in force and `crew` the active crew (lockActiveShip's `ship.traits` and
+// `ship.crew`).
 export function toLoadout(shipId, components, passengersAboard, traits = [], crew = []) {
   const list = COMPONENT_TYPES.map((type) => {
     const found = components.find((c) => c.type === type);

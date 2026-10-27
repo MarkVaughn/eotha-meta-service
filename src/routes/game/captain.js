@@ -1,6 +1,6 @@
 import { TRAIT_IDS, traitUnlockRefusal } from '../../config/captain.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
-import { captainView } from '../../lib/captain.js';
+import { captainTraits, captainView } from '../../lib/captain.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 // `dockedReceipt` is optional here on purpose: the route answers its absence with the coded 403
@@ -67,12 +67,12 @@ export default async function captainRoutes(fastify) {
     // The pilot's lock serialises every unlock, so one point is never spent twice.
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
-      const { captain, traits } = ship;
-      const refused = traitUnlockRefusal(traitId, { level: captainView(captain).level, traitIds: traits });
+      const { captain } = ship;
+      const refused = traitUnlockRefusal(traitId, { level: captainView(captain).level, traitIds: captainTraits(captain) });
       if (refused) return { refused };
-      const unlockedTraits = [...traits, traitId];
+      const unlockedTraits = [...captainTraits(captain), traitId];
       const updated = await tx.captain.update({ where: { id: captain.id }, data: { unlockedTraits } });
-      return { ship, captain: updated, traits: unlockedTraits };
+      return { ship, captain: updated, traits: [...ship.traits, traitId] };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
 

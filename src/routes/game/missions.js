@@ -501,7 +501,7 @@ export default async function missionsRoutes(fastify) {
         const standings = await standingsOf(tx, playerId);
         const factions = await factionsClaim(tx, playerId);
         // Captain XP rides on the payout record above: a replayed claim never reaches this line.
-        const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true });
+        const captain = await awardCaptainXp(tx, ship.captain, missionXp(active.offer, claim), { missionCompleted: true, traits: ship.traits });
         // Morale and seniority follow the settlement; the token below carries the crew as it now stands.
         const settledCrew = await recordCrewSettlement(tx, ship, payroll, {
           settlement: missionSettlement(active.offer), payout, deferred, captainXp: captain.xpGained

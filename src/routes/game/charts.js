@@ -138,9 +138,9 @@ export default async function chartsRoutes(fastify) {
   // holding the pilot's lock, so the XP is earned exactly once per chart: a duplicate fails the create
   // (P2002) and rolls the award back with it.
   const recordWithXp = (request, xp, create) => prisma.$transaction(async (tx) => {
-    const { captain } = await lockActiveShip(tx, request.user);
+    const { captain, traits } = await lockActiveShip(tx, request.user);
     await create(tx);
-    return awardCaptainXp(tx, captain, xp);
+    return awardCaptainXp(tx, captain, xp, { traits });
   });
 
   fastify.post('/charts/register-planet', { schema: registerPlanetSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {

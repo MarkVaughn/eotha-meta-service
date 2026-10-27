@@ -12,9 +12,8 @@ import {
 import { moraleAfterCappedGain, moraleBand, promotionRefusal, promotionTerms, restedMoraleCap } from '../../config/crew-morale.js';
 import { UUID_PATTERN } from '../../config/patterns.js';
 import { candidateView, findCandidate, generateCrewBoard, unavailableReasons } from '../../lib/crew-generator.js';
-import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, primaryReason, standbyCrewOf } from '../../lib/crew.js';
+import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, holdsActiveMission, primaryReason, standbyCrewOf } from '../../lib/crew.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
-import { isLegacyRow } from '../../lib/mission-offer.js';
 import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 import { recordCrewDock } from '../../lib/crew-docking.js';
@@ -258,8 +257,7 @@ export default async function crewRoutes(fastify) {
   // Keep the phase-2 mission wage-dodging guard. Engineer removal needs no loadout guard:
   // only effective operation falls back; stored components, credits and hull budget never change.
   async function leaveRefusal(tx, ship) {
-    const held = await tx.playerMission.findMany({ where: { playerId: ship.playerId } });
-    if (held.some((row) => !isLegacyRow(row))) return { code: 'crew_locked_by_active_mission' };
+    if (await holdsActiveMission(tx, ship.playerId)) return { code: 'crew_locked_by_active_mission' };
     return undefined;
   }
 

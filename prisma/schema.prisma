@@ -49,13 +49,15 @@ model Player {
   guestDevice  GuestDevice?
   captain      Captain?
   crewMembers  CrewMember[]
+  retiredCaptains RetiredCaptain[]
 }
 
 // The pilot's one Captain (src/config/captain.js), created at Level 1 the first time the pilot logs in
 // or its ship is next locked (src/lib/captain.js), so existing pilots need no backfill. `level` is
 // always levelForXp(xp); `unlockedTraits` is the array of trait ids spent, at most one per level above 1.
-// `originType`, `promotedFromCrewId`, `innateClass`, `innateRank` and `quirkId` are kept for crew
-// promotion and stay at their defaults until it exists.
+// `originType`, `promotedFromCrewId`, `innateClass`, `innateRank` and `quirkId` are set when a retiring
+// captain is succeeded by a promoted crew member (POST /game/captain/retire) and stay at their
+// defaults otherwise.
 model Captain {
   id                 String   @id @default(uuid()) @db.Uuid
   playerId           String   @unique @db.Uuid
@@ -69,9 +71,50 @@ model Captain {
   innateClass        String?
   innateRank         String?
   quirkId            String?
+  juryRigComponentTypes Json  @default("[]") // an innate Engineer's overdriven components
   missionsCompleted  Int      @default(0)
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+// A captain retired by POST /game/captain/retire (src/lib/retirement.js), kept for good: nothing deletes
+// a row but the pilot's own account. It snapshots the captain as it left: `unlockedTraits`, the
+// `capstoneTraitId` among them, the faction standings and `primaryFactionId` at retirement, the dock it
+// retired at, and the promoted-crew origin it came in with. `legacyDoctrineId` is the one Legacy Doctrine
+// its slot holds (honors and master retirements only; null until chosen) and `activeDoctrine` whether
+// it is in force; at most MAX_ACTIVE_LEGACY_DOCTRINES rows per pilot are active. `assignmentStatus` and
+// `assignedSpaceshipId` are hooks for fleet features not built yet. `receiptNonce` is the nonce of the
+// docked receipt the retirement was made with, so a retried request is answered, not repeated.
+model RetiredCaptain {
+  id                       String   @id @default(uuid()) @db.Uuid
+  playerId                 String   @db.Uuid
+  player                   Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  name                     String
+  originType               String   @default("STARTER")
+  promotedFromCrewId       String?  @db.Uuid
+  innateClass              String?
+  innateRank               String?
+  quirkId                  String?
+  finalLevel               Int
+  finalXp                  Int
+  retirementTier           String   // EARLY_DISCHARGE, HONORS, MASTER
+  missionsCompleted        Int
+  unlockedTraits           Json
+  capstoneTraitId          String?  // H6_FLEET_CAPTAIN, S6_ASTROGATOR_PRIME, C6_SHADOW_BROKER
+  legacyDoctrineId         String?
+  activeDoctrine           Boolean  @default(false)
+  factionStandingsSnapshot Json     @default("{}")
+  primaryFactionId         String?
+  retiredAtStationId       String?
+  retiredAtSystemH3        String?
+  assignmentStatus         String   @default("RETIRED_IDLE")
+  assignedSpaceshipId      String?  @db.Uuid
+  receiptNonce             String?
+  retiredAt                DateTime @default(now())
+
+  @@unique([playerId, receiptNonce])
+  @@index([playerId, activeDoctrine])
+  @@index([playerId, assignmentStatus])
 }
 
 // A crew member hired from a station board (src/config/crew.js, src/lib/crew-generator.js). ACTIVE
