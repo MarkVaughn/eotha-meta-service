@@ -4,7 +4,8 @@
 import { traitCrewTerms } from './captain.js';
 
 // The bits of ShipAttributes.crew_capability_flags (eotha-contracts src/crew_capabilities.ts). Only the
-// bits the contracts assigned are ever set; 0x08, 0x10 and 0x20 stay unused until they are.
+// bits the contracts assigned are ever set. No class signs 0x08 (Comms Officer, Transponder Spoof) or
+// 0x10 (Smuggler, Stealth Floor) yet: both belong to customs, which is dormant, and 0x20 is unassigned.
 export const CREW_CAPABILITY = Object.freeze({
   HOT_CASTOFF: 0x01,
   COLD_DRIFT: 0x02,
@@ -103,18 +104,34 @@ export const HUB_RANK_WEIGHTS = Object.freeze([['ADEPT', 750], ['MASTER', 250]])
 // the class signs into the ship, each `[bit, rank it unlocks at]` (a higher rank keeps the lower ranks'),
 // and `resists` the 0 to 1 attributes (ion_fog_shield_resist, node_interference_resist) it raises by
 // rank, scaled by the morale multiplier; both need the member's morale at NOMINAL_MORALE_THRESHOLD or
-// better. Chef and Doctor change no ship attribute; their effects (morale, cooldowns) are meta-service
-// rules (shoreLeaveRestedCap, doctorCooldownReduction).
+// better. `perks` are the effects no ship attribute carries, each by rank (the CREW_PERK keys), which
+// the meta-service applies where the credit or reputation moves (crewPerk). Chef and Doctor change no
+// ship attribute; their effects (morale, cooldowns) are meta-service rules (shoreLeaveRestedCap,
+// doctorCooldownReduction).
 const pct = (attr, values) => Object.freeze({ attr, pct: Object.freeze(values) });
 const add = (attr, values) => Object.freeze({ attr, add: Object.freeze(values) });
-const crewClass = (name, effects = [], juryRigSlots = [0, 0, 0], { capabilities = [], resists = {} } = {}) =>
+const crewClass = (name, effects = [], juryRigSlots = [0, 0, 0], { capabilities = [], resists = {}, perks = {} } = {}) =>
   Object.freeze({
     name,
     effects: Object.freeze(effects),
     juryRigSlots: Object.freeze(juryRigSlots),
     capabilities: Object.freeze(capabilities.map((c) => Object.freeze(c))),
-    resists: Object.freeze(resists)
+    resists: Object.freeze(resists),
+    perks: Object.freeze(Object.fromEntries(Object.entries(perks).map(([perk, values]) => [perk, Object.freeze(values)])))
   });
+
+// The perks a class carries (crewClass `perks`): the Quartermaster's gain on an ore sale, the Diplomat's
+// gain on positive reputation and cut to the rival's harm, and the rate the Smuggler's clean covert
+// bonus pays at (CLANDESTINE_BASE_BONUS_RATE without one).
+export const CREW_PERK = Object.freeze({
+  ORE_SALE_BONUS: 'ore_sale_bonus',
+  REPUTATION_GAIN_BONUS: 'reputation_gain_bonus',
+  RIVAL_HARM_REDUCTION: 'rival_harm_reduction',
+  CLANDESTINE_BONUS_RATE: 'clandestine_bonus_rate'
+});
+// The clean covert bonus an offer signs in clandestine_bonus_credits, as a share of its reward (+25%,
+// design-factions §6; the offers the tests sign pay 625 on 2500).
+export const CLANDESTINE_BASE_BONUS_RATE = 0.25;
 
 export const CREW_CLASSES = Object.freeze({
   PILOT: crewClass('Pilot', [
@@ -148,7 +165,21 @@ export const CREW_CLASSES = Object.freeze({
   GUNNER: crewClass('Gunner', [
     pct('weapon_dps', [0.15, 0.3, 0.5]),
     pct('weapon_range_m', [0.1, 0.2, 0.35])
-  ], [0, 0, 0], { capabilities: [[CREW_CAPABILITY.BELT_CLEARANCE, 'ADEPT']] })
+  ], [0, 0, 0], { capabilities: [[CREW_CAPABILITY.BELT_CLEARANCE, 'ADEPT']] }),
+  // The expansion classes (design-crew classes.md 2.1). Their customs effects (inspection chance,
+  // consular seals, bribes, the stealth floor) wait for the customs stage and are not applied here.
+  QUARTERMASTER: crewClass('Quartermaster', [
+    pct('cargo_capacity_m3', [0.1, 0.17, 0.25])
+  ], [0, 0, 0], { perks: { [CREW_PERK.ORE_SALE_BONUS]: [0.08, 0.14, 0.2] } }),
+  COMMS_OFFICER: crewClass('Comms Officer', [
+    pct('comms_range_m', [0.25, 0.4, 0.6]),
+    pct('covert_exposure_mult', [-0.12, -0.22, -0.35])
+  ]),
+  DIPLOMAT: crewClass('Diplomat', [], [0, 0, 0], { perks: {
+    [CREW_PERK.REPUTATION_GAIN_BONUS]: [0.15, 0.25, 0.35],
+    [CREW_PERK.RIVAL_HARM_REDUCTION]: [0.15, 0.25, 0.4]
+  } }),
+  SMUGGLER: crewClass('Smuggler', [], [0, 0, 0], { perks: { [CREW_PERK.CLANDESTINE_BONUS_RATE]: [0.32, 0.4, 0.5] } })
 });
 export const CREW_CLASS_IDS = Object.freeze(Object.keys(CREW_CLASSES));
 
@@ -366,6 +397,20 @@ export function crewResists(crew = []) {
   return resists;
 }
 
+/**
+ * The total of `perk` that `crew` (active members) adds, as a fraction: each member's value for its
+ * rank less `base`, scaled by its morale multiplier (so a Disgruntled member gives 0.6 of it and a
+ * Mutinous one none). `base` is what the perk is without crew, for a rate (CLANDESTINE_BASE_BONUS_RATE).
+ */
+export function crewPerk(crew = [], perk, base = 0) {
+  let total = 0;
+  for (const member of crew) {
+    const values = CREW_CLASSES[member.crewClass]?.perks[perk];
+    if (values && isRank(member.rank)) total += (values[rankIndex(member.rank)] - base) * effectiveMoraleMult(member);
+  }
+  return round6(total);
+}
+
 /** Most active crew a ship of `hullTier` carries when its captain holds `traits`. */
 export function maxActiveCrew(hullTier, traits = []) {
   const tier = Math.min(MAX_CREW_BY_HULL_TIER.length, Math.max(1, Math.round(hullTier || 1)));
@@ -397,6 +442,7 @@ export function classEffectsView(crewClassId, rank) {
     ...def.effects.map((e) => (e.add
       ? { attribute: e.attr, kind: 'add', value: e.add[i] }
       : { attribute: e.attr, kind: 'pct', value: e.pct[i] })),
-    ...(def.juryRigSlots[i] ? [{ attribute: 'jury_rig_slots', kind: 'add', value: def.juryRigSlots[i] }] : [])
+    ...(def.juryRigSlots[i] ? [{ attribute: 'jury_rig_slots', kind: 'add', value: def.juryRigSlots[i] }] : []),
+    ...Object.entries(def.perks).map(([perk, values]) => ({ attribute: perk, kind: 'pct', value: values[i] }))
   ];
 }

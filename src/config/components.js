@@ -106,14 +106,15 @@ export function clampPassengers(count, capacity) {
 }
 
 // Attributes no component sets: their values before captain traits and crew (eotha-contracts
-// ShipAttributes fields 21-23, and 25-27, matching the engine's `ShipAttributes::tier_one()`).
+// ShipAttributes fields 21-23, and 25-28, matching the engine's `ShipAttributes::tier_one()`).
 const BASE_ATTRIBUTES = {
   docking_time_mult: 1.0,
   extraction_rate_mult: 1.0,
   tuning_tolerance_hz: 100.0,
   ion_fog_shield_resist: 0,
   node_interference_resist: 0,
-  crew_capability_flags: 0
+  crew_capability_flags: 0,
+  covert_exposure_mult: 1.0
 };
 
 /**

@@ -135,7 +135,7 @@ model CrewMember {
   spaceshipId          String?    @db.Uuid
   spaceship            Spaceship? @relation(fields: [spaceshipId], references: [id], onDelete: SetNull)
   name                 String
-  crewClass            String     // PILOT, NAVIGATOR, SCIENCE, ENGINEER, CHEF, DOCTOR, GUNNER
+  crewClass            String     // PILOT, NAVIGATOR, SCIENCE, ENGINEER, CHEF, DOCTOR, GUNNER, QUARTERMASTER, COMMS_OFFICER, DIPLOMAT, SMUGGLER
   rank                 String     // NOVICE, ADEPT, MASTER
   quirkId              String     // Q01..Q20
   status               String     @default("ACTIVE") // ACTIVE, STANDBY
@@ -376,7 +376,7 @@ model CargoSale {
   seq          BigInt
   stationId    String
   items        Json     // sold lots, as signed (stored form)
-  totalCredits Int      // gross: what the engine signed, before the crew's share
+  totalCredits Int      // gross: what the engine signed plus any Quartermaster ore sale bonus, before the crew's share
   // The crew's share of totalCredits taken when the sale was credited; 0 on sales from before crew,
   // so a replay answers with the same split the first credit made.
   crewShareCredits Int  @default(0)

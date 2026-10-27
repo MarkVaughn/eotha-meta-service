@@ -13,7 +13,7 @@ import {
   verifySaleRecord
 } from '../../lib/cargo.js';
 import { SETTLEMENT } from '../../config/crew-morale.js';
-import { deductCrewRevenueShare, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
+import { deductCrewRevenueShare, oreSaleBonusCredits, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { recordCrewDock } from '../../lib/crew-docking.js';
@@ -87,9 +87,9 @@ export default async function cargoRoutes(fastify) {
     return { applied: outcome === CARGO_WRITE.APPLIED };
   });
 
-  // A signed sale: credits `totalCredits` less the crew's share once, keyed by its nonce, and stores
-  // the remaining hold in the same transaction. A replay answers with the first sale, its split and
-  // the current balance.
+  // A signed sale: credits `totalCredits` (plus the active Quartermaster's bonus) less the crew's share
+  // once, keyed by its nonce, and stores the remaining hold in the same transaction. A replay answers
+  // with the first sale, its bonus and split and the current balance.
   fastify.post('/cargo/sell', { schema: sellSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
     const { saleRecord, deferCrewPay, dockedReceipt } = request.body;
@@ -114,6 +114,7 @@ export default async function cargoRoutes(fastify) {
         let split;
         let settled;
         let docking;
+        let bonusCredits = 0;
         if (!sale) {
           const { outcome: write } = await applyCargoWrite(tx, playerId, writeOf(saleRecord, toStoredLots(saleRecord.remaining)));
           if (CARGO_REFUSALS[write]) return { refusal: CARGO_REFUSALS[write] };
@@ -121,7 +122,9 @@ export default async function cargoRoutes(fastify) {
           // Guarded increment; throwing rolls back the stored hold with it, so the record stays
           // creditable once the balance allows.
           const payroll = await payrollCrewOf(tx, playerId, ship);
-          split = deductCrewRevenueShare(payroll, ship.traits, saleRecord.totalCredits, { deferred: deferCrewPay });
+          // The Quartermaster's bonus is paid on top of the signed total, so the crew share it too.
+          bonusCredits = oreSaleBonusCredits(ship.crew, saleRecord.totalCredits);
+          split = deductCrewRevenueShare(payroll, ship.traits, saleRecord.totalCredits + bonusCredits, { deferred: deferCrewPay });
           const { count } = await tx.player.updateMany({
             where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - split.netCredits } },
             data: { credits: { increment: split.netCredits } }
@@ -135,7 +138,7 @@ export default async function cargoRoutes(fastify) {
               seq: BigInt(saleRecord.seq),
               stationId: saleRecord.stationId,
               items: toStoredLots(saleRecord.items),
-              totalCredits: saleRecord.totalCredits,
+              totalCredits: saleRecord.totalCredits + bonusCredits,
               crewShareCredits: split.crewShareCredits,
               soldAtMs: BigInt(saleRecord.soldAtMs)
             }
@@ -148,9 +151,11 @@ export default async function cargoRoutes(fastify) {
         }
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         const { lots } = holdView(await currentLease(tx, playerId));
-        // `total_credits` is the signed gross. A replay does not list the crew's payouts: only the
-        // total share is kept with the sale.
-        const grossCredits = sale?.totalCredits ?? saleRecord.totalCredits;
+        // `total_credits` is the gross credited: the signed total and the Quartermaster's bonus, which a
+        // replay finds as what the stored gross holds beyond the signed total. A replay does not list
+        // the crew's payouts: only the total share is kept with the sale.
+        const grossCredits = sale?.totalCredits ?? saleRecord.totalCredits + bonusCredits;
+        if (sale) bonusCredits = Math.max(0, sale.totalCredits - saleRecord.totalCredits);
         const crewShareCredits = sale?.crewShareCredits ?? split.crewShareCredits;
         return {
           credits: player.credits,
@@ -158,6 +163,7 @@ export default async function cargoRoutes(fastify) {
           grossCredits,
           crewShareCredits,
           netCredits: grossCredits - crewShareCredits,
+          ...(bonusCredits > 0 && { oreSaleBonusCredits: bonusCredits }),
           ...(split && { crewPayouts: split.crewPayouts }),
           ...(split?.deferredCrewShareCredits !== undefined && { deferredCrewShareCredits: split.deferredCrewShareCredits }),
           ...(settled?.effects.length && { crew_morale: settled.effects, ship }),
