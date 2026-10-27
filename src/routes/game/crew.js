@@ -27,11 +27,10 @@ const receiptProperties = {
 const crewIdProperty = { type: 'string', pattern: UUID_PATTERN.source };
 
 const boardSchema = {
-  querystring: {
+  body: {
     type: 'object',
-    required: ['stationId'],
     additionalProperties: false,
-    properties: { stationId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN } }
+    properties: receiptProperties
   }
 };
 const hireSchema = {
@@ -85,7 +84,7 @@ const MESSAGES = {
   hull_crew_cap_reached: "The hull cannot take more active crew.",
   insufficient_free_berths: 'There is no free life support berth for another crew member.',
   class_already_active: 'A crew member of that class is already aboard.',
-  insufficient_faction_rep: "Your standing with the candidate's home faction is too low to hire them.",
+  insufficient_faction_rep: "Your standing with this station's governing faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
   crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
   crew_not_engineer: 'Only an Engineer can configure component overdrive.',
@@ -180,12 +179,15 @@ export default async function crewRoutes(fastify) {
     });
   });
 
-  // The station's candidates this window, each with whether this pilot can hire them. The board is the
-  // same for every pilot and cannot be rerolled by refreshing, so it needs no receipt. Only a candidate
-  // already on this pilot's roster is left out, so the others keep their places and the board may show
-  // fewer than four.
-  fastify.get('/crew/board', { schema: boardSchema }, async (request) => {
-    const { stationId } = request.query;
+  // The docked station's candidates this window, each with whether this pilot can hire them. The
+  // station's governing faction comes from the verified docked receipt, which names the station too, so
+  // the board is the same for every pilot and cannot be rerolled by refreshing; only what stops a pilot
+  // hiring is their own. Only a candidate already on this pilot's roster is left out, so the others keep
+  // their places and the board may show fewer than four.
+  fastify.post('/crew/board', { schema: boardSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    const stationId = dockedStation(request, reply);
+    if (!stationId) return reply;
+    const stationFactionId = request.body.dockedReceipt.controllingFactionId;
     const nowMs = Date.now();
     const { window, candidates } = generateCrewBoard(stationId, nowMs);
     const ctx = await prisma.$transaction(async (tx) => {
@@ -195,11 +197,13 @@ export default async function crewRoutes(fastify) {
         ship,
         credits: player.credits,
         standings: await standingsOf(tx, request.user.sub),
+        stationFactionId,
         hired: await hiredCandidateIdsOf(tx, request.user.sub)
       };
     });
     return {
       stationId,
+      stationFactionId: stationFactionId || null,
       window: { startsAt: new Date(window.startsAtMs).toISOString(), expiresAt: new Date(window.expiresAtMs).toISOString() },
       candidates: candidates.filter((candidate) => !ctx.hired.has(candidate.candidateId)).map((candidate) => candidateView(candidate, ctx)),
       credits: ctx.credits
@@ -219,7 +223,12 @@ export default async function crewRoutes(fastify) {
       const playerId = request.user.sub;
       if ((await hiredCandidateIdsOf(tx, playerId)).has(candidate.candidateId)) return { refused: { code: 'candidate_already_hired' } };
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      const reasons = unavailableReasons(candidate, { ship, credits: player.credits, standings: await standingsOf(tx, playerId) });
+      const reasons = unavailableReasons(candidate, {
+        ship,
+        credits: player.credits,
+        standings: await standingsOf(tx, playerId),
+        stationFactionId: request.body.dockedReceipt.controllingFactionId
+      });
       if (reasons.length > 0) return { refused: reasonRefusal(primaryReason(reasons), reasons) };
 
       const bonus = signingBonusCredits(candidate.rank, candidate.quirkId, ship.traits);

@@ -24,7 +24,7 @@ import {
   signingBonusCredits,
   startingMorale
 } from '../src/config/crew.js';
-import { candidateSeed, crewBoardWindow, generateCrewBoard } from '../src/lib/crew-generator.js';
+import { candidateSeed, crewBoardWindow, generateCrewBoard, unavailableReasons } from '../src/lib/crew-generator.js';
 import { deductCrewRevenueShare } from '../src/lib/crew.js';
 
 before(async () => {
@@ -43,11 +43,14 @@ function findStation(matches, from = 0) {
   throw new Error('no station with a suitable board');
 }
 
-const board = (pilot, stationId) => call(pilot, 'GET', `/game/crew/board?stationId=${stationId}`);
-const hire = (pilot, stationId, candidateId, body = {}) =>
+// `controllingFactionId` is the faction governing the station its receipt signs: '' (the default) is an
+// independent Free Port, 'alpha', 'beta' or 'gamma' a faction's station.
+const board = (pilot, stationId, controllingFactionId = '') =>
+  call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId, controllingFactionId }) });
+const hire = (pilot, stationId, candidateId, body = {}, controllingFactionId = '') =>
   call(pilot, 'POST', '/game/crew/hire', {
     candidateId,
-    dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId }),
+    dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId, controllingFactionId }),
     ...body
   });
 const crewAction = (action) => (pilot, crewId, body = {}) =>
@@ -196,16 +199,17 @@ describe('crew board generator', () => {
   });
 });
 
-describe('GET /game/crew/board', () => {
+describe('POST /game/crew/board', () => {
   test('ASSERT-2.2.1: four candidates; an unaffordable Master is unavailable for rep and credits; a second Engineer for its class', async () => {
     const { stationId } = findStation((c) => c.some((x) => x.rank === 'MASTER') && c.some((x) => x.crewClass === 'ENGINEER' && x.rank !== 'MASTER'));
     const pilot = await newPilot('Board');
     await addCrew(pilot, { crewClass: 'ENGINEER', rank: 'NOVICE' });
-    const res = await board(pilot, stationId);
+    const res = await board(pilot, stationId, 'alpha');
     assert.equal(res.statusCode, 200, res.body);
     const body = json(res);
     assert.equal(body.candidates.length, 4);
     assert.equal(body.stationId, stationId);
+    assert.equal(body.stationFactionId, 'alpha');
     const master = body.candidates.find((c) => c.rank === 'MASTER');
     assert.equal(master.hireable, false);
     const codes = master.unavailableReasons.map((r) => r.code);
@@ -214,7 +218,8 @@ describe('GET /game/crew/board', () => {
     const rep = master.unavailableReasons.find((r) => r.code === 'INSUFFICIENT_FACTION_REP');
     assert.equal(rep.requiredScore, 450);
     assert.equal(rep.currentScore, 0);
-    assert.equal(rep.factionId, master.homeFactionId);
+    assert.equal(rep.factionId, 'alpha');
+    assert.match(rep.label, /with alpha \(current: 0\)/);
     const engineer = body.candidates.find((c) => c.crewClass === 'ENGINEER');
     assert.equal(engineer.hireable, false);
     assert.ok(engineer.unavailableReasons.some((r) => r.code === 'CLASS_ALREADY_ACTIVE'));
@@ -241,20 +246,30 @@ describe('GET /game/crew/board', () => {
     const { stationId } = findStation((c) => c.some((x) => x.rank === 'MASTER'));
     const pilot = await newPilot('Rich');
     await setCredits(pilot, 10_000);
-    const first = json(await board(pilot, stationId));
+    const first = json(await board(pilot, stationId, 'beta'));
     const master = first.candidates.find((c) => c.rank === 'MASTER');
     assert.deepEqual(master.unavailableReasons.map((r) => r.code), ['INSUFFICIENT_FACTION_REP']);
-    await setStanding(pilot, master.homeFactionId, 450);
-    const second = json(await board(pilot, stationId));
+    await setStanding(pilot, 'beta', 450);
+    const second = json(await board(pilot, stationId, 'beta'));
     assert.equal(second.candidates.find((c) => c.rank === 'MASTER').hireable, true);
     assert.equal(second.credits, 10_000);
   });
 
-  test('rejects a missing or malformed station and an anonymous caller', async () => {
+  test('refuses a board without a verified docked receipt, a mismatched station or an anonymous caller', async () => {
     const pilot = await newPilot('BadBoard');
-    assert.equal((await call(pilot, 'GET', '/game/crew/board')).statusCode, 400);
-    assert.equal((await call(pilot, 'GET', '/game/crew/board?stationId=nope')).statusCode, 400);
-    assert.equal((await app.inject({ method: 'GET', url: `/game/crew/board?stationId=${randomUUID()}` })).statusCode, 401);
+    const stationId = randomUUID();
+    const expect = async (res, status, code) => {
+      assert.equal(res.statusCode, status, res.body);
+      if (code) assert.equal(json(res).error, code);
+    };
+    await expect(await call(pilot, 'POST', '/game/crew/board', {}), 403, 'docked_receipt_required');
+    await expect(await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt(pilot, { controllingFactionId: 'delta' }) }), 400);
+    await expect(await call(pilot, 'POST', '/game/crew/board', { stationId: 'nope' }), 400);
+    await expect(await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt('someone-else') }), 403, 'docked_receipt_invalid');
+    await expect(await call(pilot, 'POST', '/game/crew/board', { stationId, dockedReceipt: dockedReceipt(pilot) }), 403, 'docked_receipt_wrong_station');
+    await expect(await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt(pilot, { issuedAtMs: Date.now() - 60_000, dockedAtMs: Date.now() - 62_000 }) }), 403, 'docked_receipt_required');
+    assert.equal((await app.inject({ method: 'POST', url: '/game/crew/board', payload: {} })).statusCode, 401);
+    assert.equal((await app.inject({ method: 'GET', url: `/game/crew/board?stationId=${stationId}`, headers: pilot.headers })).statusCode, 404);
   });
 });
 
@@ -334,15 +349,16 @@ describe('POST /game/crew/hire', () => {
     const master = candidates.find((c) => c.rank === 'MASTER');
     const rich = await newPilot('NoRep');
     await setCredits(rich, 10_000);
-    const denied = await hire(rich, stationId, master.candidateId);
+    const denied = await hire(rich, stationId, master.candidateId, {}, 'alpha');
     assert.equal(denied.statusCode, 403);
     assert.equal(json(denied).error, 'insufficient_faction_rep');
     assert.equal(json(denied).requiredScore, 450);
     assert.equal(json(denied).currentScore, 0);
+    assert.equal(json(denied).factionId, 'alpha');
     assert.equal(await credits(rich), 10_000);
 
-    await setStanding(rich, master.homeFactionId, 450);
-    const ok = await hire(rich, stationId, master.candidateId);
+    await setStanding(rich, 'alpha', 450);
+    const ok = await hire(rich, stationId, master.candidateId, {}, 'alpha');
     assert.equal(ok.statusCode, 200, ok.body);
     assert.equal(json(ok).credits, 10_000 - signingBonusCredits('MASTER', master.quirkId));
     assert.equal(json(ok).crew.baseWageShareBp, 1200);
@@ -664,5 +680,162 @@ describe('revenue share', () => {
     assert.equal(split.netCredits, 5000);
     assert.ok(split.crewPayouts.every((p) => p.shareCredits === 1000));
     assert.equal(split.crewShareCredits + split.netCredits, 10_000);
+  });
+});
+
+// Hiring is gated by the pilot's standing with the faction governing the station, as its signed docked
+// receipt names it ('' for an independent Free Port), never by the candidate's own home faction.
+describe('the station faction hiring gate', () => {
+  const rank = (name, homeFactionId) => (c) => c.some((x) => x.rank === name && (!homeFactionId || x.homeFactionId === homeFactionId));
+  const candidateOf = (candidates, name, homeFactionId) =>
+    candidates.find((x) => x.rank === name && (!homeFactionId || x.homeFactionId === homeFactionId));
+  const reasonCodes = (view) => view.unavailableReasons.map((r) => r.code);
+  const viewOf = async (pilot, stationId, candidate, faction) =>
+    json(await board(pilot, stationId, faction)).candidates.find((c) => c.candidateId === candidate.candidateId);
+  const richPilot = async (name) => {
+    const pilot = await newPilot(name);
+    await setCredits(pilot, 20_000);
+    return pilot;
+  };
+
+  describe('at an independent Free Port', () => {
+    test('an independent Master is hireable with no standing anywhere', async () => {
+      const { stationId, candidates } = findStation(rank('MASTER', 'independent'));
+      const master = candidateOf(candidates, 'MASTER', 'independent');
+      const pilot = await richPilot('FreePortIndependent');
+      assert.equal((await viewOf(pilot, stationId, master, '')).hireable, true);
+      const res = await hire(pilot, stationId, master.candidateId, {}, '');
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).crew.rank, 'MASTER');
+      assert.equal(json(res).crew.homeFactionId, 'independent');
+    });
+
+    test('a Master of any home faction is hireable, since the candidate\'s own faction does not gate', async () => {
+      for (const home of ['alpha', 'beta', 'gamma']) {
+        const { stationId, candidates } = findStation(rank('MASTER', home));
+        const master = candidateOf(candidates, 'MASTER', home);
+        const pilot = await richPilot(`FreePort${home}`);
+        assert.equal((await viewOf(pilot, stationId, master, '')).hireable, true, home);
+        assert.equal((await hire(pilot, stationId, master.candidateId, {}, '')).statusCode, 200, home);
+      }
+    });
+
+    test('Novice, Adept and Master are hireable at the worst standing with every faction, independent included', async () => {
+      const pilot = await richPilot('FreePortHated');
+      for (const factionId of ['alpha', 'beta', 'gamma', 'independent']) await setStanding(pilot, factionId, -1000);
+      const { stationId, candidates } = findStation((c) => ['NOVICE', 'ADEPT', 'MASTER'].every((name) => rank(name)(c)), 0);
+      for (const name of ['NOVICE', 'ADEPT', 'MASTER']) {
+        const view = await viewOf(pilot, stationId, candidateOf(candidates, name), '');
+        assert.equal(view.unavailableReasons.some((r) => r.code === 'INSUFFICIENT_FACTION_REP'), false, name);
+      }
+    });
+
+    test('the board names no governing faction', async () => {
+      const pilot = await newPilot('FreePortBoard');
+      assert.equal(json(await board(pilot, stationAt(1), '')).stationFactionId, null);
+    });
+  });
+
+  describe('at a faction station', () => {
+    test('an independent Master needs +450 with the station faction, and then hires', async () => {
+      const { stationId, candidates } = findStation(rank('MASTER', 'independent'));
+      const master = candidateOf(candidates, 'MASTER', 'independent');
+      const pilot = await richPilot('CitadelIndependent');
+      const denied = await hire(pilot, stationId, master.candidateId, {}, 'gamma');
+      assert.equal(denied.statusCode, 403);
+      assert.deepEqual(
+        [json(denied).error, json(denied).factionId, json(denied).requiredScore, json(denied).currentScore],
+        ['insufficient_faction_rep', 'gamma', 450, 0]
+      );
+      await setStanding(pilot, 'gamma', 449);
+      assert.equal((await hire(pilot, stationId, master.candidateId, {}, 'gamma')).statusCode, 403);
+      await setStanding(pilot, 'gamma', 450);
+      assert.equal((await viewOf(pilot, stationId, master, 'gamma')).hireable, true);
+      const ok = await hire(pilot, stationId, master.candidateId, {}, 'gamma');
+      assert.equal(ok.statusCode, 200, ok.body);
+      assert.equal(json(ok).crew.homeFactionId, 'independent');
+    });
+
+    test('the candidate\'s home faction standing does not stand in for the station faction\'s', async () => {
+      const { stationId, candidates } = findStation(rank('MASTER', 'beta'));
+      const master = candidateOf(candidates, 'MASTER', 'beta');
+      const pilot = await richPilot('CitadelHome');
+      await setStanding(pilot, 'beta', 450);
+      const view = await viewOf(pilot, stationId, master, 'gamma');
+      assert.equal(view.hireable, false);
+      assert.equal(view.unavailableReasons.find((r) => r.code === 'INSUFFICIENT_FACTION_REP').factionId, 'gamma');
+      assert.equal((await hire(pilot, stationId, master.candidateId, {}, 'gamma')).statusCode, 403);
+      // And standing with the station's own faction hires a Master of any home faction.
+      await setStanding(pilot, 'gamma', 450);
+      assert.equal((await hire(pilot, stationId, master.candidateId, {}, 'gamma')).statusCode, 200);
+    });
+
+    test('a pilot\'s standing with the independent faction does not count at a faction station', async () => {
+      const { stationId, candidates } = findStation(rank('MASTER', 'independent'));
+      const master = candidateOf(candidates, 'MASTER', 'independent');
+      const pilot = await richPilot('CitadelIndependentRep');
+      await setStanding(pilot, 'independent', 1000);
+      assert.equal((await hire(pilot, stationId, master.candidateId, {}, 'alpha')).statusCode, 403);
+    });
+
+    test('Novice and Adept ask -499 and -149 of the station faction', async () => {
+      const { stationId, candidates } = findStation((c) => rank('NOVICE')(c) && rank('ADEPT')(c));
+      const pilot = await richPilot('CitadelRanks');
+      for (const [name, required] of [['NOVICE', -499], ['ADEPT', -149]]) {
+        const candidate = candidateOf(candidates, name);
+        await setStanding(pilot, 'beta', required - 1);
+        const below = await viewOf(pilot, stationId, candidate, 'beta');
+        assert.deepEqual(reasonCodes(below).filter((code) => code === 'INSUFFICIENT_FACTION_REP'), ['INSUFFICIENT_FACTION_REP'], name);
+        assert.equal(below.unavailableReasons.find((r) => r.code === 'INSUFFICIENT_FACTION_REP').requiredScore, required);
+        await setStanding(pilot, 'beta', required);
+        const at = await viewOf(pilot, stationId, candidate, 'beta');
+        assert.equal(reasonCodes(at).includes('INSUFFICIENT_FACTION_REP'), false, name);
+      }
+    });
+
+    test('the same Master is locked at one faction\'s station and open at another\'s', async () => {
+      const { stationId, candidates } = findStation(rank('MASTER'));
+      const master = candidateOf(candidates, 'MASTER');
+      const pilot = await richPilot('TwoStations');
+      await setStanding(pilot, 'alpha', 450);
+      assert.equal((await viewOf(pilot, stationId, master, 'alpha')).hireable, true);
+      assert.equal((await viewOf(pilot, stationId, master, 'gamma')).hireable, false);
+      assert.equal((await viewOf(pilot, stationId, master, '')).hireable, true);
+    });
+  });
+
+  test('the faction is signed: a receipt altered to say independent is refused, not hired from', async () => {
+    const { stationId, candidates } = findStation(rank('MASTER'));
+    const master = candidateOf(candidates, 'MASTER');
+    const pilot = await richPilot('ForgedFaction');
+    const honest = dockedReceipt(pilot, { dockedEntityId: stationId, controllingFactionId: 'alpha' });
+    for (const controllingFactionId of ['', 'beta']) {
+      const forged = { ...honest, controllingFactionId };
+      const res = await call(pilot, 'POST', '/game/crew/hire', { candidateId: master.candidateId, dockedReceipt: forged });
+      assert.equal(res.statusCode, 403, res.body);
+      assert.equal(json(res).error, 'docked_receipt_invalid');
+      assert.equal((await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: forged })).statusCode, 403);
+    }
+    assert.equal(await app.prisma.crewMember.count({ where: { playerId: pilot.id } }), 0);
+  });
+
+  test('a receipt without a governing faction is refused by the schema', async () => {
+    const pilot = await newPilot('NoFaction');
+    const { controllingFactionId, ...v1Shaped } = dockedReceipt(pilot);
+    assert.equal(controllingFactionId, '');
+    assert.equal((await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: v1Shaped })).statusCode, 400);
+  });
+
+  test('unavailableReasons judges standing against the station faction, with none meaning independent', () => {
+    const ship = { traits: [], components: defaultComponents(), passengersAboard: 0, crew: [] };
+    const master = { rank: 'MASTER', crewClass: 'PILOT', quirkId: 'Q01', homeFactionId: 'independent' };
+    const reasonsAt = (stationFactionId, standings) => unavailableReasons(master, { ship, credits: 100_000, standings, stationFactionId })
+      .filter((r) => r.code === 'INSUFFICIENT_FACTION_REP');
+    assert.deepEqual(reasonsAt('', { alpha: -1000 }), []);
+    assert.deepEqual(reasonsAt(undefined, {}), []);
+    assert.deepEqual(reasonsAt('alpha', { alpha: 450 }), []);
+    const [reason] = reasonsAt('alpha', { alpha: 449, independent: 1000 });
+    assert.deepEqual([reason.factionId, reason.requiredScore, reason.currentScore], ['alpha', 450, 449]);
+    assert.equal(reason.label, 'Requires Trusted (450) standing with alpha (current: 449)');
   });
 });

@@ -232,7 +232,7 @@ describe('hiring', () => {
     const { stationId, candidate } = findNovice('DIPLOMAT');
     const pilot = await newPilot('Second');
     await addCrew(pilot, { crewClass: 'DIPLOMAT', rank: 'NOVICE' });
-    const res = await call(pilot, 'GET', `/game/crew/board?stationId=${stationId}`);
+    const res = await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId }) });
     const view = json(res).candidates.find((c) => c.candidateId === candidate.candidateId);
     assert.equal(view.hireable, false);
     const codes = view.unavailableReasons.map((r) => r.code);

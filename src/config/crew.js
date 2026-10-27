@@ -39,9 +39,13 @@ export const CREW_BOARD_OFFER_COUNT = 4;
 export const CREW_BOARD_WINDOW_MS = 30 * 60 * 1000;
 export const HUB_SLOT_INDEX = CREW_BOARD_OFFER_COUNT - 1;
 
-// The standing with its home faction a candidate of each rank asks of the pilot before hiring:
-// Unfriendly or better for a Novice, Neutral for an Adept, Trusted for a Master.
+// The standing with the station's governing faction a candidate of each rank asks of the pilot before
+// hiring: Unfriendly or better for a Novice, Neutral for an Adept, Trusted for a Master.
 export const CREW_REP_REQ_SCORE = Object.freeze({ NOVICE: -499, ADEPT: -149, MASTER: 450 });
+// An independent station (a Free Port) has no faction to earn standing with: the pilot counts as neutral
+// there, and a Master asks only for that neutral standing.
+export const INDEPENDENT_STATION_STANDING = 0;
+export const INDEPENDENT_STATION_REP_REQ_SCORE = Object.freeze({ ...CREW_REP_REQ_SCORE, MASTER: 0 });
 
 export const INITIAL_CREW_MORALE = 75;
 export const MAX_CREW_MORALE = 100;
