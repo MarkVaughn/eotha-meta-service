@@ -21,10 +21,11 @@ import {
 import { awardCaptainXp } from '../../lib/captain.js';
 import {
   activeCrewOf, clandestineBonusCredits, deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCovertAcceptance,
-  recordCrewSettlement
+  recordCrewAbandonment, recordCrewSettlement
 } from '../../lib/crew.js';
 import { doctorCooldownReduction } from '../../config/crew-morale.js';
 import { recordCrewDock, recordFlakyDeparture } from '../../lib/crew-docking.js';
+import { accruedPenalty, basePenalty, disembarkPlace, hostageMinutes, hostageState } from '../../lib/hostage.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import {
   MISSION_ARCHETYPES, MISSION_TYPES, MISSION_VISIBILITIES, isCovert, isLegacyRow, missionOfferVersion, verifyMissionOffer
@@ -119,6 +120,17 @@ const abandonSchema = {
   body: {
     type: ['object', 'null'],
     additionalProperties: false,
+    properties: { missionId: { type: 'string', pattern: UUID_PATTERN.source }, dockedReceipt: dockedReceiptSchema }
+  }
+};
+
+// `missionId` names the abandoned passage whose hostages to drop. The receipt is optional here for the
+// same reason as on accept: its absence is answered with a coded 403.
+const disembarkSchema = {
+  body: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['missionId'],
     properties: { missionId: { type: 'string', pattern: UUID_PATTERN.source }, dockedReceipt: dockedReceiptSchema }
   }
 };
@@ -369,6 +381,12 @@ export default async function missionsRoutes(fastify) {
     const { missions, cancelled } = await loadActive(request);
     const standings = await standingsOf(prisma, request.user.sub);
     const body = { missions, limits: MISSION_LIMITS, active: missions[0] ?? null, standings };
+    // Passengers of abandoned passages still aboard, the contract's HostageState, until they disembark.
+    const nowMs = Date.now();
+    const hostages = (await prisma.abandonedMission.findMany({
+      where: { playerId: request.user.sub, hostageBerths: { gt: 0 } }, orderBy: [{ abandonedAt: 'asc' }, { id: 'asc' }]
+    })).map((row) => hostageState(row, nowMs));
+    if (hostages.length) body.hostages = hostages;
     return cancelled.length ? { ...body, cancelled_missions: cancelled, cancelled_mission: cancelled[0] } : body;
   });
 
@@ -376,8 +394,9 @@ export default async function missionsRoutes(fastify) {
   // (ABANDON_TERMS), docked or not, and pays nothing, and the mission's berths (a survey's surveyor
   // too) empty. A passage is the exception: only cancelling it
   // while docked at its origin, where the passengers step back off, has those terms. Abandoned
-  // anywhere else its passengers still disembark wherever the ship is, at no cost and with no
-  // cooldown, until the passenger hostage state replaces that.
+  // anywhere else its passengers stay aboard as hostages, still in their berths and so blocking new
+  // crew, at no cost and with no cooldown until POST /missions/disembark drops them. Either way the
+  // crew whose quirk minds an abandon lose morale (recordCrewAbandonment).
   fastify.post('/missions/abandon', { schema: abandonSchema }, async (request, reply) => {
     const playerId = request.user.sub;
     const missionId = request.body?.missionId;
@@ -404,6 +423,7 @@ export default async function missionsRoutes(fastify) {
 
       const atOrigin = dockedReceipt?.dockedEntityId === offer.origin_station_id && dockedReceipt.systemH3 === offer.origin_system_h3;
       const reason = atOrigin ? 'in_port_origin' : dockedReceipt ? 'in_port_dock' : 'in_flight';
+      const hostage = offer.type === 'MISSION_TYPE_PASSAGE' && !atOrigin && offer.required_berths > 0;
       const terms = offer.type !== 'MISSION_TYPE_PASSAGE' || atOrigin ? ABANDON_TERMS[offer.type] : { reputation: 0, cooldownMs: 0 };
       const factionId = missionFaction(offer);
 
@@ -416,7 +436,14 @@ export default async function missionsRoutes(fastify) {
           factionId,
           missionType: typeName(offer),
           reputationLoss: terms.reputation,
-          reason
+          reason,
+          abandonedAt: new Date(nowMs),
+          ...(hostage && {
+            hostageBerths: offer.required_berths,
+            originSystemH3: offer.origin_system_h3,
+            destinationStationId: offer.destination_station_id || null,
+            destinationSystemH3: offer.destination_system_h3 || null
+          })
         }
       });
       await adjustReputation(tx, playerId, factionId, terms.reputation, {
@@ -424,14 +451,18 @@ export default async function missionsRoutes(fastify) {
         missionId: row.missionId
       });
       if (terms.cooldownMs > 0) await startCooldown(tx, playerId, row.originStationId, nowMs, terms.cooldownMs);
-      // The mission's own passengers step off: a passage's party, or a survey's one surveyor.
-      const passengersAboard = unboarded(ship, offer.required_berths);
+      // The mission's own passengers step off: a passage's party, or a survey's one surveyor. A
+      // hostage party stays aboard and keeps its berths.
+      const passengersAboard = hostage ? ship.passengersAboard : unboarded(ship, offer.required_berths);
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       const dock = dockedReceipt ? await recordCrewDock(tx, ship, dockedReceipt) : { ship };
+      // The crew as stored now: a Loyalist's capabilities return with the mission that turned them off gone.
+      const abandoned = await recordCrewAbandonment(tx, ship.id, ship.traits, factionId);
       return {
-        // The crew as stored now: a Loyalist's capabilities return with the mission that turned them off gone.
-        ship: { ...dock.ship, crew: await activeCrewOf(tx, ship.id) },
+        ship: { ...dock.ship, crew: abandoned.crew },
         docking: dock.docking,
+        crewMorale: abandoned.effects,
+        hostage: hostage ? hostageState({ missionId: row.missionId, abandonedAt: new Date(nowMs), hostageBerths: offer.required_berths }, nowMs) : null,
         passengersAboard,
         missionId: row.missionId,
         reputationChange: terms.reputation,
@@ -444,7 +475,93 @@ export default async function missionsRoutes(fastify) {
     return {
       abandoned: true,
       mission_id: outcome.missionId,
-      outcome: 'MISSION_ABANDON_OUTCOME_CANCELLED',
+      outcome: outcome.hostage ? 'MISSION_ABANDON_OUTCOME_HOSTAGE' : 'MISSION_ABANDON_OUTCOME_CANCELLED',
+      reputation_change: outcome.reputationChange,
+      ...(outcome.hostage && { hostage: outcome.hostage }),
+      standings: outcome.standings,
+      ...(outcome.crewMorale.length > 0 && { crew_morale: outcome.crewMorale }),
+      ...(outcome.docking?.applied && { docking: outcome.docking }),
+      ...(outcome.docking?.departed.length && { departed_crew: outcome.docking.departed }),
+      token: await tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.factions)
+    };
+  });
+
+  // Drops the hostages of an abandoned passage, which needs the pilot docked at a station or outpost
+  // (a signed receipt). The faction that sponsored the mission is charged the base penalty by where they
+  // step off (HOSTAGE_BASE_PENALTY) and the time penalty accrued since the abandon, and the berths free.
+  // `result` is the contract's DisembarkResult; a refusal changes nothing.
+  const disembarkFailure = (status, result, error, code) => fail(status, error, { result, ...(code && { code }) });
+  fastify.post('/missions/disembark', { schema: disembarkSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    const playerId = request.user.sub;
+    const { missionId, dockedReceipt } = request.body;
+    const nowMs = Date.now();
+
+    if (!dockedReceipt) {
+      return reply.code(403).send({
+        error: 'Disembarking requires a docked receipt from the engine.',
+        code: 'docked_receipt_required',
+        result: 'DISEMBARK_RESULT_RECEIPT_INVALID'
+      });
+    }
+    const refusal = dockedReceiptRefusal(dockedReceipt, { pilotId: playerId, publicKey: fastify.claimKey.key, nowMs, log: request.log });
+    if (refusal) {
+      const result = refusal.code === 'docked_receipt_expired' ? 'DISEMBARK_RESULT_RECEIPT_EXPIRED' : 'DISEMBARK_RESULT_RECEIPT_INVALID';
+      return reply.code(403).send({ ...refusal, result });
+    }
+
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const row = await tx.abandonedMission.findUnique({ where: { playerId_missionId: { playerId, missionId } } });
+      if (!row) {
+        // A mission still held or already paid is real but not a hostage state.
+        const live = (await tx.playerMission.findFirst({ where: { playerId, missionId } }))
+          || (await tx.completedMission.findUnique({ where: { playerId_missionId: { playerId, missionId } } }));
+        return live
+          ? disembarkFailure(409, 'DISEMBARK_RESULT_NOT_HOSTAGE', 'The mission is not in the hostage state.', 'not_hostage')
+          : disembarkFailure(404, 'DISEMBARK_RESULT_UNKNOWN_MISSION', 'No mission with this id.', 'unknown_mission');
+      }
+      if (row.hostageBerths <= 0) {
+        return disembarkFailure(409, 'DISEMBARK_RESULT_NOT_HOSTAGE', 'The mission is not in the hostage state.', 'not_hostage');
+      }
+
+      const place = disembarkPlace(row, dockedReceipt);
+      const minutes = hostageMinutes(row, nowMs);
+      const base = basePenalty(place);
+      const time = accruedPenalty(minutes);
+      const reputationChange = -(base + time);
+      await adjustReputation(tx, playerId, row.factionId, reputationChange, {
+        reason: LEDGER_REASONS.HOSTAGE_DISEMBARKED,
+        missionId: row.missionId
+      });
+      await tx.abandonedMission.update({
+        where: { id: row.id },
+        data: { hostageBerths: 0, hostageMinutes: minutes, reputationLoss: reputationChange, reason: 'hostage_returned' }
+      });
+      const passengersAboard = unboarded(ship, row.hostageBerths);
+      await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+      const dock = await recordCrewDock(tx, ship, dockedReceipt);
+      return {
+        ship: dock.ship,
+        docking: dock.docking,
+        passengersAboard,
+        missionId: row.missionId,
+        place,
+        base,
+        time,
+        minutes,
+        reputationChange,
+        standings: await standingsOf(tx, playerId),
+        factions: await factionsClaim(tx, playerId)
+      };
+    });
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
+    return {
+      result: 'DISEMBARK_RESULT_SUCCESS',
+      mission_id: outcome.missionId,
+      place: outcome.place,
+      base_penalty: outcome.base,
+      time_penalty: outcome.time,
+      hostage_minutes: outcome.minutes,
       reputation_change: outcome.reputationChange,
       standings: outcome.standings,
       ...(outcome.docking?.applied && { docking: outcome.docking }),

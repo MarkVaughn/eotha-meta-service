@@ -146,6 +146,9 @@ const activeIds = async (pilot) => json(await call(pilot, 'GET', '/game/missions
 const research = (pilot, overrides = {}) => signedOffer(pilot, { type: 'MISSION_TYPE_RESEARCH', required_berths: 0, ...overrides });
 const abandon = (pilot, missionId) =>
   call(pilot, 'POST', '/game/missions/abandon', missionId === undefined ? undefined : { missionId });
+// Abandons the pilot's one held mission while docked at its origin, where a passage's party steps off.
+const abandonAtOrigin = (pilot, offer) =>
+  call(pilot, 'POST', '/game/missions/abandon', { dockedReceipt: receiptAtOrigin(pilot, offer) });
 const aboard = async (pilot) => json(await call(pilot, 'GET', '/ship/loadout')).ship_attributes.passengers_aboard;
 const tokenAboard = (res) => app.jwt.verify(json(res).token).ship_attributes.passengers_aboard;
 const cooldown = async (pilot, originId) => json(await call(pilot, 'GET', `/game/missions/cooldown?originId=${originId}`));
@@ -562,14 +565,14 @@ describe('engine-signed missions', () => {
   });
 
   describe('abandon', () => {
-    test('unboards the passengers, reissues the token, pays nothing and starts no cooldown', async () => {
+    test('unboards the passengers at the origin, reissues the token and pays nothing', async () => {
       const pilot = await newPilot();
       assert.equal((await call(pilot, 'POST', '/game/missions/abandon')).statusCode, 404);
       const offer = signedOffer(pilot);
       await acceptOk(pilot, offer);
       assert.equal(await aboard(pilot), 2);
 
-      const res = await call(pilot, 'POST', '/game/missions/abandon');
+      const res = await abandonAtOrigin(pilot, offer);
       assert.equal(res.statusCode, 200);
       assert.equal(json(res).abandoned, true);
       assert.equal(json(res).mission_id, offer.mission_id);
@@ -577,7 +580,6 @@ describe('engine-signed missions', () => {
       assert.equal(await aboard(pilot), 0);
       assert.equal(await activeMission(pilot), null);
       assert.equal(await credits(pilot), 0);
-      assert.equal((await cooldown(pilot, offer.origin_station_id)).active, false);
       assert.equal((await call(pilot, 'POST', '/game/missions/abandon')).statusCode, 404);
     });
 
@@ -585,20 +587,23 @@ describe('engine-signed missions', () => {
       const pilot = await newPilot();
       await call(pilot, 'GET', '/ship/loadout');
       await setAboard(pilot, 1);
-      await acceptOk(pilot, signedOffer(pilot, { required_berths: 1 }));
+      const first = signedOffer(pilot, { required_berths: 1 });
+      await acceptOk(pilot, first);
       assert.equal(await aboard(pilot), 2);
-      assert.equal(tokenAboard(await call(pilot, 'POST', '/game/missions/abandon')), 1);
+      assert.equal(tokenAboard(await abandonAtOrigin(pilot, first)), 1);
 
       await setAboard(pilot, 0);
-      await acceptOk(pilot, signedOffer(pilot, { required_berths: 2 }));
+      const second = signedOffer(pilot, { required_berths: 2 });
+      await acceptOk(pilot, second);
       await setAboard(pilot, 1);
-      assert.equal(tokenAboard(await call(pilot, 'POST', '/game/missions/abandon')), 0);
+      assert.equal(tokenAboard(await abandonAtOrigin(pilot, second)), 0);
       assert.equal(await storedAboard(pilot), 0);
     });
 
     test('by id while others are held; only the passage unboards anyone', async () => {
       const pilot = await newPilot();
-      const passage = await acceptOk(pilot, signedOffer(pilot));
+      const passageOffer = signedOffer(pilot);
+      const passage = await acceptOk(pilot, passageOffer);
       const survey = await acceptOk(pilot, research(pilot));
       const other = await acceptOk(pilot, research(pilot));
 
@@ -615,7 +620,7 @@ describe('engine-signed missions', () => {
       assert.equal(tokenAboard(res), 2);
       assert.deepEqual(await activeIds(pilot), [passage.mission_id, other.mission_id]);
 
-      const off = await abandon(pilot, passage.mission_id);
+      const off = await call(pilot, 'POST', '/game/missions/abandon', { missionId: passage.mission_id, dockedReceipt: receiptAtOrigin(pilot, passageOffer) });
       assert.equal(json(off).mission_id, passage.mission_id);
       assert.equal(tokenAboard(off), 0);
       assert.equal(await aboard(pilot), 0);
@@ -1157,30 +1162,33 @@ describe('engine-signed missions', () => {
       assert.equal(row.reputationLoss, -2);
     });
 
-    test('a passage abandoned in flight or at another dock costs nothing yet and starts no cooldown', async () => {
-      // The passenger hostage state takes these over; until then they behave as before.
+    test('a passage abandoned in flight or at another dock costs nothing yet, starts no cooldown and keeps its passengers aboard', async () => {
       const pilot = await newPilot();
       const offer = signedOffer(pilot);
       await acceptOk(pilot, offer);
       const flight = await abandon(pilot);
       assert.equal(flight.statusCode, 200);
+      assert.equal(json(flight).outcome, 'MISSION_ABANDON_OUTCOME_HOSTAGE');
       assert.equal(json(flight).reputation_change, 0);
       assert.deepEqual(json(flight).standings, {});
-      assert.equal(tokenAboard(flight), 0);
+      assert.equal(tokenAboard(flight), 2);
+      assert.equal(await aboard(pilot), 2);
       assert.equal((await cooldown(pilot, offer.origin_station_id)).active, false);
 
-      const elsewhere = signedOffer(pilot);
+      // Hold the second party with the first still aboard, in a ship with room for both.
+      const elsewhere = signedOffer(pilot, { required_berths: 1 });
       await acceptOk(pilot, elsewhere);
       // Docked at the same station id but in another system is another dock.
       const res = await abandonAt(pilot, elsewhere.mission_id, receiptAtOrigin(pilot, elsewhere, { systemH3: '8828308285fffff' }));
       assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).outcome, 'MISSION_ABANDON_OUTCOME_HOSTAGE');
       assert.equal(json(res).reputation_change, 0);
-      assert.equal(await aboard(pilot), 0);
+      assert.equal(await aboard(pilot), 3);
       assert.equal((await cooldown(pilot, elsewhere.origin_station_id)).active, false);
       const rows = await abandonRows(pilot);
-      assert.deepEqual(rows.map((r) => [r.missionId, r.reason, r.reputationLoss]).sort(), [
-        [offer.mission_id, 'in_flight', 0],
-        [elsewhere.mission_id, 'in_port_dock', 0]
+      assert.deepEqual(rows.map((r) => [r.missionId, r.reason, r.reputationLoss, r.hostageBerths]).sort(), [
+        [offer.mission_id, 'in_flight', 0, 2],
+        [elsewhere.mission_id, 'in_port_dock', 0, 1]
       ].sort());
       assert.deepEqual(await standings(pilot), {});
     });

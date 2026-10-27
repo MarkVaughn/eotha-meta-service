@@ -30,6 +30,7 @@ import {
   moraleBand,
   promotionTerms,
   seniorityXpGain,
+  abandonPenalty,
   covertAcceptPenalty,
   settleUtilization
 } from '../config/crew-morale.js';
@@ -286,6 +287,31 @@ export async function recordCovertAcceptance(tx, shipId, traits, covert) {
       morale,
       moraleBand: moraleBand(morale, member.quirkId),
       quirkEffects: [{ quirk: 'BY_THE_BOOK', effect: 'COVERT_ACCEPTED', moraleLoss: loss }]
+    });
+  }
+  return { crew: await activeCrewOf(tx, shipId), effects };
+}
+
+/**
+ * Inside the transaction that abandons a mission sponsored by `sponsorFactionId`, holding the pilot's
+ * lock and after the mission is gone: every working member of the active crew aboard `shipId` loses the
+ * morale its quirk costs on an abandon (see abandonPenalty). Returns `{ crew, effects }` as
+ * recordCovertAcceptance does.
+ */
+export async function recordCrewAbandonment(tx, shipId, traits, sponsorFactionId) {
+  const effects = [];
+  for (const member of await activeCrewOf(tx, shipId)) {
+    const penalty = abandonPenalty(member, sponsorFactionId);
+    if (!penalty || member.morale <= 0) continue;
+    const morale = moraleAfterLoss(member, penalty.moraleLoss, traits);
+    await tx.crewMember.update({ where: { id: member.id }, data: { morale } });
+    effects.push({
+      crewId: member.id,
+      crewClass: member.crewClass,
+      moraleBefore: member.morale,
+      morale,
+      moraleBand: moraleBand(morale, member.quirkId),
+      quirkEffects: [{ quirk: penalty.quirk, effect: 'MISSION_ABANDONED', moraleLoss: penalty.moraleLoss }]
     });
   }
   return { crew: await activeCrewOf(tx, shipId), effects };

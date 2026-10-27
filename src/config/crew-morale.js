@@ -155,6 +155,20 @@ export const seniorityXpGain = (member, captainXp, settlement = {}) =>
 /** The morale a member of `quirkId` loses on accepting a covert contract, or 0. */
 export const covertAcceptPenalty = (quirkId) => QUIRKS[quirkId]?.covertAcceptPenalty ?? 0;
 
+/**
+ * What abandoning a mission sponsored by `sponsorFactionId` costs `member`, as `{ quirk, moraleLoss }`, or
+ * null: a PERFECTIONIST loses its `abandonPenalty` on any mission, and a LOYALIST its `homeAbandonPenalty`
+ * when the sponsor is its home faction.
+ */
+export function abandonPenalty(member, sponsorFactionId) {
+  const quirk = QUIRKS[member.quirkId];
+  if (quirk?.abandonPenalty) return { quirk: quirk.key, moraleLoss: quirk.abandonPenalty };
+  if (quirk?.homeAbandonPenalty && sponsorFactionId === member.homeFactionId) {
+    return { quirk: quirk.key, moraleLoss: quirk.homeAbandonPenalty };
+  }
+  return null;
+}
+
 /** `xp` plus `gain`, never beyond what the column holds. */
 export const addSeniorityXp = (xp, gain) => Math.min(MAX_SENIORITY_XP, xp + gain);
 
