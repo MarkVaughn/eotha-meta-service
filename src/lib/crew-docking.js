@@ -3,23 +3,36 @@ import {
   FLAKY_UNDOCK_LEAVE_CHANCE, FLIGHT_STIPEND_AFTER_MS, FLIGHT_STIPEND_CREDITS,
   MAX_ARREARS_CREDITS, MAX_COUNTED_FLIGHT_LEG_MS, MORALE_DECAY_DEFERRED_PAY, MORALE_GAIN_PAY_ARREARS,
   NOMINAL_MORALE_THRESHOLD, QUIRKS, RANKS, SHORE_LEAVE_COOLDOWN_MS, SHORE_LEAVE_DECAY_INTERVAL_MS,
-  SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_OUTPOST_GAIN, SHORE_LEAVE_STATION_GAIN
+  SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_OUTPOST_GAIN, SHORE_LEAVE_STATION_GAIN, inHomeSpace
 } from '../config/crew.js';
 import { moraleAfterCappedGain, moraleAfterLoss, restedMoraleCap } from '../config/crew-morale.js';
 import { activeCrewOf, standbyCrewOf } from './crew.js';
 
-export const fatigueIntervals = (ms, member = {}) => Math.floor(Math.max(0,
-  ms - SHORE_LEAVE_GRACE_MS * (QUIRKS[member.quirkId]?.enduranceMult ?? 1)) / SHORE_LEAVE_DECAY_INTERVAL_MS);
+// The fatigue intervals `ms` of flight amounts to for `member`. A HOME_BOUND one tires faster (its
+// `awayFatigueMult` on the flight time) while the dock it ends at, the one governed by
+// `controllingFactionId`, is outside its home faction's space.
+export const fatigueIntervals = (ms, member = {}, controllingFactionId = '') => {
+  const quirk = QUIRKS[member.quirkId];
+  const flightMs = quirk?.awayFatigueMult && !inHomeSpace(member, controllingFactionId) ? ms * quirk.awayFatigueMult : ms;
+  return Math.floor(Math.max(0, flightMs - SHORE_LEAVE_GRACE_MS * (quirk?.enduranceMult ?? 1)) / SHORE_LEAVE_DECAY_INTERVAL_MS);
+};
 
-// Outpost rules await a signed dock-kind protocol: EVERY signed dock is currently a station.
-export function shoreLeaveTerms(crew, kind = 'STATION', member = {}) {
+// Outpost rules await a signed dock-kind protocol: EVERY signed dock is currently a station. A HOME_BOUND
+// member's gain and rested cap depend on whether `controllingFactionId`, the faction the docked receipt
+// signs as governing the dock ('' for an independent system), is its home faction.
+export function shoreLeaveTerms(crew, kind = 'STATION', member = {}, controllingFactionId = '') {
   const galley = crew.some((m) => m.crewClass === 'CHEF' && RANKS.indexOf(m.rank) >= 1 && m.morale >= NOMINAL_MORALE_THRESHOLD);
   const quirk = QUIRKS[member.quirkId];
   const stationLeave = kind === 'STATION' || galley;
+  const territorial = quirk?.homeStationGain !== undefined;
+  const home = territorial && inHomeSpace(member, controllingFactionId);
+  const base = territorial
+    ? (stationLeave ? (home ? quirk.homeStationGain : quirk.awayStationGain) : (home ? quirk.homeOutpostGain : quirk.awayOutpostGain))
+    : stationLeave ? SHORE_LEAVE_STATION_GAIN : quirk?.outpostGain ?? SHORE_LEAVE_OUTPOST_GAIN;
   return {
-    gain: (stationLeave ? SHORE_LEAVE_STATION_GAIN : quirk?.outpostGain ?? SHORE_LEAVE_OUTPOST_GAIN) + (quirk?.shoreLeaveDelta ?? 0),
+    gain: base + (quirk?.shoreLeaveDelta ?? 0),
     flightMult: stationLeave ? 0 : 0.5,
-    cap: restedMoraleCap(crew)
+    cap: home ? Math.max(restedMoraleCap(crew), quirk.homeRestedCap) : restedMoraleCap(crew)
   };
 }
 
@@ -87,7 +100,8 @@ export async function recordCrewDock(tx, ship, receipt, {
   for (const original of [...ship.crew, ...standby]) {
     const member = { ...original };
     const active = aboard.has(member.id);
-    const fatigue = newDock && active ? fatigueIntervals(flight, member) - fatigueIntervals(ship.flightMsSinceLeave, member) : 0;
+    const fatigue = newDock && active
+      ? fatigueIntervals(flight, member, receipt.controllingFactionId) - fatigueIntervals(ship.flightMsSinceLeave, member, receipt.controllingFactionId) : 0;
     for (let i = 0; i < Math.min(100, fatigue); i++) member.morale = moraleAfterLoss(member, 5, ship.traits);
     const effect = { crewId: member.id, moraleBefore: original.morale, fatigueIntervals: fatigue };
     // Resigned crew earn no fresh wages/stipends; retain an already pending flight stipend.
@@ -140,11 +154,11 @@ export async function recordCrewDock(tx, ship, receipt, {
   const previous = newDock ? await tx.crewShoreLeave.findUnique({ where }) : null;
   const recovery = newDock && (!previous || at - previous.lastLeaveAtMs >= BigInt(SHORE_LEAVE_COOLDOWN_MS));
   // Freeze overrides before recovery; a recovering Chef cannot raise later members' caps by order.
-  const leaveTerms = new Map(currentCrew.map((m) => [m.id, shoreLeaveTerms(currentCrew, 'STATION', m)]));
+  const leaveTerms = new Map(currentCrew.map((m) => [m.id, shoreLeaveTerms(currentCrew, 'STATION', m, receipt.controllingFactionId)]));
   for (const member of survivors) {
     if (rescued.has(member.id)) {
       // Exactly one arrears recovery gain, never an additional station gain at the same dock.
-      member.morale = moraleAfterCappedGain(member, MORALE_GAIN_PAY_ARREARS, cap);
+      member.morale = moraleAfterCappedGain(member, MORALE_GAIN_PAY_ARREARS, leaveTerms.get(member.id)?.cap ?? cap);
     } else if (recovery && aboard.has(member.id) && member.morale > 0) {
       const terms = leaveTerms.get(member.id);
       member.morale = moraleAfterCappedGain(member, terms.gain, terms.cap);

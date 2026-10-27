@@ -11,6 +11,7 @@ import {
   MAX_TOTAL_WAGE_BP,
   MORALE_DECAY_DEFERRED_PAY,
   NOMINAL_MORALE_THRESHOLD,
+  QUIRKS,
   RANKS,
   STANDBY_TRANSFER_FEE_CREDITS,
   classEffectsView,
@@ -29,9 +30,11 @@ import {
   moraleBand,
   promotionTerms,
   seniorityXpGain,
+  covertAcceptPenalty,
   settleUtilization
 } from '../config/crew-morale.js';
 import { isCovert, isLegacyRow } from './mission-offer.js';
+import { missionFaction } from './reputation.js';
 
 // Why a ship cannot take a crew member aboard, or a pilot hire one. `code` is the structured reason
 // (lowercased, it is also the `error` of a refused request).
@@ -118,12 +121,23 @@ export async function holdsActiveMission(db, playerId) {
   return held.some((row) => !isLegacyRow(row));
 }
 
+// `db` is the Prisma client or an open transaction. `crew` with `flyingAgainstHome` set on each LOYALIST
+// whose home faction is the one a covert mission its pilot holds works against: its capabilities are off
+// until that mission ends.
+async function markFlyingAgainstHome(db, crew) {
+  const loyalists = crew.filter((member) => QUIRKS[member.quirkId]?.betrayalPenalty);
+  if (loyalists.length === 0) return crew;
+  const held = await db.playerMission.findMany({ where: { playerId: loyalists[0].playerId } });
+  const opposed = new Set(held.filter((row) => !isLegacyRow(row)).map((row) => row.offer.opposed_faction_id).filter(Boolean));
+  return crew.map((member) => (loyalists.includes(member) && opposed.has(member.homeFactionId) ? { ...member, flyingAgainstHome: true } : member));
+}
+
 // `db` is the Prisma client or an open transaction. The crew aboard `shipId`, in the order they were hired.
-export const activeCrewOf = (db, shipId) =>
-  db.crewMember.findMany({
+export const activeCrewOf = async (db, shipId) =>
+  markFlyingAgainstHome(db, await db.crewMember.findMany({
     where: { spaceshipId: shipId, status: CREW_STATUS.ACTIVE },
     orderBy: [{ hiredAt: 'asc' }, { id: 'asc' }]
-  });
+  }));
 
 // `db` is the Prisma client or an open transaction. The pilot's crew on standby, in the order they were hired.
 export const standbyCrewOf = (db, playerId) =>
@@ -236,16 +250,46 @@ export const oreSaleBonusCredits = (crew, signedCredits) =>
 export const clandestineBonusCredits = (crew, signedCredits, cleanBonusCredits) =>
   cappedBonus(signedCredits, Math.round(cleanBonusCredits * crewPerk(crew, CREW_PERK.CLANDESTINE_BONUS_RATE, CLANDESTINE_BASE_BONUS_RATE) / CLANDESTINE_BASE_BONUS_RATE));
 
-// What the utilization predicates read of a mission's signed offer.
-export const missionSettlement = (offer) => ({
+// What the utilization predicates and the faction quirks read of a mission's signed offer, and of its
+// claim: `speedBonus` is whether the claim was paid above the offered reward (the engine's speed bonus,
+// as missionXp reads it), undefined when no claim is settled (an accepted contract).
+export const missionSettlement = (offer, { speedBonus } = {}) => ({
   kind: SETTLEMENT.MISSION,
   type: offer.type,
   distanceHexes: offer.distance_hexes ?? 0,
   requiredBerths: offer.required_berths ?? 0,
   covert: isCovert(offer),
   reputationChange: offer.reputation_change ?? 0,
-  factionId: offer.faction_id ?? ''
+  factionId: offer.faction_id ?? '',
+  sponsorFactionId: missionFaction(offer),
+  opposedFactionId: offer.opposed_faction_id ?? '',
+  speedBonus
 });
+
+/**
+ * Inside the transaction that accepts a mission, holding the pilot's lock: when it is `covert`, every
+ * working member of the active crew aboard `shipId` with a covertAcceptPenalty (BY_THE_BOOK) loses that
+ * much morale. Returns `{ crew, effects }`: the active crew as stored now (for the token the caller
+ * reissues) and what happened to each member who lost morale.
+ */
+export async function recordCovertAcceptance(tx, shipId, traits, covert) {
+  const effects = [];
+  for (const member of await activeCrewOf(tx, shipId)) {
+    const loss = covert ? covertAcceptPenalty(member.quirkId) : 0;
+    if (!loss || member.morale <= 0) continue;
+    const morale = moraleAfterLoss(member, loss, traits);
+    await tx.crewMember.update({ where: { id: member.id }, data: { morale } });
+    effects.push({
+      crewId: member.id,
+      crewClass: member.crewClass,
+      moraleBefore: member.morale,
+      morale,
+      moraleBand: moraleBand(morale, member.quirkId),
+      quirkEffects: [{ quirk: 'BY_THE_BOOK', effect: 'COVERT_ACCEPTED', moraleLoss: loss }]
+    });
+  }
+  return { crew: await activeCrewOf(tx, shipId), effects };
+}
 
 /**
  * Inside the settlement transaction, holding the pilot's lock: records what `settlement` (a mission,
@@ -254,7 +298,8 @@ export const missionSettlement = (offer) => ({
  * not deferred and, when a mission awarded the Captain `captainXp`, the same seniority XP; an idle one
  * counts a missed settlement and loses morale past its grace. When the pay was `deferred`, every
  * member of `payroll` goes into arrears for its cut (`payout.crewPayouts`) and loses
- * MORALE_DECAY_DEFERRED_PAY morale. Returns `{ crew, effects }`: the active crew as stored now (for the
+ * MORALE_DECAY_DEFERRED_PAY morale. A mission settlement also applies the faction quirks (see
+ * settleUtilization and seniorityXpGain). Returns `{ crew, effects }`: the active crew as stored now (for the
  * token the caller reissues) and what happened to each member who changed.
  */
 export async function recordCrewSettlement(tx, ship, payroll, { settlement, payout, deferred, captainXp = 0 }) {
@@ -280,8 +325,9 @@ export async function recordCrewSettlement(tx, ship, payroll, { settlement, payo
       ({ morale, unutilizedStreak } = used);
       effect.utilized = used.utilized;
       effect.unutilizedStreak = unutilizedStreak;
+      if (used.quirkEffects) effect.quirkEffects = used.quirkEffects;
       if (used.utilized && captainXp > 0) {
-        seniorityXp = addSeniorityXp(seniorityXp, seniorityXpGain(member, captainXp));
+        seniorityXp = addSeniorityXp(seniorityXp, seniorityXpGain(member, captainXp, settlement));
         effect.seniorityXpGained = seniorityXp - member.seniorityXp;
       }
     }

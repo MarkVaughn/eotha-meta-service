@@ -8,7 +8,7 @@ import {
   isFactionId
 } from '../config/factions.js';
 import { DEFAULT_FACTION_ID } from '../config/missions.js';
-import { CREW_PERK, crewPerk } from '../config/crew.js';
+import { CREW_PERK, QUIRKS, crewPerk } from '../config/crew.js';
 
 // What a ReputationLedger row's `reason` records.
 export const LEDGER_REASONS = Object.freeze({
@@ -22,10 +22,16 @@ export const LEDGER_REASONS = Object.freeze({
 // The faction a mission's reputation goes to: its signed sponsor, else DEFAULT_FACTION_ID.
 export const missionFaction = (offer) => offer.faction_id || DEFAULT_FACTION_ID;
 
-// `delta` as the active `crew` change it: a gain is raised by a Diplomat's reputation bonus. A loss is
-// never raised.
-export const withCrewReputationBonus = (delta, crew) =>
-  delta > 0 ? Math.round(delta * (1 + crewPerk(crew, CREW_PERK.REPUTATION_GAIN_BONUS))) : delta;
+// The share a gain with `factionId` is raised by the active `crew`'s LOYALISTs: the best `homeReputationBonus`
+// among the working members whose home faction it is (it does not stack).
+const loyalistReputationBonus = (crew, factionId) =>
+  Math.max(0, ...crew.filter((member) => member.morale > 0 && member.homeFactionId === factionId)
+    .map((member) => QUIRKS[member.quirkId]?.homeReputationBonus ?? 0));
+
+// `delta` of a mission for `factionId` as the active `crew` change it: a gain is raised by a Diplomat's
+// reputation bonus and by a LOYALIST of that faction. A loss is never raised.
+export const withCrewReputationBonus = (delta, crew, factionId) =>
+  delta > 0 ? Math.round(delta * (1 + crewPerk(crew, CREW_PERK.REPUTATION_GAIN_BONUS) + loyalistReputationBonus(crew, factionId))) : delta;
 
 // The harm `delta` (negative) a mission does to its rival faction as the active `crew` soften it: a
 // Diplomat's reduction takes a share off (never past none).

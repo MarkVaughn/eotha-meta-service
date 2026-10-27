@@ -60,8 +60,10 @@ export function moraleAfterCappedGain(member, raw, cap) {
 }
 
 // What a settlement is, for the utilization predicates: a mission (`{ kind, type, distanceHexes,
-// requiredBerths, covert, reputationChange, factionId }`, from its signed offer), a cargo sale (an ore
-// sale) or a chart sale
+// requiredBerths, covert, reputationChange, factionId, sponsorFactionId, opposedFactionId, speedBonus }`,
+// from its signed offer and claim: `sponsorFactionId` is the faction the mission is for, `opposedFactionId`
+// the one a covert mission works against, `speedBonus` whether the claim was paid above the offer), a cargo
+// sale (an ore sale) or a chart sale
 // (`{ kind, chart: 'PLANET' | 'SYSTEM' }`).
 export const SETTLEMENT = Object.freeze({
   MISSION: 'MISSION',
@@ -96,34 +98,62 @@ const UTILIZED_BY = Object.freeze({
 export const isUtilized = (crewClass, settlement, ctx) => Boolean(UTILIZED_BY[crewClass]?.(settlement, ctx));
 
 /**
- * What a settlement does to one active crew member: `{ utilized, morale, unutilizedStreak }`. A utilized
- * member resets the idle streak and, paid in full, gains MORALE_GAIN_UTILIZED_PAID (up to 100, not the
- * rested cap). One that was not used adds to the streak and, past the quirk's grace (LAZY one more,
- * AMBITIOUS one fewer), loses MORALE_DECAY_UNUTILIZED (AMBITIOUS 9) per settlement. `deferred` means the
- * pay was deferred, so a utilized member gains nothing.
+ * Which side of a LOYALIST's home faction `settlement` is on: `'HOME'` when a mission is for it,
+ * `'OPPOSED'` when a covert one works against it, otherwise null (also for any other quirk).
+ */
+export function loyalty(member, settlement) {
+  if (!QUIRKS[member.quirkId]?.betrayalPenalty || !isMission(settlement)) return null;
+  if (settlement.sponsorFactionId === member.homeFactionId) return 'HOME';
+  return settlement.opposedFactionId && settlement.opposedFactionId === member.homeFactionId ? 'OPPOSED' : null;
+}
+
+/**
+ * What a settlement does to one active crew member: `{ utilized, morale, unutilizedStreak, quirkEffects? }`.
+ * A utilized member resets the idle streak and, paid in full, gains MORALE_GAIN_UTILIZED_PAID (up to 100,
+ * not the rested cap; a LOYALIST on a mission for its home faction gains its `homeMoraleGain` instead,
+ * and none on one against it). One that was not used adds to the streak and, past the quirk's grace (LAZY
+ * one more, AMBITIOUS one fewer), loses MORALE_DECAY_UNUTILIZED (AMBITIOUS 9) per settlement. `deferred`
+ * means the pay was deferred, so a utilized member gains nothing. Whether used or not, a LOYALIST loses
+ * its `betrayalPenalty` on a mission against its home faction and a PERFECTIONIST its
+ * `lateMoralePenalty` on a mission that missed the speed bonus; `quirkEffects` (only when there are any) names those that applied.
  */
 export function settleUtilization(member, settlement, ctx, { deferred, traits }) {
   const utilized = isUtilized(member.crewClass, settlement, ctx);
-  if (utilized) {
-    return {
-      utilized,
-      unutilizedStreak: 0,
-      // Resignation is recovered only through the back-pay bonus, never a free payout gain.
-      morale: deferred || member.morale === 0 ? member.morale : moraleAfterGain(member, MORALE_GAIN_UTILIZED_PAID)
-    };
-  }
   const quirk = QUIRKS[member.quirkId];
-  const unutilizedStreak = member.unutilizedStreak + 1;
-  const grace = UNUTILIZED_GRACE_MISSIONS + (quirk?.idleGrace ?? 0);
-  return {
-    utilized,
-    unutilizedStreak,
-    morale: unutilizedStreak > grace ? moraleAfterLoss(member, quirk?.idleDecay ?? MORALE_DECAY_UNUTILIZED, traits) : member.morale
-  };
+  const side = loyalty(member, settlement);
+  let unutilizedStreak = 0;
+  let morale = member.morale;
+  if (utilized) {
+    // Resignation is recovered only through the back-pay bonus, never a free payout gain.
+    if (!deferred && member.morale !== 0 && side !== 'OPPOSED') {
+      morale = moraleAfterGain(member, side === 'HOME' ? quirk.homeMoraleGain : MORALE_GAIN_UTILIZED_PAID);
+    }
+  } else {
+    unutilizedStreak = member.unutilizedStreak + 1;
+    const grace = UNUTILIZED_GRACE_MISSIONS + (quirk?.idleGrace ?? 0);
+    if (unutilizedStreak > grace) morale = moraleAfterLoss(member, quirk?.idleDecay ?? MORALE_DECAY_UNUTILIZED, traits);
+  }
+  const quirkEffects = [];
+  if (side === 'OPPOSED') quirkEffects.push({ quirk: 'LOYALIST', effect: 'OPPOSED_FACTION', moraleLoss: quirk.betrayalPenalty });
+  if (side === 'HOME') quirkEffects.push({ quirk: 'LOYALIST', effect: 'HOME_FACTION' });
+  if (quirk?.lateMoralePenalty && isMission(settlement) && settlement.speedBonus === false) {
+    quirkEffects.push({ quirk: 'PERFECTIONIST', effect: 'SPEED_BONUS_MISSED', moraleLoss: quirk.lateMoralePenalty });
+  }
+  for (const { moraleLoss } of quirkEffects) {
+    if (moraleLoss) morale = moraleAfterLoss({ ...member, morale }, moraleLoss, traits);
+  }
+  return { utilized, unutilizedStreak, morale, ...(quirkEffects.length > 0 && { quirkEffects }) };
 }
 
-/** The seniority XP a utilized member earns from a mission that awarded the Captain `captainXp`. */
-export const seniorityXpGain = (member, captainXp) => Math.round(captainXp * (QUIRKS[member.quirkId]?.xpMult ?? 1));
+/**
+ * The seniority XP a utilized member earns from a mission that awarded the Captain `captainXp`: the
+ * quirk's multiplier, and a LOYALIST's `homeXpMult` on top when `settlement` is for its home faction.
+ */
+export const seniorityXpGain = (member, captainXp, settlement = {}) =>
+  Math.round(captainXp * (QUIRKS[member.quirkId]?.xpMult ?? 1) * (loyalty(member, settlement) === 'HOME' ? QUIRKS[member.quirkId].homeXpMult : 1));
+
+/** The morale a member of `quirkId` loses on accepting a covert contract, or 0. */
+export const covertAcceptPenalty = (quirkId) => QUIRKS[quirkId]?.covertAcceptPenalty ?? 0;
 
 /** `xp` plus `gain`, never beyond what the column holds. */
 export const addSeniorityXp = (xp, gain) => Math.min(MAX_SENIORITY_XP, xp + gain);

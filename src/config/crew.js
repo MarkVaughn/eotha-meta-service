@@ -62,6 +62,9 @@ export const MORALE_MULT = Object.freeze({ INSPIRED: 1.15, NOMINAL: 1.0, DISGRUN
 export const RESTED_MORALE_CAP = 80;
 export const MASTER_CHEF_RESTED_MORALE_CAP = 90;
 export const MORALE_GAIN_UTILIZED_PAID = 4;
+export const PERFECTIONIST_FAIL_PENALTY = 8;
+export const LOYALIST_BETRAYAL_PENALTY = 12;
+export const BY_THE_BOOK_COVERT_PENALTY = 8;
 export const UNUTILIZED_GRACE_MISSIONS = 2;
 export const MORALE_DECAY_UNUTILIZED = 6;
 export const MORALE_DECAY_DEFERRED_PAY = 25;
@@ -196,7 +199,15 @@ export const CREW_CLASS_IDS = Object.freeze(Object.keys(CREW_CLASSES));
 // missions allowed before morale decays), `idleDecay` (the morale lost per idle mission instead of
 // MORALE_DECAY_UNUTILIZED), `shoreLeaveDelta` (added to the morale a dock restores), `enduranceMult`
 // (on the flight time before fatigue) and `outpostGain` (the morale an outpost restores instead of
-// SHORE_LEAVE_OUTPOST_GAIN). The rest (customs, factions, retirement) act in later phases.
+// SHORE_LEAVE_OUTPOST_GAIN). The faction quirks add `homeMoraleGain`, `homeXpMult`, `homeReputationBonus`
+// and `betrayalPenalty` (LOYALIST: the morale a paid utilized mission restores instead of
+// MORALE_GAIN_UTILIZED_PAID, the seniority XP multiplier and the share added to the reputation gain
+// when the mission is for the home faction, and the morale lost when it is against it),
+// `lateMoralePenalty` (PERFECTIONIST: lost when a mission misses the speed bonus), `covertAcceptPenalty`
+// (BY_THE_BOOK: lost on accepting a covert contract) and, for HOME_BOUND, the shore-leave terms in and
+// out of its home faction's space: `homeStationGain`, `homeOutpostGain`, `homeRestedCap`,
+// `awayStationGain`, `awayOutpostGain` and `awayFatigueMult` (on the flight time that tires it). The rest
+// (customs, retirement) act in later phases.
 const quirk = (id, key, name, category, weight, summary, effects = {}) =>
   Object.freeze({ id, key, name, category, weight, summary, ...effects });
 
@@ -236,22 +247,30 @@ export const QUIRKS = Object.freeze(Object.fromEntries([
     { wageBp: 50, enduranceMult: 1.5, outpostGain: 10 }),
   quirk('Q15', 'PERFECTIONIST', 'Perfectionist', 'CORE', 40,
     '+12% class modifiers and +10 Hz tuning tolerance when Inspired, which takes 88 morale; -8 morale on a failed or abandoned mission',
-    { stat: [{ delta: 0.12, minMorale: 88 }], inspiredAt: 88 }),
+    { stat: [{ delta: 0.12, minMorale: 88 }], inspiredAt: 88, lateMoralePenalty: PERFECTIONIST_FAIL_PENALTY }),
   quirk('Q16', 'LOYALIST', 'Faction Loyalist', 'FACTION', 60,
-    'For its home faction: +6 morale, +40% seniority XP, +10% class modifiers and +10% reputation gain; against it: -12 morale, capabilities off and double leak risk'),
+    'For its home faction: +6 morale, +40% seniority XP, +10% class modifiers and +10% reputation gain; against it: -12 morale, capabilities off and double leak risk',
+    { homeMoraleGain: 6, homeXpMult: 1.4, homeReputationBonus: 0.1, betrayalPenalty: LOYALIST_BETRAYAL_PENALTY }),
   quirk('Q17', 'HOME_BOUND', 'Home-Bound', 'FACTION', 55,
-    'In home-faction space shore leave restores +25 at stations and +12 at outposts, and rested morale reaches 86; elsewhere +8 and +2, with fatigue 20% faster'),
+    'In home-faction space shore leave restores +25 at stations and +12 at outposts, and rested morale reaches 86; elsewhere +8 and +2, with fatigue 20% faster',
+    { homeStationGain: 25, homeOutpostGain: 12, homeRestedCap: 86, awayStationGain: 8, awayOutpostGain: 2, awayFatigueMult: 1.2 }),
   quirk('Q18', 'DISCREET', 'Discreet', 'FACTION', 50,
     '-12% covert exposure, -10% customs catch chance and no intel leaks; +1.0% wage share and -15% overt reputation gain', { wageBp: 100 }),
   quirk('Q19', 'BY_THE_BOOK', 'By-the-Book', 'FACTION', 50,
     '-15% customs inspection chance at high-security docks and +10% overt reputation gain; -0.5% wage share; refuses to conceal contraband and loses 8 morale on covert contracts',
-    { wageBp: -50 }),
+    { wageBp: -50, covertAcceptPenalty: BY_THE_BOOK_COVERT_PENALTY }),
   quirk('Q20', 'SYNDICATE_TIES', 'Underworld Ties', 'FACTION', 45,
     '+12% covert and gamma payouts and -15% customs catch chance; +12% inspection chance at high-security alpha and beta docks and +1.0% wage share', { wageBp: 100 })
 ].map((q) => [q.id, q])));
 export const QUIRK_IDS = Object.freeze(Object.keys(QUIRKS));
 
 export const QUIRK_WEIGHT_TOTAL = 1000;
+
+/**
+ * Whether a station whose governing faction the docked receipt signs as `controllingFactionId` (`''` for
+ * an independent system) lies in the home space of a member whose `homeFactionId` is given.
+ */
+export const inHomeSpace = ({ homeFactionId }, controllingFactionId) => (controllingFactionId || 'independent') === homeFactionId;
 
 const isRank = (rank) => RANKS.includes(rank);
 const rankIndex = (rank) => RANKS.indexOf(rank);
@@ -368,8 +387,9 @@ export function innateJuryRigTypes(effectIds = []) {
   return types;
 }
 
-// Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better.
-const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD;
+// Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better, and not a
+// LOYALIST flying against its home faction (`flyingAgainstHome`, see markFlyingAgainstHome).
+const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD && !member.flyingAgainstHome;
 
 /**
  * The ShipAttributes.crew_capability_flags `crew` (active members) signs into the ship: the bits of every
