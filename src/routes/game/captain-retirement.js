@@ -312,7 +312,8 @@ export default async function captainRetirementRoutes(fastify) {
       credits: outcome.credits,
       ...(retired.legacyDoctrineId && { doctrine: { ...doctrineView(retired.legacyDoctrineId), active: retired.activeDoctrine } }),
       ...(outcome.promoted && { promoted: outcome.promoted }),
-      resigned: outcome.resigned
+      resigned: outcome.resigned,
+      activeDoctrineIds: outcome.doctrineIds
     });
   });
 
