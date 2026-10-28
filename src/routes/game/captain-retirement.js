@@ -12,6 +12,7 @@ import {
 } from '../../config/captain.js';
 import { ENGINEER_JURY_RIG_TYPES, QUIRKS, RANKS, engineerJuryRigSlots } from '../../config/crew.js';
 import { UUID_PATTERN } from '../../config/patterns.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { activeDoctrineIdsOf, captainView, effectIdsFor } from '../../lib/captain.js';
 import { activeCrewOf, holdsActiveMission } from '../../lib/crew.js';
@@ -134,7 +135,7 @@ export default async function captainRetirementRoutes(fastify) {
 
   // The signed receipt, or the reply that refuses it. Stateless, so it runs before any write. An
   // expired receipt is answered like a missing one: either way the client must fetch a fresh one.
-  function dockedReceiptOf(request, reply) {
+  async function dockedReceiptOf(request, reply) {
     const { stationId, dockedReceipt } = request.body;
     if (!dockedReceipt) return void reply.code(403).send(refusal({ code: 'docked_receipt_required' }));
     const receiptRefusal = dockedReceiptRefusal(dockedReceipt, {
@@ -150,6 +151,8 @@ export default async function captainRetirementRoutes(fastify) {
     if (stationId !== undefined && stationId !== dockedReceipt.dockedEntityId) {
       return void reply.code(403).send(refusal({ code: 'docked_receipt_wrong_station' }));
     }
+    const lockout = await stationLockoutRefusal(prisma, request.user.sub, dockedReceipt.dockedEntityId, Date.now());
+    if (lockout) return void reply.code(403).send(lockout);
     return dockedReceipt;
   }
 
@@ -182,7 +185,7 @@ export default async function captainRetirementRoutes(fastify) {
   // The docked receipt's nonce keys the retirement, so a retried request is answered with the retirement
   // it made instead of retiring the successor.
   fastify.post('/captain/retire', { schema: retireSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const receipt = dockedReceiptOf(request, reply);
+    const receipt = await dockedReceiptOf(request, reply);
     if (!receipt) return reply;
     const { retirementTier, legacyDoctrineId, successorType, successorCrewId, successorName } = request.body;
     const playerId = request.user.sub;
@@ -321,7 +324,7 @@ export default async function captainRetirementRoutes(fastify) {
   // doctrine on or off. At most MAX_ACTIVE_LEGACY_DOCTRINES are on; the signed attributes change with
   // them, so it needs a dock like a trait does.
   fastify.post('/captain/doctrine', { schema: doctrineSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const receipt = dockedReceiptOf(request, reply);
+    const receipt = await dockedReceiptOf(request, reply);
     if (!receipt) return reply;
     const { retiredCaptainId, active, legacyDoctrineId } = request.body;
     const playerId = request.user.sub;
@@ -371,7 +374,7 @@ export default async function captainRetirementRoutes(fastify) {
   // each signed one tier higher (to Tier 5 at most) with no hull budget change. Like a trait it changes
   // the signed attributes, so it needs a dock.
   fastify.post('/captain/jury-rig', { schema: juryRigSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const receipt = dockedReceiptOf(request, reply);
+    const receipt = await dockedReceiptOf(request, reply);
     if (!receipt) return reply;
     const { componentTypes } = request.body;
 

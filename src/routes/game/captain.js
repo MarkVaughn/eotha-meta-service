@@ -1,4 +1,5 @@
 import { TRAIT_IDS, traitUnlockRefusal } from '../../config/captain.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { captainTraits, captainView } from '../../lib/captain.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
@@ -63,6 +64,8 @@ export default async function captainRoutes(fastify) {
     if (stationId !== undefined && stationId !== dockedReceipt.dockedEntityId) {
       return reply.code(403).send(refusal({ code: 'docked_receipt_wrong_station' }));
     }
+    const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
+    if (lockout) return reply.code(403).send(lockout);
 
     // The pilot's lock serialises every unlock, so one point is never spent twice.
     const outcome = await prisma.$transaction(async (tx) => {

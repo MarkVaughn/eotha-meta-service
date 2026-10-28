@@ -15,6 +15,7 @@ import {
 import { SETTLEMENT } from '../../config/crew-morale.js';
 import { deductCrewRevenueShare, oreSaleBonusCredits, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { recordCrewDock } from '../../lib/crew-docking.js';
 
@@ -96,6 +97,8 @@ export default async function cargoRoutes(fastify) {
     if (dockedReceipt) {
       const refused = dockedReceiptRefusal(dockedReceipt, { pilotId: playerId, publicKey: fastify.claimKey.key, nowMs: Date.now(), log: request.log });
       if (refused) return reply.code(403).send(refused);
+      const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
+      if (lockout) return reply.code(403).send(lockout);
     }
     if (saleRecord.pilotId !== playerId || !verifySaleRecord(saleRecord, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'The sale record is not valid for this pilot.', code: 'sale_record_invalid' });

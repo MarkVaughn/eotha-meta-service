@@ -8,6 +8,7 @@ import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 import { missionOfferVersion } from '../src/lib/mission-offer.js';
 import { canonicalCustomsSeizurePayload, verifyCustomsSeizure } from '../src/lib/customs-seizure.js';
 import { CAPTURE_TIERS, crewCustomsMults, healthFactor, repairCost } from '../src/config/customs.js';
+import { SUCCESSOR_TYPES } from '../src/config/captain.js';
 import { computeShipAttributes } from '../src/config/components.js';
 
 const MINUTE_MS = 60_000;
@@ -545,5 +546,80 @@ describe('bribed mission completion', () => {
     await setCredits(pilot, 1000);
     assert.equal((await complete(pilot, claimFor(pilot, active, { bribePaidCredits: 100 }))).statusCode, 400);
     assert.equal((await held(pilot)).length, 1);
+  });
+});
+
+describe('customs lockout scope', () => {
+  const lockOut = async (pilot, stationId) => {
+    await call(pilot, 'GET', '/ship/loadout');
+    await app.prisma.stationLockout.create({ data: { playerId: pilot.id, stationId, tier: 3, until: new Date(Date.now() + 30 * MINUTE_MS) } });
+  };
+  const sale = (pilot) => ({
+    pilotId: pilot.id, stationId: randomUUID(), totalCredits: 1, soldAtMs: Date.now(), nonce: randomBytes(16).toString('base64'),
+    signature: randomBytes(64).toString('base64'), leaseId: randomUUID(), sessionId: randomUUID(), seq: 1
+  });
+  const uuid = () => randomUUID();
+  const routes = (pilot, receipt) => ({
+    'crew/board': ['/game/crew/board', {}],
+    'crew/hire': ['/game/crew/hire', { candidateId: 'cand-0-0123abcd' }],
+    'crew/dismiss': ['/game/crew/dismiss', { crewId: uuid() }],
+    'crew/standby': ['/game/crew/standby', { crewId: uuid() }],
+    'crew/activate': ['/game/crew/activate', { crewId: uuid() }],
+    'crew/jury-rig': ['/game/crew/jury-rig', { crewId: uuid(), componentTypes: [] }],
+    'crew/promote': ['/game/crew/promote', { crewId: uuid() }],
+    'crew/shore-leave': ['/game/crew/shore-leave', {}],
+    'crew/pay-arrears': ['/game/crew/pay-arrears', {}],
+    'cargo/sell': ['/game/cargo/sell', { saleRecord: sale(pilot) }],
+    'captain/trait': ['/game/captain/trait', { traitId: 'H1_TRIM_THRUSTERS' }],
+    'captain/retire': ['/game/captain/retire', { successorType: Object.values(SUCCESSOR_TYPES)[0] }],
+    'captain/doctrine': ['/game/captain/doctrine', { retiredCaptainId: uuid(), active: true }],
+    'captain/jury-rig': ['/game/captain/jury-rig', { componentTypes: [] }],
+    'factions/colors': ['/game/factions/colors', { factionId: null }],
+    'factions/renounce-paragon': ['/game/factions/renounce-paragon', { currentParagonFactionId: 'alpha' }],
+    'charts/sell': ['/game/charts/sell', { planetId: 'no-such-chart', stationId: 'station-alpha' }]
+  });
+  const post = (pilot, [url, body], stationId) =>
+    call(pilot, 'POST', url, { ...body, dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId }) });
+
+  test('every docked-receipt service refuses a locked-out pilot at that station only', async () => {
+    const pilot = await newPilot();
+    const other = await newPilot();
+    const stationId = randomUUID();
+    await lockOut(pilot, stationId);
+    await call(other, 'GET', '/ship/loadout');
+
+    for (const [name, route] of Object.entries(routes(pilot))) {
+      const refused = await post(pilot, route, stationId);
+      assert.equal(refused.statusCode, 403, `${name}: ${refused.body}`);
+      assert.equal(json(refused).code, 'station_locked_out', name);
+      assert.ok(json(refused).remaining_ms > 0, name);
+
+      const elsewhere = await post(pilot, route, randomUUID());
+      assert.notEqual(json(elsewhere).code, 'station_locked_out', `${name} at another station`);
+      const otherPilot = await post(other, routes(other)[name], stationId);
+      assert.notEqual(json(otherPilot).code, 'station_locked_out', `${name} for another pilot`);
+    }
+  });
+
+  test('mission complete, abandon and disembark still work while locked out', async () => {
+    const pilot = await newPilot();
+    const stationId = randomUUID();
+    const offer = covert(pilot);
+    const active = await take(pilot, offer);
+    await lockOut(pilot, stationId);
+    const receipt = () => dockedReceipt(pilot, { dockedEntityId: stationId });
+
+    const disembark = await call(pilot, 'POST', '/game/missions/disembark', { missionId: active.mission_id, dockedReceipt: receipt() });
+    assert.notEqual(json(disembark).code, 'station_locked_out', disembark.body);
+    const complete = await call(pilot, 'POST', '/game/missions/complete', {
+      dockedReceipt: receipt(),
+      claim: {
+        missionId: active.mission_id, playerShipId: pilot.id, destinationStationId: stationId, acceptedAtMs: 1, completedAtMs: 2,
+        durationTakenMs: 1, rewardCredits: 1, reputationChange: 0, signature: randomBytes(64).toString('base64')
+      }
+    });
+    assert.notEqual(json(complete).code, 'station_locked_out', complete.body);
+    const abandon = await call(pilot, 'POST', '/game/missions/abandon', { missionId: active.mission_id, dockedReceipt: receipt() });
+    assert.equal(abandon.statusCode, 200, abandon.body);
   });
 });
