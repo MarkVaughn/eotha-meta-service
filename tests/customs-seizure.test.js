@@ -767,6 +767,28 @@ describe('customs follow-ups from the independent review', () => {
     assert.equal(await standingOf(pilot, 'alpha'), 60 - 20); // the capture's loss only
   });
 
+  test('a second claim with a new nonce for the same abandoned mission fines and refunds only once', async () => {
+    const pilot = await newPilot();
+    const offer = covert(pilot, { type: 'MISSION_TYPE_RESEARCH', required_berths: 0 });
+    const active = await take(pilot, offer);
+    await setCredits(pilot, 5000);
+    await standing(pilot, 'alpha', 60);
+    await standing(pilot, 'beta', 60);
+    const abandon = await call(pilot, 'POST', '/game/missions/abandon', { missionId: active.mission_id });
+    assert.equal(abandon.statusCode, 200, abandon.body);
+    const first = json(await seize(pilot, seizureFor(pilot, active, { captureTier: 3 })));
+    assert.ok(first.fine_credits > 0);
+    const creditsAfter = await credits(pilot);
+    const alphaAfter = await standingOf(pilot, 'alpha');
+    const betaAfter = await standingOf(pilot, 'beta');
+    const second = json(await seize(pilot, seizureFor(pilot, active, { captureTier: 3 })));
+    assert.equal(second.fine_credits, 0);
+    assert.deepEqual(second.reputation_changes, []);
+    assert.equal(await credits(pilot), creditsAfter);
+    assert.equal(await standingOf(pilot, 'alpha'), alphaAfter);
+    assert.equal(await standingOf(pilot, 'beta'), betaAfter);
+  });
+
   test('a replayed seizure reports the pilot\'s current balance and standings', async () => {
     const pilot = await newPilot();
     const active = await take(pilot);

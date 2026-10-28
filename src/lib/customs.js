@@ -102,7 +102,10 @@ export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) 
   const held = row && !isLegacyRow(row) ? row : null;
   // A pilot who abandoned the mission while customs held the ship (the engine still signs the capture, naming
   // it) does not escape: the offer kept with the abandon is fined and charged as a held one is.
-  const abandoned = !held && claim.missionId
+  const alreadySeized = claim.missionId
+    ? await tx.customsSeizure.findFirst({ where: { playerId, missionId: claim.missionId }, select: { id: true } })
+    : null;
+  const abandoned = !held && !alreadySeized && claim.missionId
     ? await tx.abandonedMission.findUnique({ where: { playerId_missionId: { playerId, missionId: claim.missionId } } })
     : null;
   const offer = held ? fromStoredOffer(held.offer) : abandoned?.offer ? fromStoredOffer(abandoned.offer) : null;
