@@ -36,6 +36,8 @@ model Player {
   abandonedMissions AbandonedMission[]
   reputations  PlayerReputation[]
   reputationLedger ReputationLedger[]
+  customsSeizures CustomsSeizure[]
+  stationLockouts StationLockout[]
   // The faction whose colors the pilot flies (src/config/factions.js FACTION_IDS), or null. Set while
   // docked by POST /game/factions/colors; cleared when the standing with it falls below 500.
   activeColorsFactionId String?
@@ -144,6 +146,9 @@ model CrewMember {
   wageShareBp          Int        @default(500)
   unutilizedStreak     Int        @default(0)
   unpaidArrearsCredits Int        @default(0)
+  // Held by customs until then (a tier 4 armed boarding, 30 minutes): the member stays on the roster but
+  // its class effects, capabilities and perks are off. Null when never detained; additive.
+  detainedUntil        DateTime?
   // A stipend deferred while a morale-zero member awaits explicit shore-leave consent.
   pendingStipendCredits Int       @default(0)
   // Dock-configured Engineer overdrive; operation only, never persisted component upgrades.
@@ -339,7 +344,8 @@ model PlayerReputation {
 // event was for and `factionDelta` its change; `alphaDelta`, `betaDelta` and `gammaDelta` are the
 // changes to the three factions, including those their caps made. `reason`: MISSION_COMPLETED,
 // COMPLETE_COVERT_CLEAN, COMPLETE_COVERT_DETECTED,
-// MISSION_ABANDONED or RENOUNCE_PARAGON. `bribePaidCredits` is reserved for customs bribes.
+// MISSION_ABANDONED, RENOUNCE_PARAGON, COMPLETE_BRIBED or CUSTOMS_CAUGHT. `bribePaidCredits` is the customs
+// bribe a COMPLETE_BRIBED settlement deducted.
 model ReputationLedger {
   id               String   @id @default(uuid()) @db.Uuid
   playerId         String   @db.Uuid
@@ -355,6 +361,47 @@ model ReputationLedger {
   createdAt        DateTime @default(now())
 
   @@index([playerId, createdAt])
+}
+
+// One row per engine-signed customs capture applied (POST /game/missions/seizure). The engine's nonce is
+// unique per pilot, so a replayed claim answers with `result`, the first response, and applies nothing
+// twice. `missionId` (null when the capture was not mission related) is a mission that failed: it is
+// never accepted again. `result` is the response body less its token. Additive.
+model CustomsSeizure {
+  id                   String   @id @default(uuid()) @db.Uuid
+  playerId             String   @db.Uuid
+  player               Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  nonce                String   // hex of the claim's 16 nonce bytes
+  missionId            String?
+  stationEntityId      String
+  systemH3             String
+  controllingFactionId String   @default("")
+  captureTier          Int
+  inspectionOutcome    Int
+  exposureScoreMilli   Int
+  seizedAtMs           BigInt
+  fineCredits          Int      @default(0)
+  result               Json
+  createdAt            DateTime @default(now())
+
+  @@unique([playerId, nonce])
+  @@index([playerId, missionId])
+}
+
+// A station that has locked a pilot out of its docking services and mission board until `until`,
+// after a capture of tier 2 or above (src/config/customs.js). One row per (pilot, station); a later
+// capture only extends it. Additive.
+model StationLockout {
+  id        String   @id @default(uuid()) @db.Uuid
+  playerId  String   @db.Uuid
+  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  stationId String
+  until     DateTime
+  tier      Int
+  createdAt DateTime @default(now())
+
+  @@unique([playerId, stationId])
+  @@index([playerId, until])
 }
 
 // One row per cargo lease issued (POST /game/cargo/lease). The pilot's hold is `lots` of the highest

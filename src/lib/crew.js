@@ -133,12 +133,19 @@ async function markFlyingAgainstHome(db, crew) {
   return crew.map((member) => (loyalists.includes(member) && opposed.has(member.homeFactionId) ? { ...member, flyingAgainstHome: true } : member));
 }
 
+// `crew` with `detained` set on each member customs still hold (`detainedUntil` in the future): they stay on
+// the roster and in their berth, but their effects, capabilities and perks are off until the hold ends.
+const markDetained = (crew) => {
+  const nowMs = Date.now();
+  return crew.map((member) => (member.detainedUntil && member.detainedUntil.getTime() > nowMs ? { ...member, detained: true } : member));
+};
+
 // `db` is the Prisma client or an open transaction. The crew aboard `shipId`, in the order they were hired.
 export const activeCrewOf = async (db, shipId) =>
-  markFlyingAgainstHome(db, await db.crewMember.findMany({
+  markFlyingAgainstHome(db, markDetained(await db.crewMember.findMany({
     where: { spaceshipId: shipId, status: CREW_STATUS.ACTIVE },
     orderBy: [{ hiredAt: 'asc' }, { id: 'asc' }]
-  }));
+  })));
 
 // `db` is the Prisma client or an open transaction. The pilot's crew on standby, in the order they were hired.
 export const standbyCrewOf = (db, playerId) =>
@@ -186,6 +193,7 @@ export function crewMemberView(member, traits = []) {
     unutilizedStreak: member.unutilizedStreak,
     unpaidArrearsCredits: member.unpaidArrearsCredits,
     pendingStipendCredits: member.pendingStipendCredits,
+    ...(member.detained && { detained: true, detainedUntil: member.detainedUntil.toISOString() }),
     ...(member.crewClass === 'ENGINEER' && { juryRig: {
       selectedComponentTypes: member.juryRigComponentTypes ?? [],
       slots: engineerJuryRigSlots(member),

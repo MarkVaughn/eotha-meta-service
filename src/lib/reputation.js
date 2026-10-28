@@ -17,6 +17,8 @@ export const LEDGER_REASONS = Object.freeze({
   COMPLETE_COVERT_DETECTED: 'COMPLETE_COVERT_DETECTED',
   MISSION_ABANDONED: 'MISSION_ABANDONED',
   HOSTAGE_DISEMBARKED: 'HOSTAGE_DISEMBARKED',
+  COMPLETE_BRIBED: 'COMPLETE_BRIBED',
+  CUSTOMS_CAUGHT: 'CUSTOMS_CAUGHT',
   RENOUNCE_PARAGON: 'RENOUNCE_PARAGON'
 });
 
@@ -80,10 +82,11 @@ async function rewriteFactionStandings(tx, playerId, change, entry) {
 // Adds `delta` to the pilot's standing with `factionId` and returns the new standing. A standing
 // with one of FACTION_IDS goes through clampStandingsWithCaps with the other two, which it may cap;
 // any other is only bounded. Every change is appended to the ReputationLedger with `reason` and
-// `missionId`. `tx` is an open transaction holding the pilot's lock (lockActiveShip), which
+// `missionId` (and the `bribePaidCredits` of a bribed completion, when there is one). `tx` is an open
+// transaction holding the pilot's lock (lockActiveShip), which
 // serialises this read-modify-write with every other one of the pilot's.
-export async function adjustReputation(tx, playerId, factionId, delta, { reason, missionId = null } = {}) {
-  const entry = { reason, missionId, factionId };
+export async function adjustReputation(tx, playerId, factionId, delta, { reason, missionId = null, bribePaidCredits = 0 } = {}) {
+  const entry = { reason, missionId, factionId, ...(bribePaidCredits > 0 && { bribePaidCredits }) };
   if (isFactionId(factionId)) {
     if (delta === 0) return (await factionStandings(tx, playerId))[factionId];
     const next = await rewriteFactionStandings(tx, playerId, (s) => ({ ...s, [factionId]: s[factionId] + delta }), entry);

@@ -1,4 +1,5 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
+import { HEALTH_SCALED_ATTRIBUTES, crewCustomsMults, healthFactor } from './customs.js';
 import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, innateJuryRigTypes, crewResists, crewShipEffects, innateShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
@@ -106,7 +107,7 @@ export function clampPassengers(count, capacity) {
 }
 
 // Attributes no component sets: their values before captain traits and crew (eotha-contracts
-// ShipAttributes fields 21-23, and 25-28, matching the engine's `ShipAttributes::tier_one()`).
+// ShipAttributes fields 21-23, and 25-30, matching the engine's `ShipAttributes::tier_one()`).
 const BASE_ATTRIBUTES = {
   docking_time_mult: 1.0,
   extraction_rate_mult: 1.0,
@@ -114,7 +115,9 @@ const BASE_ATTRIBUTES = {
   ion_fog_shield_resist: 0,
   node_interference_resist: 0,
   crew_capability_flags: 0,
-  covert_exposure_mult: 1.0
+  covert_exposure_mult: 1.0,
+  customs_evasion_mult: 1.0,
+  bribe_cost_mult: 1.0
 };
 
 /**
@@ -127,7 +130,8 @@ export function freeBerths(attributes) {
 
 /**
  * Deterministically derive ship attributes from a list of `{ type, tier }`
- * components. Missing components (and invalid tiers) default to Tier 1. `passengersAboard` is the
+ * components. Missing components (and invalid tiers) default to Tier 1. A component's `healthPct` (default 100)
+ * scales the attributes it sets (HEALTH_SCALED_ATTRIBUTES) before captain traits and crew are folded in. `passengersAboard` is the
  * ship's persisted manifest count; it is clamped to the life support's passenger_capacity.
  * `traits` are the effect ids in force: the captain's unlocked trait ids, the active Legacy Doctrines'
  * ids and a promoted captain's innate class (innateEffectId), whose ship effects are folded in
@@ -136,8 +140,12 @@ export function freeBerths(attributes) {
  */
 export function computeShipAttributes(components = [], passengersAboard = 0, traits = [], activeCrew = []) {
   const tiers = {};
+  const health = {};
   for (const c of components) {
-    if (COMPONENT_TYPES.includes(c?.type)) tiers[c.type] = c.tier;
+    if (COMPONENT_TYPES.includes(c?.type)) {
+      tiers[c.type] = c.tier;
+      health[c.type] = healthFactor(c.healthPct);
+    }
   }
 
   const overdrive = new Set([...engineerJuryRigTypes(activeCrew), ...innateJuryRigTypes(traits)]);
@@ -150,11 +158,12 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     const tier = storedTier > 0 && overdrive.has(type) ? Math.min(storedTier + 1, MAX_TIER) : storedTier;
     for (const [attr, values] of Object.entries(TIER_TABLE[type])) {
       attributes[attr] = tier === 0 ? (ZERO_TIER_OVERRIDES[attr] ?? 0) : values[tier - 1];
+      if (HEALTH_SCALED_ATTRIBUTES[type]?.includes(attr)) attributes[attr] *= health[type] ?? 1;
     }
   }
   Object.assign(attributes, BASE_ATTRIBUTES);
   applyShipEffects(attributes, [...traitShipEffects(traits), ...innateShipEffects(traits), ...crewShipEffects(activeCrew)]);
-  Object.assign(attributes, crewResists(activeCrew), { crew_capability_flags: crewCapabilityFlags(activeCrew) });
+  Object.assign(attributes, crewResists(activeCrew), crewCustomsMults(activeCrew, traits), { crew_capability_flags: crewCapabilityFlags(activeCrew) });
   attributes.crew_aboard = activeCrew.length;
   attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity - attributes.crew_aboard);
   return attributes;

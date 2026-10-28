@@ -90,10 +90,14 @@ describe('ship attributes', () => {
     assert.equal(exposure(10), 1);
   });
 
-  test('the Diplomat and Smuggler change no ship attribute, and no expansion class signs a capability bit', () => {
+  test('the Diplomat and Smuggler change only the customs multipliers, and no expansion class signs a capability bit', () => {
     const base = attrs([]);
+    const { customs_evasion_mult: _evasion, bribe_cost_mult: _bribe, ...rest } = base;
     for (const crewClass of ['DIPLOMAT', 'SMUGGLER']) {
-      assert.deepEqual(attrs([member(crewClass, 'MASTER')]), { ...base, crew_aboard: 1, passengers_aboard: base.passengers_aboard });
+      const { customs_evasion_mult, bribe_cost_mult, ...others } = attrs([member(crewClass, 'MASTER')]);
+      assert.deepEqual(others, { ...rest, crew_aboard: 1, passengers_aboard: base.passengers_aboard });
+      assert.ok(bribe_cost_mult < 1, `${crewClass} discounts bribes`);
+      assert.ok(customs_evasion_mult > 0.25); // the quirk (Nervous Tell here) moves it, the class does not need to
     }
     const all = NEW_CLASSES.map((id) => member(id, 'MASTER'));
     assert.equal(crewCapabilityFlags(all), 0);
