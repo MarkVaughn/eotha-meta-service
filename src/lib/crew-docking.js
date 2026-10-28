@@ -21,7 +21,7 @@ export const fatigueIntervals = (ms, member = {}, controllingFactionId = '') => 
 // member's gain and rested cap depend on whether `controllingFactionId`, the faction the docked receipt
 // signs as governing the dock ('' for an independent system), is its home faction.
 export function shoreLeaveTerms(crew, kind = 'STATION', member = {}, controllingFactionId = '') {
-  const galley = crew.some((m) => m.crewClass === 'CHEF' && RANKS.indexOf(m.rank) >= 1 && m.morale >= NOMINAL_MORALE_THRESHOLD);
+  const galley = crew.some((m) => m.crewClass === 'CHEF' && RANKS.indexOf(m.rank) >= 1 && m.morale >= NOMINAL_MORALE_THRESHOLD && !m.detained);
   const quirk = QUIRKS[member.quirkId];
   const stationLeave = kind === 'STATION' || galley;
   const territorial = quirk?.homeStationGain !== undefined;

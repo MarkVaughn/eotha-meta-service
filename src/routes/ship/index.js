@@ -9,7 +9,9 @@ import {
   hullBudget,
   totalSubsystemPoints
 } from '../../config/components.js';
+import { repairCost } from '../../config/customs.js';
 import { devPassengersEnabled } from '../../config/dev.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
@@ -22,6 +24,17 @@ const upgradeSchema = {
     properties: {
       componentType: { type: 'string', enum: COMPONENT_TYPES },
       targetTier: { type: 'integer', minimum: 0, maximum: MAX_TIER },
+      dockedReceipt: dockedReceiptSchema
+    }
+  }
+};
+
+// `componentTypes` limits the repair to those components (all damaged ones by default).
+const repairSchema = {
+  body: {
+    type: 'object',
+    properties: {
+      componentTypes: { type: 'array', items: { type: 'string', enum: COMPONENT_TYPES }, minItems: 1, uniqueItems: true },
       dockedReceipt: dockedReceiptSchema
     }
   }
@@ -97,6 +110,9 @@ export default async function shipRoutes(fastify, opts) {
       log: request.log
     });
     if (refusal) return reply.code(403).send(refusal);
+    // A station that locked the pilot out after a customs capture does no business with them.
+    const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
+    if (lockout) return reply.code(403).send(lockout);
 
     if (ESSENTIAL_COMPONENTS.includes(componentType) && targetTier === 0) {
       return reply.code(400).send({
@@ -172,5 +188,56 @@ export default async function shipRoutes(fastify, opts) {
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
     return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: await reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
+  });
+  // Restores damaged components (customs captures wear them, see config/customs.js) to 100% for
+  // REPAIR_CREDITS_PER_PCT credits per missing point, while docked.
+  fastify.post('/repair', { schema: repairSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    const { componentTypes, dockedReceipt } = request.body;
+    const playerId = request.user.sub;
+
+    if (!dockedReceipt) {
+      return reply.code(403).send({ error: 'Repairs require a docked receipt from the engine.', code: 'docked_receipt_required' });
+    }
+    const refusal = dockedReceiptRefusal(dockedReceipt, {
+      pilotId: playerId,
+      publicKey: fastify.claimKey.key,
+      nowMs: Date.now(),
+      log: request.log
+    });
+    if (refusal) return reply.code(403).send(refusal);
+    const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
+    if (lockout) return reply.code(403).send(lockout);
+
+    const outcome = await withActiveShip(request, async (tx, ship) => {
+      const damaged = ship.components.filter((c) => c.tier > 0 && c.healthPct < 100 && (!componentTypes || componentTypes.includes(c.type)));
+      if (damaged.length === 0) return fail(409, 'Nothing needs repair.', { code: 'nothing_to_repair' });
+      const repaired = damaged.map((c) => ({ type: c.type, healthBefore: c.healthPct, cost: repairCost(c.healthPct) }));
+      const cost = repaired.reduce((sum, r) => sum + r.cost, 0);
+
+      const { count } = await tx.player.updateMany({
+        where: { id: playerId, credits: { gte: cost } },
+        data: { credits: { decrement: cost } }
+      });
+      if (count !== 1) {
+        const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+        if (!player) return fail(404, 'Player not found.');
+        return fail(402, `Insufficient credits: repairs cost ${cost}, balance is ${player.credits}.`, { cost, credits: player.credits });
+      }
+      await tx.shipComponentRecord.updateMany({ where: { id: { in: damaged.map((c) => c.id) } }, data: { healthPct: 100 } });
+
+      const components = await tx.shipComponentRecord.findMany({ where: { spaceshipId: ship.id } });
+      const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { shipId: ship.id, components, passengersAboard: ship.passengersAboard, traits: ship.traits, crew: ship.crew, factions: ship.factions, cost, credits: player.credits, repaired };
+    });
+
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
+    const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
+    return {
+      ...loadout,
+      cost: outcome.cost,
+      credits: outcome.credits,
+      repaired: outcome.repaired,
+      token: await reissueToken(fastify, request, loadout.ship_attributes, outcome.factions)
+    };
   });
 }

@@ -5,7 +5,8 @@ import { traitCrewTerms } from './captain.js';
 
 // The bits of ShipAttributes.crew_capability_flags (eotha-contracts src/crew_capabilities.ts). Only the
 // bits the contracts assigned are ever set. No class signs 0x08 (Comms Officer, Transponder Spoof) or
-// 0x10 (Smuggler, Stealth Floor) yet: both belong to customs, which is dormant, and 0x20 is unassigned.
+// 0x10 (Smuggler, Stealth Floor): the engine does not read either for customs, which takes the crew's
+// mitigation folded into customs_evasion_mult and bribe_cost_mult (src/config/customs.js), and 0x20 is unassigned.
 export const CREW_CAPABILITY = Object.freeze({
   HOT_CASTOFF: 0x01,
   COLD_DRIFT: 0x02,
@@ -176,7 +177,7 @@ export const CREW_CLASSES = Object.freeze({
     pct('weapon_range_m', [0.1, 0.2, 0.35])
   ], [0, 0, 0], { capabilities: [[CREW_CAPABILITY.BELT_CLEARANCE, 'ADEPT']] }),
   // The expansion classes (design-crew classes.md 2.1). Their customs effects (inspection chance,
-  // consular seals, bribes, the stealth floor) wait for the customs stage and are not applied here.
+  // consular seals, bribes) are the customs_evasion_mult and bribe_cost_mult of src/config/customs.js.
   QUARTERMASTER: crewClass('Quartermaster', [
     pct('cargo_capacity_m3', [0.1, 0.17, 0.25])
   ], [0, 0, 0], { perks: { [CREW_PERK.ORE_SALE_BONUS]: [0.08, 0.14, 0.2] } }),
@@ -211,7 +212,7 @@ export const CREW_CLASS_IDS = Object.freeze(Object.keys(CREW_CLASSES));
 // (BY_THE_BOOK: lost on accepting a covert contract) and, for HOME_BOUND, the shore-leave terms in and
 // out of its home faction's space: `homeStationGain`, `homeOutpostGain`, `homeRestedCap`,
 // `awayStationGain`, `awayOutpostGain` and `awayFatigueMult` (on the flight time that tires it). The rest
-// (customs, retirement) act in later phases.
+// (retirement) acts in a later phase; the customs terms are folded in by src/config/customs.js.
 const quirk = (id, key, name, category, weight, summary, effects = {}) =>
   Object.freeze({ id, key, name, category, weight, summary, ...effects });
 
@@ -301,10 +302,11 @@ export function quirkView(quirkId) {
 /**
  * The multiplier a crew member's class modifiers are scaled by: its morale band (Inspired 1.15,
  * Nominal 1.0, Disgruntled 0.6, Mutinous 0) plus the quirk's additive terms, which a member whose band
- * is 0 does not get. Disgruntled is 0 for EAGER, and PERFECTIONIST is only Inspired from 88.
- * `member` carries { rank, morale, quirkId }.
+ * is 0 does not get. Disgruntled is 0 for EAGER, and PERFECTIONIST is only Inspired from 88. A member customs
+ * hold (`detained`, see activeCrewOf) has none. `member` carries { rank, morale, quirkId }.
  */
-export function effectiveMoraleMult({ rank, morale, quirkId }) {
+export function effectiveMoraleMult({ rank, morale, quirkId, detained }) {
+  if (detained) return 0;
   const q = QUIRKS[quirkId];
   let band;
   if (morale >= (q?.inspiredAt ?? INSPIRED_MORALE_THRESHOLD)) band = MORALE_MULT.INSPIRED;
@@ -370,7 +372,7 @@ export const engineerJuryRigSlots = (member) => member?.crewClass === 'ENGINEER'
   ? CREW_CLASSES.ENGINEER.juryRigSlots[rankIndex(member.rank)] : 0;
 
 export function engineerJuryRigTypes(crew = []) {
-  const engineer = crew.find((m) => m.crewClass === 'ENGINEER' && m.status !== CREW_STATUS.STANDBY);
+  const engineer = crew.find((m) => m.crewClass === 'ENGINEER' && m.status !== CREW_STATUS.STANDBY && !m.detained);
   if (!engineer || engineer.morale < NOMINAL_MORALE_THRESHOLD) return new Set();
   const selected = Array.isArray(engineer.juryRigComponentTypes) ? engineer.juryRigComponentTypes : [];
   return new Set([...new Set(selected.filter((type) => ENGINEER_JURY_RIG_TYPES.includes(type)))].slice(0, engineerJuryRigSlots(engineer)));
@@ -394,7 +396,7 @@ export function innateJuryRigTypes(effectIds = []) {
 
 // Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better, and not a
 // LOYALIST flying against its home faction (`flyingAgainstHome`, see markFlyingAgainstHome).
-const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD && !member.flyingAgainstHome;
+const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD && !member.flyingAgainstHome && !member.detained;
 
 /**
  * The ShipAttributes.crew_capability_flags `crew` (active members) signs into the ship: the bits of every

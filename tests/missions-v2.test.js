@@ -229,7 +229,7 @@ describe('factions phase 3 meta lifecycle', () => {
     ]) assert.ok([400, 403].includes((await complete(pilot, { ...valid, ...change })).statusCode));
     for (const override of [
       { wasDetected: false, opposedReputationChange: -15 },
-      { wasDetected: true, opposedReputationChange: -14 }, { bribePaidCredits: 1 }, { rewardCredits: 3751 },
+      { wasDetected: true, opposedReputationChange: -14 }, { rewardCredits: 3751 },
       { wasDetected: true, opposedReputationChange: -15, rewardCredits: 3126 }
     ]) assert.equal((await complete(pilot, claimFor(pilot, active, override))).statusCode, 400);
     assert.equal((await held(pilot)).length, 1);

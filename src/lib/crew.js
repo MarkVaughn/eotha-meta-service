@@ -133,12 +133,19 @@ async function markFlyingAgainstHome(db, crew) {
   return crew.map((member) => (loyalists.includes(member) && opposed.has(member.homeFactionId) ? { ...member, flyingAgainstHome: true } : member));
 }
 
+// `crew` with `detained` set on each member customs still hold (`detainedUntil` in the future): they stay on
+// the roster and in their berth, but their effects, capabilities and perks are off until the hold ends.
+const markDetained = (crew) => {
+  const nowMs = Date.now();
+  return crew.map((member) => (member.detainedUntil && member.detainedUntil.getTime() > nowMs ? { ...member, detained: true } : member));
+};
+
 // `db` is the Prisma client or an open transaction. The crew aboard `shipId`, in the order they were hired.
 export const activeCrewOf = async (db, shipId) =>
-  markFlyingAgainstHome(db, await db.crewMember.findMany({
+  markFlyingAgainstHome(db, markDetained(await db.crewMember.findMany({
     where: { spaceshipId: shipId, status: CREW_STATUS.ACTIVE },
     orderBy: [{ hiredAt: 'asc' }, { id: 'asc' }]
-  }));
+  })));
 
 // `db` is the Prisma client or an open transaction. The pilot's crew on standby, in the order they were hired.
 export const standbyCrewOf = (db, playerId) =>
@@ -186,10 +193,11 @@ export function crewMemberView(member, traits = []) {
     unutilizedStreak: member.unutilizedStreak,
     unpaidArrearsCredits: member.unpaidArrearsCredits,
     pendingStipendCredits: member.pendingStipendCredits,
+    ...(member.detained && { detained: true, detainedUntil: member.detainedUntil.toISOString() }),
     ...(member.crewClass === 'ENGINEER' && { juryRig: {
       selectedComponentTypes: member.juryRigComponentTypes ?? [],
       slots: engineerJuryRigSlots(member),
-      active: member.status === CREW_STATUS.ACTIVE && member.morale >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
+      active: member.status === CREW_STATUS.ACTIVE && !member.detained && member.morale >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
     } }),
     promotion: promotionTerms(member),
     capabilities: capabilitiesView(member),
@@ -334,12 +342,13 @@ export async function recordCrewSettlement(tx, ship, payroll, { settlement, payo
   await tx.spaceship.update({ where: { id: ship.id }, data: { crewPayoutSinceDock: true, lastCrewPayoutAtMs } });
   Object.assign(ship, { crewPayoutSinceDock: true, lastCrewPayoutAtMs });
   if (payroll.length === 0) return { crew: ship.crew, effects: [] };
-  const aboard = new Set(ship.crew.map((member) => member.id));
+  // A member customs hold is not aboard to be utilised or to learn from the mission.
+  const aboard = new Set(ship.crew.filter((member) => !member.detained).map((member) => member.id));
   const attributes = computeShipAttributes(ship.components, ship.passengersAboard, ship.traits, ship.crew);
   const ctx = {
     weaponsTier: ship.components.find((c) => c.type === 'WEAPONS')?.tier ?? 0,
     subsystemUse: totalSubsystemPoints(ship.components) / hullBudget(attributes.hull_tier, ship.traits),
-    activeCrew: ship.crew.length
+    activeCrew: aboard.size
   };
   const owed = new Map(payout.crewPayouts.map((entry) => [entry.crewId, entry.deferredCredits ?? 0]));
   const effects = [];

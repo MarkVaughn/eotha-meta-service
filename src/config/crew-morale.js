@@ -200,7 +200,7 @@ export function promotionRefusal(member) {
   return null;
 }
 
-const hasMasterChef = (crew) => crew.some((member) => member.crewClass === 'CHEF' && member.rank === 'MASTER' && member.morale >= NOMINAL_MORALE_THRESHOLD);
+const hasMasterChef = (crew) => crew.some((member) => member.crewClass === 'CHEF' && member.rank === 'MASTER' && member.morale >= NOMINAL_MORALE_THRESHOLD && !member.detained);
 
 /** The morale shore leave and paid arrears bring the crew up to: 80, or 90 with an active Master Chef (Captain's Table). */
 export const restedMoraleCap = (crew) => (hasMasterChef(crew) ? MASTER_CHEF_RESTED_MORALE_CAP : RESTED_MORALE_CAP);
@@ -208,6 +208,6 @@ export const restedMoraleCap = (crew) => (hasMasterChef(crew) ? MASTER_CHEF_REST
 /** The share of the station mission cooldown an active Doctor (at Nominal morale or better) takes off, 0 to 0.5. */
 export function doctorCooldownReduction(crew) {
   return crew
-    .filter((member) => member.crewClass === 'DOCTOR' && member.morale >= NOMINAL_MORALE_THRESHOLD && RANKS.includes(member.rank))
+    .filter((member) => member.crewClass === 'DOCTOR' && member.morale >= NOMINAL_MORALE_THRESHOLD && !member.detained && RANKS.includes(member.rank))
     .reduce((best, member) => Math.max(best, DOCTOR_COOLDOWN_REDUCTION[RANKS.indexOf(member.rank)]), 0);
 }

@@ -10,6 +10,7 @@ import {
 import { SETTLEMENT } from '../../config/crew-morale.js';
 import { deductCrewRevenueShare, payrollCrewOf, recordCrewSettlement } from '../../lib/crew.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { recordCrewDock } from '../../lib/crew-docking.js';
 
@@ -269,7 +270,12 @@ export default async function chartsRoutes(fastify) {
       if (!fastify.claimKey) return fastify.requireClaimKey(request, reply);
       const refused = dockedReceiptRefusal(dockedReceipt, { pilotId: playerId, publicKey: fastify.claimKey.key, nowMs: Date.now(), log: request.log });
       if (refused) return reply.code(403).send(refused);
+      const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
+      if (lockout) return reply.code(403).send(lockout);
     }
+    // The chart is sold at `stationId`, with or without a receipt.
+    const saleLockout = await stationLockoutRefusal(prisma, playerId, request.body.stationId, Date.now());
+    if (saleLockout) return reply.code(403).send(saleLockout);
     if ((planetId === undefined) === (systemH3 === undefined)) {
       return reply.code(400).send({ error: 'Provide exactly one of planetId or systemH3.' });
     }

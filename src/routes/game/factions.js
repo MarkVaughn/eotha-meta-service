@@ -1,4 +1,5 @@
 import { FACTION_IDS, FLYING_COLORS_MIN_REP } from '../../config/factions.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { factionsClaim, renounceParagon } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
@@ -47,7 +48,7 @@ export default async function factionsRoutes(fastify) {
 
   // Stateless, so a refusal changes nothing: the engine vouches the pilot is docked right now. An
   // expired receipt is answered like a missing one: either way the client must fetch a fresh one.
-  function receiptRefusal(request) {
+  async function receiptRefusal(request) {
     const { dockedReceipt } = request.body;
     if (!dockedReceipt) return refusal({ code: 'docked_receipt_required' });
     const refused = dockedReceiptRefusal(dockedReceipt, {
@@ -56,7 +57,7 @@ export default async function factionsRoutes(fastify) {
       nowMs: Date.now(),
       log: request.log
     });
-    if (!refused) return null;
+    if (!refused) return stationLockoutRefusal(prisma, request.user.sub, dockedReceipt.dockedEntityId, Date.now());
     return refusal({ code: refused.code === 'docked_receipt_expired' ? 'docked_receipt_required' : refused.code });
   }
 
@@ -66,7 +67,7 @@ export default async function factionsRoutes(fastify) {
   // Flies a faction's colors (standing at least FLYING_COLORS_MIN_REP with it), or with a null
   // `factionId` stops, and answers with a token carrying the new `factions.active_colors`.
   fastify.post('/factions/colors', { schema: colorsSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const refused = receiptRefusal(request);
+    const refused = await receiptRefusal(request);
     if (refused) return reply.code(403).send(refused);
     const { factionId } = request.body;
     const playerId = request.user.sub;
@@ -88,7 +89,7 @@ export default async function factionsRoutes(fastify) {
   // Gives up Paragon standing with a faction: it drops to NON_PARAGON_CAP_WHEN_PARAGON_ACTIVE, so
   // another faction may reach Paragon. Logged as RENOUNCE_PARAGON in the ReputationLedger.
   fastify.post('/factions/renounce-paragon', { schema: renounceSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const refused = receiptRefusal(request);
+    const refused = await receiptRefusal(request);
     if (refused) return reply.code(403).send(refused);
     const factionId = request.body.currentParagonFactionId;
     const playerId = request.user.sub;

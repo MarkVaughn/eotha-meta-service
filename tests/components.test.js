@@ -59,6 +59,7 @@ describe('computeShipAttributes', () => {
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
       docking_time_mult: 1, extraction_rate_mult: 1, tuning_tolerance_hz: 100,
       ion_fog_shield_resist: 0, node_interference_resist: 0, crew_capability_flags: 0, covert_exposure_mult: 1,
+      customs_evasion_mult: 1, bribe_cost_mult: 1,
       crew_aboard: 0, passengers_aboard: 0
     });
   });

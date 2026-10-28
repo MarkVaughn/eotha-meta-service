@@ -10,6 +10,7 @@ import {
 } from '../../config/missions.js';
 import { CARGO_MAX_LOTS } from '../../config/cargo.js';
 import { missionXp } from '../../config/captain.js';
+import { BRIBE_SAVED_REP_MULTIPLIER, MAX_SEIZURE_FUTURE_SKEW_MS } from '../../config/customs.js';
 import { H3_PATTERN, UUID_PATTERN } from '../../config/patterns.js';
 import { CARGO_REFUSALS, applyCargoWrite, cargoLotSchema, toStoredLots } from '../../lib/cargo.js';
 import {
@@ -19,6 +20,8 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
+import { applyCustomsSeizure, activeLockouts, stationLockoutRefusal } from '../../lib/customs.js';
+import { customsSeizureSchema, verifyCustomsSeizure } from '../../lib/customs-seizure.js';
 import {
   activeCrewOf, clandestineBonusCredits, deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCovertAcceptance,
   recordCrewAbandonment, recordCrewSettlement
@@ -135,11 +138,18 @@ const disembarkSchema = {
   }
 };
 
+// A `CustomsSeizureClaim` the engine signed when customs captured the pilot, relayed from the frame that ended
+// the docking. The claim is the whole body: the capture is proved by its signature alone.
+const seizureSchema = {
+  body: { type: 'object', required: ['claim'], additionalProperties: false, properties: { claim: customsSeizureSchema } }
+};
+
 // Speed bonuses may raise a payout to at most 125% of the offered reward.
 const MAX_BONUS_MULTIPLIER = 1.25;
 // Tolerated RTSE/meta clock skew for completion timestamps.
 const MAX_FUTURE_SKEW_MS = 60_000;
 const OVERFLOW = Symbol('credit-overflow');
+const UNAFFORDABLE_BRIBE = Symbol('bribe-unaffordable');
 
 const completeSchema = {
   body: {
@@ -259,11 +269,18 @@ export default async function missionsRoutes(fastify) {
 
   fastify.get('/missions/cooldown', { schema: cooldownSchema }, async (request) => {
     const nowMs = Date.now();
-    const remainingMs = await cooldownRemainingMs(prisma, request.user.sub, request.query.originId, nowMs);
+    const cooldownMs = await cooldownRemainingMs(prisma, request.user.sub, request.query.originId, nowMs);
+    // A customs lockout shuts the station's board as a cooldown does, and is reported beside it.
+    const lockout = await stationLockoutRefusal(prisma, request.user.sub, request.query.originId, nowMs);
+    const remainingMs = Math.max(cooldownMs, lockout?.remaining_ms ?? 0);
     return remainingMs > 0
-      ? { active: true, remaining_ms: remainingMs, available_at_ms: nowMs + remainingMs }
+      ? { active: true, remaining_ms: remainingMs, available_at_ms: nowMs + remainingMs, ...(lockout && { locked_out: true }) }
       : { active: false, remaining_ms: 0, available_at_ms: 0 };
   });
+
+  // The pilot's customs lockouts still running, by station: each refuses that station's docking services and
+  // mission board (the engine does not enforce them; see POST /missions/seizure).
+  fastify.get('/missions/lockouts', async (request) => ({ lockouts: await activeLockouts(prisma, request.user.sub, Date.now()) }));
 
   fastify.post('/missions/accept', { schema: acceptSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
@@ -297,6 +314,10 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Missions can only be accepted while docked where they are offered.', code: 'not_docked_at_origin' });
     }
 
+    // A station that has locked the pilot out after a customs capture offers it nothing.
+    const lockout = await stationLockoutRefusal(prisma, playerId, offer.origin_station_id, nowMs);
+    if (lockout) return reply.code(403).send(lockout);
+
     // Never earlier than the offer was made: the engine refuses the claim otherwise.
     const acceptedAt = new Date(Math.max(nowMs, offer.offered_at_ms));
 
@@ -327,6 +348,9 @@ export default async function missionsRoutes(fastify) {
         where: { playerId_missionId: { playerId, missionId: offer.mission_id } }
       });
       if (completed) return fail(409, 'Mission has already been completed.', { code: 'mission_already_completed' });
+      // A mission customs seized stays failed, as an abandoned one stays abandoned.
+      const seized = await tx.customsSeizure.findFirst({ where: { playerId, missionId: offer.mission_id } });
+      if (seized) return fail(409, 'This mission failed a customs inspection and cannot be accepted again.', { code: 'mission_failed_inspection' });
       // An abandoned mission stays abandoned, so its offer cannot be taken and dropped again.
       const abandoned = await tx.abandonedMission.findUnique({
         where: { playerId_missionId: { playerId, missionId: offer.mission_id } }
@@ -437,6 +461,7 @@ export default async function missionsRoutes(fastify) {
           missionType: typeName(offer),
           reputationLoss: terms.reputation,
           reason,
+          ...(offer.carries_contraband_or_operative && { offer }),
           abandonedAt: new Date(nowMs),
           ...(hostage && {
             hostageBerths: offer.required_berths,
@@ -570,6 +595,12 @@ export default async function missionsRoutes(fastify) {
     };
   });
 
+  // A claim that paid a customs bribe (`bribePaidCredits` above 0) settles as a saved mission: the bribe comes out
+  // of the pilot's credits, the engine signed no clandestine bonus for it, the sponsor's reputation gain is
+  // BRIBE_SAVED_REP_MULTIPLIER of the signed one, the rival and the inspecting station lose nothing, and the
+  // Captain and crew earn full XP. The ledger row records the bribe. UNAFFORDABLE_BRIBE (mission left active,
+  // nothing changed) if the pilot could not pay it from the balance after the payout.
+  //
   // Returns `{ credits, payout, reputationChange, standings, factions, ship, passengersAboard, captain, clandestineBonusCredits }` (`payout` the crew's split of the reward, see deductCrewRevenueShare; plus the stored `lots` for a gather claim), null
   // if the mission was already settled, `{ refusal }` (a cargo 409; nothing changed) if a gather
   // claim's cargo record cannot be credited, or OVERFLOW (mission left active, nothing changed) if
@@ -578,6 +609,7 @@ export default async function missionsRoutes(fastify) {
     const playerId = request.user.sub;
     const stationId = active.offer.origin_station_id;
     const missionId = active.mission_id;
+    const bribe = claim.bribePaidCredits;
 
     try {
       return await prisma.$transaction(async (tx) => {
@@ -606,7 +638,7 @@ export default async function missionsRoutes(fastify) {
         const covert = isCovert(active.offer);
         // A clean covert mission pays the active Smuggler's rate on its clandestine bonus: the credits
         // beyond the signed reward are paid (and shared with the crew) like the rest of it.
-        const clandestineBonus = covert && !claim.wasDetected
+        const clandestineBonus = covert && !claim.wasDetected && bribe === 0
           ? clandestineBonusCredits(ship.crew, claim.rewardCredits, active.offer.clandestine_bonus_credits ?? 0) : 0;
         const rewardCredits = claim.rewardCredits + clandestineBonus;
         await tx.completedMission.create({
@@ -616,21 +648,39 @@ export default async function missionsRoutes(fastify) {
         // Guarded increment; throwing rolls back the mission delete and payout record.
         const payroll = await payrollCrewOf(tx, playerId, ship);
         const payout = deductCrewRevenueShare(payroll, ship.traits, rewardCredits, { deferred });
+        // The bribe is paid from the balance as the payout leaves it; the pilot never goes below zero.
+        const delta = payout.netCredits - bribe;
+        if (bribe > 0) {
+          const { credits } = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+          if (credits + delta < 0) throw UNAFFORDABLE_BRIBE;
+        }
         const { count: credited } = await tx.player.updateMany({
-          where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - payout.netCredits } },
-          data: { credits: { increment: payout.netCredits } }
+          where: { id: playerId, credits: { lte: MAX_REWARD_CREDITS - delta, ...(delta < 0 && { gte: -delta }) } },
+          data: { credits: { increment: delta } }
         });
         if (credited !== 1) throw OVERFLOW;
         // The signed reputation, negative for a late enough completion, goes to the sponsor: a gain
         // for the faction whose colors the pilot flies is multiplied (withColorsBonus), and the active
         // Diplomat raises any gain and softens the harm to the rival.
-        const reputationChange = withCrewReputationBonus(withColorsBonus(claim.reputationChange, factionId, ship.factions.active_colors), ship.crew, factionId);
-        const reason = covert
-          ? (claim.wasDetected ? LEDGER_REASONS.COMPLETE_COVERT_DETECTED : LEDGER_REASONS.COMPLETE_COVERT_CLEAN)
-          : LEDGER_REASONS.MISSION_COMPLETED;
+        // A bribed mission earns only BRIBE_SAVED_REP_MULTIPLIER of a gain (a late one's loss is not softened).
+        const signedReputation = bribe > 0 && claim.reputationChange > 0
+          ? Math.round(claim.reputationChange * BRIBE_SAVED_REP_MULTIPLIER) : claim.reputationChange;
+        // The Flying Colors bonus is for a clean run: a bribed one (design-factions 4.3) has no C_colors factor.
+        const colored = bribe > 0 ? signedReputation : withColorsBonus(signedReputation, factionId, ship.factions.active_colors);
+        const reputationChange = withCrewReputationBonus(colored, ship.crew, factionId);
+        const reason = bribe > 0 ? LEDGER_REASONS.COMPLETE_BRIBED
+          : covert
+            ? (claim.wasDetected ? LEDGER_REASONS.COMPLETE_COVERT_DETECTED : LEDGER_REASONS.COMPLETE_COVERT_CLEAN)
+            : LEDGER_REASONS.MISSION_COMPLETED;
+        const harmsRival = covert && claim.wasDetected && bribe === 0;
         await adjustMissionReputation(tx, playerId, factionId, reputationChange,
-          covert && claim.wasDetected ? active.offer.opposed_faction_id : null,
-          covert && claim.wasDetected ? withCrewRivalHarmCut(claim.opposedReputationChange, ship.crew) : 0, { reason, missionId });
+          harmsRival ? active.offer.opposed_faction_id : null,
+          harmsRival ? withCrewRivalHarmCut(claim.opposedReputationChange, ship.crew) : 0,
+          { reason, missionId, bribePaidCredits: bribe });
+        // The ledger always records a paid bribe, even when no standing moved (a capped or zero gain).
+        if (bribe > 0 && !(await tx.reputationLedger.findFirst({ where: { playerId, missionId, reason } }))) {
+          await tx.reputationLedger.create({ data: { playerId, missionId, reason, factionId, bribePaidCredits: bribe } });
+        }
         const cooldownMs = Math.round(MISSION_COOLDOWN_MS * (1 - doctorCooldownReduction(ship.crew)));
         await startCooldown(tx, playerId, stationId, Date.now(), cooldownMs);
         const passengersAboard = unboarded(ship, active.offer.required_berths);
@@ -642,7 +692,7 @@ export default async function missionsRoutes(fastify) {
         // Morale and seniority follow the settlement; the token below carries the crew as it now stands.
         // The speed bonus is earned when the claim paid above the offered reward, not counting the clean
         // covert bonus the engine adds after the speed and late terms.
-        const cleanBonus = covert && !claim.wasDetected ? active.offer.clandestine_bonus_credits ?? 0 : 0;
+        const cleanBonus = covert && !claim.wasDetected && bribe === 0 ? active.offer.clandestine_bonus_credits ?? 0 : 0;
         const settledCrew = await recordCrewSettlement(tx, ship, payroll, {
           settlement: missionSettlement(active.offer, { speedBonus: claim.rewardCredits - cleanBonus > active.offer.reward_credits }),
           payout, deferred, captainXp: captain.xpGained
@@ -652,11 +702,11 @@ export default async function missionsRoutes(fastify) {
         const balance = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
         return {
           credits: balance.credits, payout, reputationChange, standings, factions, ship: dock.ship,
-          passengersAboard, captain, clandestineBonusCredits: clandestineBonus, crewMorale: settledCrew.effects, ...(dock.docking && { docking: dock.docking }), ...(lots && { lots })
+          passengersAboard, captain, clandestineBonusCredits: clandestineBonus, bribePaidCredits: bribe, crewMorale: settledCrew.effects, ...(dock.docking && { docking: dock.docking }), ...(lots && { lots })
         };
       });
     } catch (err) {
-      if (err === OVERFLOW) return OVERFLOW;
+      if (err === OVERFLOW || err === UNAFFORDABLE_BRIBE) return err;
       if (err?.code === 'P2002') return null; // payout for this (player, mission) already recorded
       throw err;
     }
@@ -700,7 +750,9 @@ export default async function missionsRoutes(fastify) {
     const covert = isCovert(active.offer);
     // The engine's final signed reward already includes the clean bonus, added AFTER speed/late
     // terms. Do not add it again at settlement or let a detected/overt claim use this allowance.
-    const cleanBonus = covert && !claim.wasDetected ? (active.offer.clandestine_bonus_credits ?? 0) : 0;
+    // A bribed run earns none: the engine signs no clandestine bonus for it.
+    const bribed = claim.bribePaidCredits > 0;
+    const cleanBonus = covert && !claim.wasDetected && !bribed ? (active.offer.clandestine_bonus_credits ?? 0) : 0;
     if (claim.rewardCredits > Math.floor(active.offer.reward_credits * MAX_BONUS_MULTIPLIER) + cleanBonus) {
       return reply.code(400).send({ error: 'Claim reward exceeds the maximum speed bonus.' });
     }
@@ -709,10 +761,14 @@ export default async function missionsRoutes(fastify) {
       return reply.code(400).send({ error: 'Claim reputation exceeds the offered reputation.' });
     }
 
-    // Phase 3 has no customs/bribes. Detection attribution and opposed harm must match the
-    // signed offer; overt/V1 missions carry zero attribution fields, including when defaults omit them.
-    const expectedHarm = covert && claim.wasDetected ? (active.offer.opposed_reputation_change ?? 0) : 0;
-    if (claim.bribePaidCredits !== 0 || claim.opposedReputationChange !== expectedHarm
+    // Detection attribution and opposed harm must match the signed offer; overt/V1 missions carry zero
+    // attribution fields, including when defaults omit them. Only a mission with something to hide is
+    // inspected, so only one can have paid a bribe; the engine signs no opposed harm for a bribed run.
+    if (bribed && !(covert && active.offer.carries_contraband_or_operative)) {
+      return reply.code(400).send({ error: 'Claim attribution does not match the active mission.' });
+    }
+    const expectedHarm = covert && claim.wasDetected && !bribed ? (active.offer.opposed_reputation_change ?? 0) : 0;
+    if (claim.opposedReputationChange !== expectedHarm
         || (!covert && (claim.wasDetected || claim.exposureScoreMilli !== 0))) {
       return reply.code(400).send({ error: 'Claim attribution does not match the active mission.' });
     }
@@ -733,6 +789,11 @@ export default async function missionsRoutes(fastify) {
     // 5. Atomic settlement: payout (less the crew's share), reputation (with any Flying Colors bonus), cooldown, captain XP, and the passengers disembark.
     const settled = await settle(request, active, claim, request.body.deferCrewPay);
     if (settled === OVERFLOW) return conflict(reply, 'Payout would overflow the credit balance.');
+    if (settled === UNAFFORDABLE_BRIBE) {
+      return reply.code(402).send({
+        error: 'Not enough credits to pay the bribe.', code: 'bribe_unaffordable', bribe_paid_credits: claim.bribePaidCredits
+      });
+    }
     if (settled === null) return conflict(reply, 'Mission has already been completed.');
     if (settled.refusal) return reply.code(409).send(settled.refusal);
     return {
@@ -743,6 +804,7 @@ export default async function missionsRoutes(fastify) {
       payout: settled.payout.grossCredits,
       ...settled.payout,
       ...(settled.clandestineBonusCredits > 0 && { clandestineBonusCredits: settled.clandestineBonusCredits }),
+      ...(settled.bribePaidCredits > 0 && { bribe_paid_credits: settled.bribePaidCredits }),
       reputation_change: settled.reputationChange,
       standings: settled.standings,
       ...settled.captain,
@@ -751,6 +813,42 @@ export default async function missionsRoutes(fastify) {
       ...(settled.docking?.departed?.length && { departed_crew: settled.docking.departed }),
       ...(settled.lots && { lots: settled.lots }),
       token: await tokenFor(request, settled.ship, settled.passengersAboard, settled.factions)
+    };
+  });
+
+  // The engine's `CustomsSeizureClaim`: customs captured the pilot's ship (tier 1 to 4), relayed by the client
+  // once the frame that ended the docking is over. Verified by signature alone, applied once per nonce
+  // (applyCustomsSeizure) and answered with the same body again if replayed. The engine does not enforce
+  // the station lockout a capture earns; the meta-service does (docking services, mission board).
+  fastify.post('/missions/seizure', { schema: seizureSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    const { claim } = request.body;
+    if (request.user.sub !== claim.pilotId) {
+      return reply.code(403).send({ error: 'Claim does not belong to the authenticated pilot.' });
+    }
+    const nowMs = Date.now();
+    if (claim.seizedAtMs > nowMs + MAX_SEIZURE_FUTURE_SKEW_MS) {
+      return reply.code(400).send({ error: 'Claim seizure time is in the future.' });
+    }
+    if (!verifyCustomsSeizure(claim, fastify.claimKey.key)) {
+      return reply.code(403).send({ error: 'Invalid claim signature.' });
+    }
+
+    const run = () => prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      return applyCustomsSeizure(tx, { playerId: request.user.sub, ship, claim, nowMs });
+    });
+    let outcome;
+    try {
+      outcome = await run();
+    } catch (err) {
+      if (err?.code !== 'P2002') throw err;
+      outcome = await run(); // a concurrent copy won the nonce: this pass finds it and replays
+    }
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
+    return {
+      ...outcome.body,
+      replayed: Boolean(outcome.replayed),
+      token: await tokenFor(request, outcome.ship, outcome.passengersAboard, outcome.ship.factions)
     };
   });
 }

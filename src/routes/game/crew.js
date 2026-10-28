@@ -13,6 +13,7 @@ import { moraleAfterCappedGain, moraleBand, promotionRefusal, promotionTerms, re
 import { UUID_PATTERN } from '../../config/patterns.js';
 import { candidateView, findCandidate, generateCrewBoard, unavailableReasons } from '../../lib/crew-generator.js';
 import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, holdsActiveMission, primaryReason, standbyCrewOf } from '../../lib/crew.js';
+import { stationLockoutRefusal } from '../../lib/customs.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
@@ -87,6 +88,7 @@ const MESSAGES = {
   insufficient_faction_rep: "Your standing with this station's governing faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
   crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
+  crew_detained: 'Customs are holding this crew member: they cannot be dismissed or moved until the hold ends.',
   crew_not_engineer: 'Only an Engineer can configure component overdrive.',
   jury_rig_slots_exceeded: 'That Engineer cannot overdrive that many components.',
   COMPONENT_NOT_INSTALLED: 'Overdrive requires an installed component; Tier 0 is unequipped.',
@@ -111,6 +113,7 @@ const STATUS = {
   insufficient_faction_rep: 403,
   insufficient_credits: 402,
   crew_locked_by_active_mission: 409,
+  crew_detained: 409,
   crew_not_engineer: 409,
   jury_rig_slots_exceeded: 409,
   COMPONENT_NOT_INSTALLED: 409,
@@ -141,7 +144,7 @@ export default async function crewRoutes(fastify) {
   // The station the receipt is for, or the reply that refuses it. Stateless, so it runs before any
   // write. An expired receipt is answered like a missing one: either way the client must fetch a
   // fresh one.
-  function dockedStation(request, reply) {
+  async function dockedStation(request, reply) {
     const { stationId, dockedReceipt } = request.body;
     if (!dockedReceipt) return void reply.code(403).send(refusal({ code: 'docked_receipt_required' }));
     const receiptRefusal = dockedReceiptRefusal(dockedReceipt, {
@@ -157,6 +160,8 @@ export default async function crewRoutes(fastify) {
     if (stationId !== undefined && stationId !== dockedReceipt.dockedEntityId) {
       return void reply.code(403).send(refusal({ code: 'docked_receipt_wrong_station' }));
     }
+    const lockout = await stationLockoutRefusal(prisma, request.user.sub, dockedReceipt.dockedEntityId, Date.now());
+    if (lockout) return void reply.code(403).send(lockout);
     return dockedReceipt.dockedEntityId;
   }
 
@@ -185,7 +190,7 @@ export default async function crewRoutes(fastify) {
   // hiring is their own. Only a candidate already on this pilot's roster is left out, so the others keep
   // their places and the board may show fewer than four.
   fastify.post('/crew/board', { schema: boardSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const stationId = dockedStation(request, reply);
+    const stationId = await dockedStation(request, reply);
     if (!stationId) return reply;
     const stationFactionId = request.body.dockedReceipt.controllingFactionId;
     const nowMs = Date.now();
@@ -213,7 +218,7 @@ export default async function crewRoutes(fastify) {
   // Hires a candidate from the docked station's board: checks, signing bonus and the new crew member
   // commit together under the pilot's lock, so berths, the class slot and credits are never over-spent.
   fastify.post('/crew/hire', { schema: hireSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    const stationId = dockedStation(request, reply);
+    const stationId = await dockedStation(request, reply);
     if (!stationId) return reply;
     const candidate = findCandidate(stationId, request.body.candidateId, Date.now());
     if (!candidate) return reply.code(404).send(refusal({ code: 'candidate_not_found' }));
@@ -265,19 +270,20 @@ export default async function crewRoutes(fastify) {
 
   // Keep the phase-2 mission wage-dodging guard. Engineer removal needs no loadout guard:
   // only effective operation falls back; stored components, credits and hull budget never change.
-  async function leaveRefusal(tx, ship) {
+  async function leaveRefusal(tx, ship, member) {
+    if (member?.detainedUntil && member.detainedUntil.getTime() > Date.now()) return { code: 'crew_detained', detainedUntil: member.detainedUntil.toISOString() };
     if (await holdsActiveMission(tx, ship.playerId)) return { code: 'crew_locked_by_active_mission' };
     return undefined;
   }
 
   // Lets a crew member go. The signing bonus is not refunded.
   fastify.post('/crew/dismiss', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    if (!dockedStation(request, reply)) return reply;
+    if (!(await dockedStation(request, reply))) return reply;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
-      const refused = await leaveRefusal(tx, ship);
+      const refused = await leaveRefusal(tx, ship, member);
       if (refused) return { refused };
       await tx.crewMember.delete({ where: { id: member.id } });
       return { ship, crew: await activeCrewOf(tx, ship.id) };
@@ -288,14 +294,14 @@ export default async function crewRoutes(fastify) {
 
   // Moves an active crew member to Harbor Standby for a fee: off the ship's berths, still on the roster.
   fastify.post('/crew/standby', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    if (!dockedStation(request, reply)) return reply;
+    if (!(await dockedStation(request, reply))) return reply;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const playerId = request.user.sub;
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
-      const refused = await leaveRefusal(tx, ship);
+      const refused = await leaveRefusal(tx, ship, member);
       if (refused) return { refused };
       if ((await standbyCrewOf(tx, playerId)).length >= MAX_STANDBY_CREW) return { refused: { code: 'standby_full', maxStandbyCrew: MAX_STANDBY_CREW } };
       const paid = await tx.player.updateMany({
@@ -315,7 +321,7 @@ export default async function crewRoutes(fastify) {
   // Brings a crew member from Harbor Standby back aboard, subject to the same class, hull and berth
   // limits as a hire. No fee and no new signing bonus.
   fastify.post('/crew/activate', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    if (!dockedStation(request, reply)) return reply;
+    if (!(await dockedStation(request, reply))) return reply;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
@@ -337,7 +343,7 @@ export default async function crewRoutes(fastify) {
   // Configure an active Engineer's operation-only overdrive. Nothing purchases or mutates a stored
   // component tier; the next signed attributes use selected components one tier higher while Nominal.
   fastify.post('/crew/jury-rig', { schema: juryRigSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    if (!dockedStation(request, reply)) return reply;
+    if (!(await dockedStation(request, reply))) return reply;
     const { crewId, componentTypes, dockedReceipt } = request.body;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
@@ -367,7 +373,7 @@ export default async function crewRoutes(fastify) {
   // Trains a crew member into the next rank at a station lounge: needs the Seniority XP for it and its
   // fee, and a morale that has not fallen to Mutinous. Their wage share steps up with the rank.
   fastify.post('/crew/promote', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    if (!dockedStation(request, reply)) return reply;
+    if (!(await dockedStation(request, reply))) return reply;
     const playerId = request.user.sub;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
@@ -395,7 +401,7 @@ export default async function crewRoutes(fastify) {
   });
 
   fastify.post('/crew/shore-leave', { schema: shoreLeaveSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
-    if (!dockedStation(request, reply)) return reply;
+    if (!(await dockedStation(request, reply))) return reply;
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const result = await recordCrewDock(tx, ship, request.body.dockedReceipt, { ...request.body, allowDeparture: true });
@@ -416,7 +422,7 @@ export default async function crewRoutes(fastify) {
     const playerId = request.user.sub;
     if (request.body.dockedReceipt) {
       if (!fastify.claimKey) return fastify.requireClaimKey(request, reply);
-      if (!dockedStation(request, reply)) return reply;
+      if (!(await dockedStation(request, reply))) return reply;
     }
     const outcome = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
