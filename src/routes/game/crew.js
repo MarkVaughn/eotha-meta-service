@@ -88,6 +88,7 @@ const MESSAGES = {
   insufficient_faction_rep: "Your standing with this station's governing faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
   crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
+  crew_detained: 'Customs are holding this crew member: they cannot be dismissed or moved until the hold ends.',
   crew_not_engineer: 'Only an Engineer can configure component overdrive.',
   jury_rig_slots_exceeded: 'That Engineer cannot overdrive that many components.',
   COMPONENT_NOT_INSTALLED: 'Overdrive requires an installed component; Tier 0 is unequipped.',
@@ -112,6 +113,7 @@ const STATUS = {
   insufficient_faction_rep: 403,
   insufficient_credits: 402,
   crew_locked_by_active_mission: 409,
+  crew_detained: 409,
   crew_not_engineer: 409,
   jury_rig_slots_exceeded: 409,
   COMPONENT_NOT_INSTALLED: 409,
@@ -268,7 +270,8 @@ export default async function crewRoutes(fastify) {
 
   // Keep the phase-2 mission wage-dodging guard. Engineer removal needs no loadout guard:
   // only effective operation falls back; stored components, credits and hull budget never change.
-  async function leaveRefusal(tx, ship) {
+  async function leaveRefusal(tx, ship, member) {
+    if (member?.detainedUntil && member.detainedUntil.getTime() > Date.now()) return { code: 'crew_detained', detainedUntil: member.detainedUntil.toISOString() };
     if (await holdsActiveMission(tx, ship.playerId)) return { code: 'crew_locked_by_active_mission' };
     return undefined;
   }
@@ -280,7 +283,7 @@ export default async function crewRoutes(fastify) {
       const ship = await lockActiveShip(tx, request.user);
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
-      const refused = await leaveRefusal(tx, ship);
+      const refused = await leaveRefusal(tx, ship, member);
       if (refused) return { refused };
       await tx.crewMember.delete({ where: { id: member.id } });
       return { ship, crew: await activeCrewOf(tx, ship.id) };
@@ -298,7 +301,7 @@ export default async function crewRoutes(fastify) {
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
-      const refused = await leaveRefusal(tx, ship);
+      const refused = await leaveRefusal(tx, ship, member);
       if (refused) return { refused };
       if ((await standbyCrewOf(tx, playerId)).length >= MAX_STANDBY_CREW) return { refused: { code: 'standby_full', maxStandbyCrew: MAX_STANDBY_CREW } };
       const paid = await tx.player.updateMany({

@@ -461,6 +461,7 @@ export default async function missionsRoutes(fastify) {
           missionType: typeName(offer),
           reputationLoss: terms.reputation,
           reason,
+          ...(offer.carries_contraband_or_operative && { offer }),
           abandonedAt: new Date(nowMs),
           ...(hostage && {
             hostageBerths: offer.required_berths,
@@ -664,7 +665,9 @@ export default async function missionsRoutes(fastify) {
         // A bribed mission earns only BRIBE_SAVED_REP_MULTIPLIER of a gain (a late one's loss is not softened).
         const signedReputation = bribe > 0 && claim.reputationChange > 0
           ? Math.round(claim.reputationChange * BRIBE_SAVED_REP_MULTIPLIER) : claim.reputationChange;
-        const reputationChange = withCrewReputationBonus(withColorsBonus(signedReputation, factionId, ship.factions.active_colors), ship.crew, factionId);
+        // The Flying Colors bonus is for a clean run: a bribed one (design-factions 4.3) has no C_colors factor.
+        const colored = bribe > 0 ? signedReputation : withColorsBonus(signedReputation, factionId, ship.factions.active_colors);
+        const reputationChange = withCrewReputationBonus(colored, ship.crew, factionId);
         const reason = bribe > 0 ? LEDGER_REASONS.COMPLETE_BRIBED
           : covert
             ? (claim.wasDetected ? LEDGER_REASONS.COMPLETE_COVERT_DETECTED : LEDGER_REASONS.COMPLETE_COVERT_CLEAN)

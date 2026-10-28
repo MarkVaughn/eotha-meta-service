@@ -318,6 +318,9 @@ model AbandonedMission {
   originSystemH3  String?
   destinationStationId String?
   destinationSystemH3  String?
+  // The signed offer as held, kept so a customs capture that lands after the abandon still fines and charges
+  // it (src/lib/customs.js). Null on rows from before; additive.
+  offer           Json?
   abandonedAt     DateTime @default(now())
   reason          String
 

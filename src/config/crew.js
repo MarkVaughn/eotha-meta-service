@@ -372,7 +372,7 @@ export const engineerJuryRigSlots = (member) => member?.crewClass === 'ENGINEER'
   ? CREW_CLASSES.ENGINEER.juryRigSlots[rankIndex(member.rank)] : 0;
 
 export function engineerJuryRigTypes(crew = []) {
-  const engineer = crew.find((m) => m.crewClass === 'ENGINEER' && m.status !== CREW_STATUS.STANDBY);
+  const engineer = crew.find((m) => m.crewClass === 'ENGINEER' && m.status !== CREW_STATUS.STANDBY && !m.detained);
   if (!engineer || engineer.morale < NOMINAL_MORALE_THRESHOLD) return new Set();
   const selected = Array.isArray(engineer.juryRigComponentTypes) ? engineer.juryRigComponentTypes : [];
   return new Set([...new Set(selected.filter((type) => ENGINEER_JURY_RIG_TYPES.includes(type)))].slice(0, engineerJuryRigSlots(engineer)));

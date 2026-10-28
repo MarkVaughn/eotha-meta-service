@@ -100,6 +100,9 @@ export default async function cargoRoutes(fastify) {
       const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
       if (lockout) return reply.code(403).send(lockout);
     }
+    // The sale is made at the station the record names, whatever receipt (if any) came with it.
+    const saleLockout = await stationLockoutRefusal(prisma, playerId, saleRecord.stationId, Date.now());
+    if (saleLockout) return reply.code(403).send(saleLockout);
     if (saleRecord.pilotId !== playerId || !verifySaleRecord(saleRecord, fastify.claimKey.key)) {
       return reply.code(403).send({ error: 'The sale record is not valid for this pilot.', code: 'sale_record_invalid' });
     }

@@ -209,7 +209,7 @@ export default async function shipRoutes(fastify, opts) {
     if (lockout) return reply.code(403).send(lockout);
 
     const outcome = await withActiveShip(request, async (tx, ship) => {
-      const damaged = ship.components.filter((c) => c.healthPct < 100 && (!componentTypes || componentTypes.includes(c.type)));
+      const damaged = ship.components.filter((c) => c.tier > 0 && c.healthPct < 100 && (!componentTypes || componentTypes.includes(c.type)));
       if (damaged.length === 0) return fail(409, 'Nothing needs repair.', { code: 'nothing_to_repair' });
       const repaired = damaged.map((c) => ({ type: c.type, healthBefore: c.healthPct, cost: repairCost(c.healthPct) }));
       const cost = repaired.reduce((sum, r) => sum + r.cost, 0);

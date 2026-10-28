@@ -28,7 +28,7 @@ export const missionFaction = (offer) => offer.faction_id || DEFAULT_FACTION_ID;
 // The share a gain with `factionId` is raised by the active `crew`'s LOYALISTs: the best `homeReputationBonus`
 // among the working members whose home faction it is (it does not stack).
 const loyalistReputationBonus = (crew, factionId) =>
-  Math.max(0, ...crew.filter((member) => member.morale > 0 && member.homeFactionId === factionId)
+  Math.max(0, ...crew.filter((member) => member.morale > 0 && !member.detained && member.homeFactionId === factionId)
     .map((member) => QUIRKS[member.quirkId]?.homeReputationBonus ?? 0));
 
 // `delta` of a mission for `factionId` as the active `crew` change it: a gain is raised by a Diplomat's

@@ -273,6 +273,9 @@ export default async function chartsRoutes(fastify) {
       const lockout = await stationLockoutRefusal(prisma, playerId, dockedReceipt.dockedEntityId, Date.now());
       if (lockout) return reply.code(403).send(lockout);
     }
+    // The chart is sold at `stationId`, with or without a receipt.
+    const saleLockout = await stationLockoutRefusal(prisma, playerId, request.body.stationId, Date.now());
+    if (saleLockout) return reply.code(403).send(saleLockout);
     if ((planetId === undefined) === (systemH3 === undefined)) {
       return reply.code(400).send({ error: 'Provide exactly one of planetId or systemH3.' });
     }

@@ -1,8 +1,13 @@
+-- Guarded (IF NOT EXISTS) so it is safe to apply to a database that `prisma db push` already brought up to date.
+
 -- AlterTable
-ALTER TABLE "CrewMember" ADD COLUMN     "detainedUntil" TIMESTAMP(3);
+ALTER TABLE "CrewMember" ADD COLUMN IF NOT EXISTS "detainedUntil" TIMESTAMP(3);
+
+-- AlterTable
+ALTER TABLE "AbandonedMission" ADD COLUMN IF NOT EXISTS "offer" JSONB;
 
 -- CreateTable
-CREATE TABLE "CustomsSeizure" (
+CREATE TABLE IF NOT EXISTS "CustomsSeizure" (
     "id" UUID NOT NULL,
     "playerId" UUID NOT NULL,
     "nonce" TEXT NOT NULL,
@@ -22,7 +27,7 @@ CREATE TABLE "CustomsSeizure" (
 );
 
 -- CreateTable
-CREATE TABLE "StationLockout" (
+CREATE TABLE IF NOT EXISTS "StationLockout" (
     "id" UUID NOT NULL,
     "playerId" UUID NOT NULL,
     "stationId" TEXT NOT NULL,
@@ -34,20 +39,26 @@ CREATE TABLE "StationLockout" (
 );
 
 -- CreateIndex
-CREATE INDEX "CustomsSeizure_playerId_missionId_idx" ON "CustomsSeizure"("playerId", "missionId");
+CREATE INDEX IF NOT EXISTS "CustomsSeizure_playerId_missionId_idx" ON "CustomsSeizure"("playerId", "missionId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "CustomsSeizure_playerId_nonce_key" ON "CustomsSeizure"("playerId", "nonce");
+CREATE UNIQUE INDEX IF NOT EXISTS "CustomsSeizure_playerId_nonce_key" ON "CustomsSeizure"("playerId", "nonce");
 
 -- CreateIndex
-CREATE INDEX "StationLockout_playerId_until_idx" ON "StationLockout"("playerId", "until");
+CREATE INDEX IF NOT EXISTS "StationLockout_playerId_until_idx" ON "StationLockout"("playerId", "until");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "StationLockout_playerId_stationId_key" ON "StationLockout"("playerId", "stationId");
+CREATE UNIQUE INDEX IF NOT EXISTS "StationLockout_playerId_stationId_key" ON "StationLockout"("playerId", "stationId");
 
 -- AddForeignKey
-ALTER TABLE "CustomsSeizure" ADD CONSTRAINT "CustomsSeizure_playerId_fkey" FOREIGN KEY ("playerId") REFERENCES "Player"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$ BEGIN
+    ALTER TABLE "CustomsSeizure" ADD CONSTRAINT "CustomsSeizure_playerId_fkey" FOREIGN KEY ("playerId") REFERENCES "Player"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- AddForeignKey
-ALTER TABLE "StationLockout" ADD CONSTRAINT "StationLockout_playerId_fkey" FOREIGN KEY ("playerId") REFERENCES "Player"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+DO $$ BEGIN
+    ALTER TABLE "StationLockout" ADD CONSTRAINT "StationLockout_playerId_fkey" FOREIGN KEY ("playerId") REFERENCES "Player"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 

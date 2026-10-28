@@ -10,6 +10,10 @@ import { canonicalCustomsSeizurePayload, verifyCustomsSeizure } from '../src/lib
 import { CAPTURE_TIERS, crewCustomsMults, healthFactor, repairCost } from '../src/config/customs.js';
 import { SUCCESSOR_TYPES } from '../src/config/captain.js';
 import { computeShipAttributes } from '../src/config/components.js';
+import { engineerJuryRigTypes } from '../src/config/crew.js';
+import { doctorCooldownReduction, restedMoraleCap } from '../src/config/crew-morale.js';
+import { shoreLeaveTerms } from '../src/lib/crew-docking.js';
+import { withCrewReputationBonus } from '../src/lib/reputation.js';
 
 const MINUTE_MS = 60_000;
 
@@ -409,6 +413,7 @@ describe('POST /ship/repair', () => {
   test('restores damaged components to 100 for 5 credits per missing point', async () => {
     const pilot = await newPilot();
     await setCredits(pilot, 1000);
+    await install(pilot, ['SHIELDS']);
     await wear(pilot, { HULL: 60, SHIELDS: 90 });
     const response = await repair(pilot);
     assert.equal(response.statusCode, 200, response.body);
@@ -425,6 +430,7 @@ describe('POST /ship/repair', () => {
   test('repairs only the components asked for', async () => {
     const pilot = await newPilot();
     await setCredits(pilot, 1000);
+    await install(pilot, ['SHIELDS']);
     await wear(pilot, { HULL: 60, SHIELDS: 90 });
     const body = json(await repair(pilot, { componentTypes: ['SHIELDS'] }));
     assert.equal(body.cost, 50);
@@ -621,5 +627,182 @@ describe('customs lockout scope', () => {
     assert.notEqual(json(complete).code, 'station_locked_out', complete.body);
     const abandon = await call(pilot, 'POST', '/game/missions/abandon', { missionId: active.mission_id, dockedReceipt: receipt() });
     assert.equal(abandon.statusCode, 200, abandon.body);
+  });
+});
+
+describe('customs follow-ups from the independent review', () => {
+  const claimFor = (pilot, active, overrides = {}) => {
+    const claim = {
+      missionId: active.mission_id, playerShipId: pilot.id, destinationStationId: active.offer.destination_station_id,
+      acceptedAtMs: active.accepted_at_ms, completedAtMs: active.accepted_at_ms + 1000, durationTakenMs: 1000,
+      rewardCredits: active.offer.reward_credits, reputationChange: active.offer.reputation_change,
+      wasDetected: false, exposureScoreMilli: 22000, opposedReputationChange: 0, bribePaidCredits: 0, ...overrides
+    };
+    claim.signature = sign(null, canonicalClaimPayload(claim, false, missionOfferVersion(active.offer)), rtseKey).toString('base64');
+    return claim;
+  };
+  const lockOut = async (pilot, stationId) => {
+    await call(pilot, 'GET', '/ship/loadout');
+    await app.prisma.stationLockout.create({ data: { playerId: pilot.id, stationId, tier: 3, until: new Date(Date.now() + 30 * MINUTE_MS) } });
+  };
+  const detain = async (member, minutes = 30) =>
+    app.prisma.crewMember.update({ where: { id: member.id }, data: { detainedUntil: new Date(Date.now() + minutes * MINUTE_MS) } });
+
+  test('selling cargo or charts at a locked-out station is refused without a receipt and with another station\'s', async () => {
+    const pilot = await newPilot();
+    const stationId = randomUUID();
+    await lockOut(pilot, stationId);
+    const saleRecord = {
+      pilotId: pilot.id, stationId, totalCredits: 1, soldAtMs: Date.now(), nonce: randomBytes(16).toString('base64'),
+      signature: randomBytes(64).toString('base64'), leaseId: randomUUID(), sessionId: randomUUID(), seq: 1
+    };
+    const elsewhere = () => dockedReceipt(pilot, { dockedEntityId: randomUUID() });
+    for (const [url, body] of [
+      ['/game/cargo/sell', { saleRecord }],
+      ['/game/charts/sell', { planetId: 'no-such-chart', stationId }]
+    ]) {
+      for (const receipt of [undefined, elsewhere()]) {
+        const refused = await call(pilot, 'POST', url, { ...body, ...(receipt && { dockedReceipt: receipt }) });
+        assert.equal(refused.statusCode, 403, `${url}: ${refused.body}`);
+        assert.equal(json(refused).code, 'station_locked_out', url);
+      }
+    }
+    // The same sale at another station is not a lockout matter.
+    const open = await call(pilot, 'POST', '/game/charts/sell', { planetId: 'no-such-chart', stationId: randomUUID() });
+    assert.notEqual(json(open).code, 'station_locked_out');
+  });
+
+  test('a detained Engineer, Doctor, Master Chef, Chef and Loyalist stop applying their modifiers', async () => {
+    const member = (crewClass, rank, extra = {}) => ({ crewClass, rank, morale: 75, quirkId: 'Q08', status: 'ACTIVE', ...extra });
+    const on = member('ENGINEER', 'MASTER', { juryRigComponentTypes: ['ENGINES'] });
+    assert.ok(engineerJuryRigTypes([on]).has('ENGINES'));
+    assert.equal(engineerJuryRigTypes([{ ...on, detained: true }]).size, 0);
+    assert.ok(doctorCooldownReduction([member('DOCTOR', 'MASTER')]) > 0);
+    assert.equal(doctorCooldownReduction([member('DOCTOR', 'MASTER', { detained: true })]), 0);
+    assert.ok(restedMoraleCap([member('CHEF', 'MASTER')]) > restedMoraleCap([member('CHEF', 'MASTER', { detained: true })]));
+    const leave = (crew) => shoreLeaveTerms(crew, 'OUTPOST', member('PILOT', 'NOVICE'), '');
+    assert.notDeepEqual(leave([member('CHEF', 'ADEPT')]), leave([member('CHEF', 'ADEPT', { detained: true })]));
+    const loyalist = member('PILOT', 'NOVICE', { quirkId: 'Q02', homeFactionId: 'alpha' });
+    const gain = (crew) => withCrewReputationBonus(100, crew, 'alpha');
+    if (gain([loyalist]) > 100) assert.equal(gain([{ ...loyalist, detained: true }]), 100);
+  });
+
+  test('a detained crew member keeps no utilisation morale or seniority from a settled mission', async () => {
+    const [held, free] = [await newPilot(), await newPilot()];
+    const heldChef = await addCrew(held, { crewClass: 'CHEF', morale: 60 });
+    const freeChef = await addCrew(free, { crewClass: 'CHEF', morale: 60 });
+    await detain(heldChef);
+    const stored = (member) => app.prisma.crewMember.findUnique({ where: { id: member.id } });
+    const actives = [await take(held), await take(free)];
+    // (Accepting docks the ship at the origin, which already moved the crew's morale: measure from here.)
+    const [heldBefore, freeBefore] = [await stored(heldChef), await stored(freeChef)];
+    for (const [pilot, active] of [[held, actives[0]], [free, actives[1]]]) {
+      const response = await call(pilot, 'POST', '/game/missions/complete', { claim: claimFor(pilot, active) });
+      assert.equal(response.statusCode, 200, response.body);
+    }
+    const [heldAfter, freeAfter] = [await stored(heldChef), await stored(freeChef)];
+    assert.equal(heldAfter.morale, heldBefore.morale);
+    assert.equal(heldAfter.seniorityXp, heldBefore.seniorityXp);
+    assert.equal(heldAfter.unutilizedStreak, heldBefore.unutilizedStreak);
+    assert.ok(freeAfter.morale > freeBefore.morale || freeAfter.seniorityXp > freeBefore.seniorityXp, 'the control crew member was utilised');
+  });
+
+  test('a detained crew member cannot be dismissed or moved to standby until the hold ends', async () => {
+    const pilot = await newPilot();
+    const crew = await addCrew(pilot, { crewClass: 'CHEF' });
+    await setCredits(pilot, 1000);
+    await detain(crew);
+    const receipt = () => dockedReceipt(pilot);
+    for (const url of ['/game/crew/standby', '/game/crew/dismiss']) {
+      const refused = await call(pilot, 'POST', url, { crewId: crew.id, dockedReceipt: receipt() });
+      assert.equal(refused.statusCode, 409, `${url}: ${refused.body}`);
+      assert.equal(json(refused).error, 'crew_detained');
+    }
+    const still = await app.prisma.crewMember.findUnique({ where: { id: crew.id } });
+    assert.equal(still.status, 'ACTIVE');
+    assert.equal(await credits(pilot), 1000);
+    // Once the hold has run out the member is an ordinary crew member again.
+    await app.prisma.crewMember.update({ where: { id: crew.id }, data: { detainedUntil: new Date(Date.now() - 1000) } });
+    const moved = await call(pilot, 'POST', '/game/crew/standby', { crewId: crew.id, dockedReceipt: receipt() });
+    assert.equal(moved.statusCode, 200, moved.body);
+  });
+
+  test('abandoning before relaying the seizure does not dodge the fine, the reputation loss or the hostages', async () => {
+    const pilot = await newPilot();
+    const active = await take(pilot); // a covert passage of 2 operatives, abandoned in flight: they stay aboard as hostages
+    await setCredits(pilot, 5000);
+    await standing(pilot, 'alpha', 60);
+    await standing(pilot, 'beta', 60);
+    const abandon = await call(pilot, 'POST', '/game/missions/abandon', { missionId: active.mission_id });
+    assert.equal(abandon.statusCode, 200, abandon.body);
+    assert.equal(json(abandon).outcome, 'MISSION_ABANDON_OUTCOME_HOSTAGE');
+    const aboard = async () => (await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id, active: true } })).passengersAboard;
+    assert.equal(await aboard(), 2);
+
+    const body = json(await seize(pilot, seizureFor(pilot, active, { captureTier: 3 })));
+    assert.equal(body.mission_failed, true);
+    assert.equal(body.fine_credits, 750);
+    assert.equal(await credits(pilot), 4250);
+    assert.equal(await standingOf(pilot, 'alpha'), 40);
+    assert.equal(await standingOf(pilot, 'beta'), 30);
+    assert.equal(body.passengers_removed, 2);
+    assert.equal(await aboard(), 0);
+    const row = await app.prisma.abandonedMission.findFirst({ where: { playerId: pilot.id, missionId: active.mission_id } });
+    assert.equal(row.hostageBerths, 0);
+    // The hostages are gone: nobody is left to disembark.
+    assert.deepEqual(json(await call(pilot, 'GET', '/game/missions/active')).hostages ?? [], []);
+  });
+
+  test('a seizure naming a mission abandoned in port refunds the abandon\'s reputation charge', async () => {
+    const pilot = await newPilot();
+    const offer = covert(pilot, { type: 'MISSION_TYPE_RESEARCH', required_berths: 0 });
+    const active = await take(pilot, offer);
+    await standing(pilot, 'alpha', 60);
+    await standing(pilot, 'beta', 60);
+    const abandon = await call(pilot, 'POST', '/game/missions/abandon', { missionId: active.mission_id });
+    assert.equal(abandon.statusCode, 200, abandon.body);
+    const charged = json(abandon).reputation_change;
+    assert.ok(charged < 0);
+    await seize(pilot, seizureFor(pilot, active, { captureTier: 3 }));
+    assert.equal(await standingOf(pilot, 'alpha'), 60 - 20); // the capture's loss only
+  });
+
+  test('a replayed seizure reports the pilot\'s current balance and standings', async () => {
+    const pilot = await newPilot();
+    const active = await take(pilot);
+    await setCredits(pilot, 5000);
+    await standing(pilot, 'alpha', 60);
+    const claim = seizureFor(pilot, active, { captureTier: 1, inspectionOutcome: 3 });
+    const first = json(await seize(pilot, claim));
+    await setCredits(pilot, 123);
+    await standing(pilot, 'alpha', 10);
+    const replay = json(await seize(pilot, claim));
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.credits, 123);
+    assert.equal(replay.standings.alpha, 10);
+    assert.equal(replay.fine_credits, first.fine_credits);
+    assert.deepEqual(replay.reputation_changes, first.reputation_changes);
+  });
+
+  test('a bribed completion earns no Flying Colors bonus', async () => {
+    const pilot = await newPilot();
+    const active = await take(pilot);
+    await setCredits(pilot, 1000);
+    await standing(pilot, 'alpha', 60);
+    await app.prisma.player.update({ where: { id: pilot.id }, data: { activeColorsFactionId: 'alpha' } });
+    const response = await call(pilot, 'POST', '/game/missions/complete', { claim: claimFor(pilot, active, { bribePaidCredits: 400 }) });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(json(response).reputation_change, 19); // 75% of 25, with no x1.2
+    assert.equal(await standingOf(pilot, 'alpha'), 79);
+  });
+
+  test('repair does not charge for an optional component that is not installed', async () => {
+    const pilot = await newPilot();
+    await setCredits(pilot, 1000);
+    await wear(pilot, { SHIELDS: 50 }); // SHIELDS start uninstalled (tier 0)
+    const response = await call(pilot, 'POST', '/ship/repair', { dockedReceipt: dockedReceipt(pilot) });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(json(response).code, 'nothing_to_repair');
+    assert.equal(await credits(pilot), 1000);
   });
 });

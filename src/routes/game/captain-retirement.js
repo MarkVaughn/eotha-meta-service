@@ -93,6 +93,7 @@ const MESSAGES = {
   crew_not_found: 'No such crew member on your roster.',
   insufficient_rank_for_promotion: 'Only an Adept or a Master can be promoted to Captain.',
   insufficient_morale_for_promotion: 'The crew member\'s morale is too low to be promoted to Captain.',
+  crew_detained: 'Customs are holding this crew member: they cannot be promoted until the hold ends.',
   doctrine_not_available: 'An early discharge unlocks no Legacy Doctrine.',
   doctrine_tier_locked: 'That Legacy Doctrine needs a master retirement.',
   doctrine_limit_reached: 'Legacy Doctrines in force are at the limit; deactivate one first.',
@@ -117,6 +118,7 @@ const STATUS = {
   crew_not_found: 404,
   insufficient_rank_for_promotion: 400,
   insufficient_morale_for_promotion: 400,
+  crew_detained: 409,
   doctrine_not_available: 400,
   doctrine_tier_locked: 400,
   doctrine_limit_reached: 409,
@@ -229,6 +231,9 @@ export default async function captainRetirementRoutes(fastify) {
         if (!successor) return { refused: { code: 'crew_not_found' } };
         if (!['ADEPT', 'MASTER'].includes(successor.rank)) {
           return { refused: { code: 'insufficient_rank_for_promotion', rank: successor.rank, eligibleRanks: RANKS.filter((rank) => rank !== 'NOVICE') } };
+        }
+        if (successor.detainedUntil && successor.detainedUntil.getTime() > Date.now()) {
+          return { refused: { code: 'crew_detained', detainedUntil: successor.detainedUntil.toISOString() } };
         }
         if (successor.morale < PROMOTE_CREW_MIN_MORALE) {
           return { refused: { code: 'insufficient_morale_for_promotion', minMorale: PROMOTE_CREW_MIN_MORALE, currentMorale: successor.morale } };

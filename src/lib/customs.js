@@ -88,25 +88,38 @@ const failure = (status, error, code) => ({ failure: { status, body: { error, co
 export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) {
   const nonce = Buffer.from(claim.nonce, 'base64').toString('hex');
   const previous = await tx.customsSeizure.findUnique({ where: { playerId_nonce: { playerId, nonce } } });
-  if (previous) return { replayed: true, body: previous.result, ship, passengersAboard: ship.passengersAboard };
+  if (previous) {
+    // The first capture's consequences, with the pilot's balance and standings as they stand now.
+    const { credits } = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+    const body = { ...previous.result, credits, standings: await standingsOf(tx, playerId) };
+    return { replayed: true, body, ship, passengersAboard: ship.passengersAboard };
+  }
 
   const tier = CAPTURE_TIERS[claim.captureTier];
   const row = claim.missionId
     ? await tx.playerMission.findFirst({ where: { playerId, missionId: claim.missionId } })
     : null;
   const held = row && !isLegacyRow(row) ? row : null;
-  const offer = held ? fromStoredOffer(held.offer) : null;
+  // A pilot who abandoned the mission while customs held the ship (the engine still signs the capture, naming
+  // it) does not escape: the offer kept with the abandon is fined and charged as a held one is.
+  const abandoned = !held && claim.missionId
+    ? await tx.abandonedMission.findUnique({ where: { playerId_missionId: { playerId, missionId: claim.missionId } } })
+    : null;
+  const offer = held ? fromStoredOffer(held.offer) : abandoned?.offer ? fromStoredOffer(abandoned.offer) : null;
   if (offer && !offer.carries_contraband_or_operative) {
     return failure(409, 'The mission carries nothing customs could seize.', 'mission_not_inspectable');
   }
 
-  // The mission fails: gone, with its passengers.
+  // The mission fails: gone, with its passengers (an abandoned passage's hostages included).
   let passengersAboard = ship.passengersAboard;
   if (held) {
     await tx.playerMission.delete({ where: { id: held.id } });
     passengersAboard = Math.max(0, ship.passengersAboard - (offer.required_berths ?? 0));
-    await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
+  } else if (abandoned?.hostageBerths > 0) {
+    passengersAboard = Math.max(0, ship.passengersAboard - abandoned.hostageBerths);
+    await tx.abandonedMission.update({ where: { id: abandoned.id }, data: { hostageBerths: 0, reason: 'customs_seized' } });
   }
+  if (passengersAboard !== ship.passengersAboard) await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
 
   // The fine, a share of the offered reward, and the reputation: -mult × ΔR_base for the sponsor and the
   // faction governing the station (one loss, their sum, when they are the same).
@@ -117,11 +130,13 @@ export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) 
     const sponsor = missionFaction(offer);
     const base = Math.max(0, offer.reputation_change ?? 0);
     const station = isFactionId(claim.controllingFactionId) ? claim.controllingFactionId : null;
-    const losses = new Map([[sponsor, -Math.round(tier.sponsorRepMult * base)]]);
+    // What the abandon already charged the sponsor is returned, so the capture replaces it.
+    const abandonRefund = abandoned && abandoned.reason !== 'hostage_returned' ? Math.max(0, -abandoned.reputationLoss) : 0;
+    const losses = new Map([[sponsor, abandonRefund - Math.round(tier.sponsorRepMult * base)]]);
     if (station) losses.set(station, (losses.get(station) ?? 0) - Math.round(tier.stationRepMult * base));
     const [[sponsorId, sponsorDelta], second] = [...losses.entries()];
     await adjustMissionReputation(tx, playerId, sponsorId, sponsorDelta, second?.[0] ?? null, second?.[1] ?? 0, {
-      reason: LEDGER_REASONS.CUSTOMS_CAUGHT, missionId: held.missionId
+      reason: LEDGER_REASONS.CUSTOMS_CAUGHT, missionId: claim.missionId
     });
     for (const [factionId, delta] of losses) reputationChanges.push({ faction_id: factionId, delta });
   }
@@ -138,7 +153,8 @@ export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) 
   for (const member of ship.crew.filter((m) => m.morale > 0 && !m.detained)) {
     const quirkEffects = [];
     let morale = moraleAfterLoss(member, tier.moraleLoss, ship.traits);
-    const penalty = offer ? abandonPenalty(member, missionFaction(offer)) : null;
+    // (An abandoned mission's quirk penalty was taken when it was abandoned.)
+    const penalty = held ? abandonPenalty(member, missionFaction(offer)) : null;
     if (penalty) {
       morale = moraleAfterLoss({ ...member, morale }, penalty.moraleLoss, ship.traits);
       quirkEffects.push({ quirk: penalty.quirk, effect: 'MISSION_FAILED_INSPECTION', moraleLoss: penalty.moraleLoss });
@@ -188,7 +204,7 @@ export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) 
     capture_tier: claim.captureTier,
     inspection_outcome: claim.inspectionOutcome,
     mission_id: claim.missionId || null,
-    mission_failed: Boolean(held),
+    mission_failed: Boolean(offer),
     fine_credits: fine,
     ...(fine < fineDue && { fine_unpaid_credits: fineDue - fine }),
     credits: player.credits,
