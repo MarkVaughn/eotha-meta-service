@@ -15,9 +15,10 @@ const roundDiv = (numerator, denominator) => (2n * numerator + denominator) / (2
 /**
  * What clearing the export of the ore in `lots` (a stored hold) costs at a dock in `systemH3`, whose system
  * `factionId` controls, for a pilot at `standing` flying `activeColors`. The toll clears the lots mined in that very
- * system under the faction that controls it whose status is one the toll clears (ore that left it undeclared; poached ore is
- * not clearable); ore mined elsewhere, in free space, or already cleared or domestic is left alone. It is a share
- * (exportTollBp) of the baseline market value of the cleared ore, the sum of each lot's `item_value` rounded once.
+ * system under the faction that controls it whose status is one the toll clears (ore mined there legitimately, or
+ * left undeclared; poached ore is not clearable); ore mined elsewhere, in free space, or already cleared is left
+ * alone. It is a share (exportTollBp) of the baseline market value of the cleared ore, the sum of each lot's
+ * `item_value` rounded once.
  *
  * Returns `{ lots, cleared, valueCredits, tollBp, tollCredits }`: `lots` the hold with the cleared ones marked
  * EXPORT_CLEARED, `cleared` how many lots that was. `cleared` is 0 and `lots` the hold itself when nothing qualifies.

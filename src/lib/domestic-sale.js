@@ -13,6 +13,7 @@ import { LEDGER_REASONS, adjustReputation } from './reputation.js';
 // - `reputationMilli` counts the units (in milli-units) mined legally (DOMESTIC_OR_FREE), which earn standing;
 // - `poached` says whether any was poached (UNLICENSED_POACHED, or a status not known), which the amnesty charges for.
 // Ore that was cleared for export, or left the system undeclared, is neither: it earns nothing and owes nothing here.
+// (Clearing a legal lot for export turns it EXPORT_CLEARED, so it no longer earns standing at a home sale.)
 export function domesticOre(items, station) {
   const domestic = FACTION_IDS.includes(station?.factionId)
     ? items.filter((lot) => lot.originSystemH3 === station.systemH3 && lot.originFactionId === station.factionId)

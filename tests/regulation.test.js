@@ -132,9 +132,8 @@ describe('regulation tables', () => {
     assert.equal(planExportClearance([poached], { ...options, standing: 150 }).tollCredits, 22);
     assert.equal(planExportClearance([poached], { ...options, standing: 450 }).tollCredits, 11);
     assert.equal(planExportClearance([poached], { ...options, standing: 800 }).tollCredits, 0);
-    // Domestic, already cleared, other systems, other factions and legacy lots (no provenance) are left alone.
+    // Already cleared, poached, other systems, other factions and legacy lots (no provenance) are left alone.
     const untouched = [
-      lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'DOMESTIC_OR_FREE' }),
       lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'EXPORT_CLEARED' }),
       lot({ origin_system_h3: '8828308283fffff', origin_faction_id: 'alpha', customs_status: 'UNLICENSED_POACHED' }),
       lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'beta', customs_status: 'UNLICENSED_POACHED' }),
@@ -147,6 +146,15 @@ describe('regulation tables', () => {
     const mixed = planExportClearance([...untouched, poached, lot({ ...poached })], options);
     assert.equal(mixed.cleared, 2);
     assert.equal(mixed.tollCredits, 86);
+    // Ore the engine stamps DOMESTIC_OR_FREE (mined under a permit or an exemption) clears like the undeclared kind.
+    const legal = lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'DOMESTIC_OR_FREE' });
+    const cleared = planExportClearance([legal, ...untouched], options);
+    assert.deepEqual([cleared.cleared, cleared.valueCredits, cleared.tollCredits], [1, 360, 43]);
+    assert.equal(cleared.lots[0].customs_status, 'EXPORT_CLEARED');
+    assert.deepEqual(cleared.lots.slice(1), untouched);
+    // Legal ore of an independent system or of another faction's system is not this dock's to clear.
+    const others = [{ ...legal, origin_faction_id: '' }, { ...legal, origin_faction_id: 'beta' }, { ...legal, origin_system_h3: '8828308283fffff' }];
+    assert.equal(planExportClearance(others, options).cleared, 0);
   });
 });
 
@@ -318,29 +326,93 @@ describe('POST /game/factions/mining-permit', () => {
     assert.equal(json(res).cost_credits, 0);
   });
 
-  test('a repeat or a second receipt while the permit runs is answered with it and charged once', async () => {
+  test('a repeat of a redeemed receipt is answered with its first result and charged once', async () => {
     const pilot = await newPilot('Twice');
     await setCredits(pilot, 1000);
     const receipt = hailFor(pilot);
     const first = json(await buyPermit(pilot, receipt));
-    const again = await buyPermit(pilot, receipt);
-    assert.equal(again.statusCode, 200, again.body);
-    assert.equal(json(again).replayed, true);
-    assert.equal(json(again).cost_credits, 0);
-    assert.equal(json(again).permit.expires_at_ms, first.permit.expires_at_ms);
-    const other = json(await buyPermit(pilot, hailFor(pilot)));
-    assert.equal(other.replayed, true);
+    assert.equal(first.replayed, false);
+    for (let i = 0; i < 2; i++) {
+      const again = await buyPermit(pilot, receipt);
+      assert.equal(again.statusCode, 200, again.body);
+      assert.equal(json(again).replayed, true);
+      assert.equal(json(again).cost_credits, 0);
+      assert.equal(json(again).permit.expires_at_ms, first.permit.expires_at_ms);
+      assert.deepEqual(tokenFactions(again).mining_permits, { [SYSTEM]: first.permit.expires_at_ms });
+    }
     assert.equal(await creditsOf(pilot), 600);
+    assert.equal((await permitRows(pilot)).length, 1);
+    assert.equal(await app.prisma.miningPermitRedemption.count({ where: { playerId: pilot.id } }), 1);
+  });
+
+  test('a new receipt for a running permit renews it to 2 hours from now and charges the tier price', async () => {
+    const pilot = await newPilot('Renewing');
+    await setCredits(pilot, 1000);
+    const first = json(await buyPermit(pilot, hailFor(pilot)));
+    // The first permit has 5 minutes left.
+    await app.prisma.systemMiningPermit.updateMany({ where: { playerId: pilot.id }, data: { expiresAt: new Date(Date.now() + 300_000) } });
+    const before = Date.now();
+    const renewed = await buyPermit(pilot, hailFor(pilot));
+    assert.equal(renewed.statusCode, 200, renewed.body);
+    const body = json(renewed);
+    assert.equal(body.replayed, false);
+    assert.equal(body.cost_credits, 400);
+    assert.ok(body.permit.expires_at_ms >= before + 2 * 3_600_000 && body.permit.expires_at_ms <= Date.now() + 2 * 3_600_000);
+    assert.ok(body.permit.expires_at_ms > first.permit.expires_at_ms);
+    assert.deepEqual(tokenFactions(renewed).mining_permits, { [SYSTEM]: body.permit.expires_at_ms });
+    assert.equal(await creditsOf(pilot), 200);
     assert.equal((await permitRows(pilot)).length, 1);
   });
 
-  test('concurrent purchases charge once', async () => {
+  test('a redeemed receipt cannot buy a second permit once the first has expired, nor after a later receipt', async () => {
+    const pilot = await newPilot('Across');
+    await setCredits(pilot, 2000);
+    const receipt = hailFor(pilot);
+    const first = json(await buyPermit(pilot, receipt));
+    await app.prisma.systemMiningPermit.updateMany({ where: { playerId: pilot.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    const across = await buyPermit(pilot, receipt);
+    assert.equal(across.statusCode, 200, across.body);
+    assert.equal(json(across).replayed, true);
+    assert.equal(json(across).cost_credits, 0);
+    assert.equal(json(across).permit.expires_at_ms, first.permit.expires_at_ms);
+    assert.equal(await creditsOf(pilot), 1600);
+    assert.deepEqual(tokenFactions(across).mining_permits, {});
+    // Nor does a later receipt's renewal reopen the earlier one.
+    const second = json(await buyPermit(pilot, hailFor(pilot)));
+    assert.equal(second.replayed, false);
+    assert.equal(await creditsOf(pilot), 1200);
+    const old = json(await buyPermit(pilot, receipt));
+    assert.equal(old.replayed, true);
+    assert.equal(old.permit.expires_at_ms, first.permit.expires_at_ms);
+    assert.equal(await creditsOf(pilot), 1200);
+    assert.equal((await permitRows(pilot))[0].expiresAt.getTime(), second.permit.expires_at_ms);
+  });
+
+  test('a refused receipt stays unspent: it buys the permit once the pilot can afford it', async () => {
+    const pilot = await newPilot('Unspent');
+    await setCredits(pilot, 100);
+    const receipt = hailFor(pilot);
+    assert.equal((await buyPermit(pilot, receipt)).statusCode, 402);
+    assert.equal(await app.prisma.miningPermitRedemption.count({ where: { playerId: pilot.id } }), 0);
+    await setCredits(pilot, 400);
+    const res = await buyPermit(pilot, receipt);
+    assert.equal(json(res).replayed, false);
+    assert.equal(await creditsOf(pilot), 0);
+  });
+
+  test('concurrent relays of one receipt charge once; distinct receipts each buy', async () => {
     const pilot = await newPilot('Race');
-    await setCredits(pilot, 1000);
-    const results = await Promise.all([1, 2, 3, 4].map(() => buyPermit(pilot, hailFor(pilot))));
+    await setCredits(pilot, 1200);
+    const receipt = hailFor(pilot);
+    const results = await Promise.all([1, 2, 3, 4].map(() => buyPermit(pilot, receipt)));
     assert.deepEqual(results.map((r) => r.statusCode), [200, 200, 200, 200]);
     assert.equal(results.filter((r) => !json(r).replayed).length, 1);
-    assert.equal(await creditsOf(pilot), 600);
+    assert.equal(await creditsOf(pilot), 800);
+    const distinct = await Promise.all([1, 2].map(() => buyPermit(pilot, hailFor(pilot))));
+    assert.deepEqual(distinct.map((r) => [r.statusCode, json(r).replayed]), [[200, false], [200, false]]);
+    assert.equal(await creditsOf(pilot), 0);
+    assert.equal((await permitRows(pilot)).length, 1);
+    assert.equal(await app.prisma.miningPermitRedemption.count({ where: { playerId: pilot.id } }), 3);
   });
 
   test('an expired permit is renewed and charged again; each system has its own', async () => {
@@ -432,7 +504,10 @@ describe('POST /game/factions/mining-violation', () => {
     assert.equal(await standingOf(pilot, 'alpha'), 90);
     assert.equal(body.standings.alpha, 90);
     assert.ok(body.flagged_until_ms >= before + 3_600_000 && body.flagged_until_ms <= Date.now() + 3_600_000);
-    assert.deepEqual(tokenFactions(res).customs_flagged, { faction_id: 'alpha', until_ms: body.flagged_until_ms });
+    const claim = tokenFactions(res);
+    assert.equal(claim.customs_flagged_until_ms, body.flagged_until_ms);
+    assert.equal(claim.customs_flagged_faction_id, 'alpha');
+    assert.equal('customs_flagged' in claim, false);
     const ledger = await app.prisma.reputationLedger.findMany({ where: { playerId: pilot.id, reason: 'MINING_VIOLATION' } });
     assert.equal(ledger.length, 1);
     assert.equal(ledger[0].factionDelta, -10);
@@ -472,15 +547,48 @@ describe('POST /game/factions/mining-violation', () => {
     assert.ok(json(res).flagged_until_ms > Date.now() + 3_500_000);
   });
 
-  test('another notice extends a running flag and never shortens it; a flag may move to another faction', async () => {
+  test('another notice extends a running flag and never shortens it', async () => {
     const pilot = await newPilot('Flagged');
     const first = json(await reportViolation(pilot, violationFor(pilot)));
     await app.prisma.player.update({ where: { id: pilot.id }, data: { customsFlaggedUntil: new Date(first.flagged_until_ms + 3_600_000) } });
-    const second = json(await reportViolation(pilot, violationFor(pilot, { controllingFactionId: 'beta', systemH3: OTHER_SYSTEM })));
-    assert.equal(second.flagged_until_ms, first.flagged_until_ms + 3_600_000);
+    const second = await reportViolation(pilot, violationFor(pilot));
+    assert.equal(json(second).flagged_until_ms, first.flagged_until_ms + 3_600_000);
+    // The same faction citing again keeps the flag at that faction's docks.
+    assert.equal(tokenFactions(second).customs_flagged_faction_id, 'alpha');
+    assert.equal(await standingOf(pilot, 'alpha'), -20);
+  });
+
+  test('a second faction citing the pilot inside the hour cites them at every faction\'s docks', async () => {
+    const pilot = await newPilot('Doubly');
+    const first = json(await reportViolation(pilot, violationFor(pilot)));
+    assert.equal((await app.prisma.player.findUnique({ where: { id: pilot.id } })).customsFlaggedFactionId, 'alpha');
+    const res = await reportViolation(pilot, violationFor(pilot, { controllingFactionId: 'beta', systemH3: OTHER_SYSTEM }));
+    const second = json(res);
     assert.equal(second.faction_id, 'beta');
+    assert.equal(second.flagged_until_ms >= first.flagged_until_ms, true);
     assert.equal(await standingOf(pilot, 'alpha'), -10);
     assert.equal(await standingOf(pilot, 'beta'), -10);
+    const player = await app.prisma.player.findUnique({ where: { id: pilot.id } });
+    assert.equal(player.customsFlaggedFactionId, null);
+    assert.equal(player.customsFlaggedUntil.getTime(), second.flagged_until_ms);
+    const claim = tokenFactions(res);
+    assert.equal(claim.customs_flagged_until_ms, second.flagged_until_ms);
+    assert.equal('customs_flagged_faction_id' in claim, false);
+    // It stays an all-faction citation when either faction cites again, or a third does.
+    for (const factionId of ['alpha', 'gamma']) {
+      const again = await reportViolation(pilot, violationFor(pilot, { controllingFactionId: factionId }));
+      assert.equal('customs_flagged_faction_id' in tokenFactions(again), false, factionId);
+    }
+    assert.equal((await app.prisma.player.findUnique({ where: { id: pilot.id } })).customsFlaggedFactionId, null);
+  });
+
+  test('a citation that has lapsed is replaced by the faction of the next notice', async () => {
+    const pilot = await newPilot('Lapsing');
+    await reportViolation(pilot, violationFor(pilot));
+    await app.prisma.player.update({ where: { id: pilot.id }, data: { customsFlaggedUntil: new Date(Date.now() - 1000) } });
+    const res = await reportViolation(pilot, violationFor(pilot, { controllingFactionId: 'beta', systemH3: OTHER_SYSTEM }));
+    assert.equal(tokenFactions(res).customs_flagged_faction_id, 'beta');
+    assert.equal((await app.prisma.player.findUnique({ where: { id: pilot.id } })).customsFlaggedFactionId, 'beta');
   });
 
   test('refuses a forged, foreign, independent or future-dated notice and changes nothing', async () => {
@@ -515,7 +623,10 @@ describe('POST /game/factions/mining-violation', () => {
     const pilot = await newPilot('Cleared');
     await reportViolation(pilot, violationFor(pilot));
     await app.prisma.player.update({ where: { id: pilot.id }, data: { customsFlaggedUntil: new Date(Date.now() - 1000) } });
-    assert.equal(tokenFactions(await call(pilot, 'POST', '/game/cargo/lease')).customs_flagged, null);
+    const claim = tokenFactions(await call(pilot, 'POST', '/game/cargo/lease'));
+    assert.equal(claim.customs_flagged_until_ms, 0);
+    assert.equal('customs_flagged_faction_id' in claim, false);
+    assert.equal('customs_flagged' in claim, false);
   });
 });
 
@@ -541,14 +652,14 @@ describe('POST /game/cargo/clear-export', () => {
   test('clears the dock\'s undeclared ore at the tier toll, as a new lease the token carries', async () => {
     const pilot = await newPilot('Exporter');
     await setCredits(pilot, 500);
-    const session = await stockHold(pilot, [CLEARABLE, UNDECLARED, DOMESTIC, ELSEWHERE]);
+    const session = await stockHold(pilot, [CLEARABLE, UNDECLARED, ELSEWHERE]);
     const res = await clearExport(pilot, dockedAt(pilot, randomUUID(), 'alpha'));
     assert.equal(res.statusCode, 200, res.body);
     const body = json(res);
     // 10 + 20 units of grade 4, 80% purity, at 25 each: 360 + 720 = 1080; 12% is 129.6.
     assert.deepEqual([body.cleared_lots, body.value_credits, body.toll_bp, body.toll_credits, body.credits], [2, 1080, 1200, 130, 370]);
     assert.equal(await creditsOf(pilot), 370);
-    assert.deepEqual(body.cargo.lots.map((l) => l.customs_status), ['EXPORT_CLEARED', 'EXPORT_CLEARED', 'DOMESTIC_OR_FREE', 'UNLICENSED_POACHED']);
+    assert.deepEqual(body.cargo.lots.map((l) => l.customs_status), ['EXPORT_CLEARED', 'EXPORT_CLEARED', 'UNLICENSED_POACHED']);
     assert.notEqual(body.cargo.lease_id, session.leaseId);
     assert.equal(body.cargo.generation, 2);
     const claim = app.jwt.verify(body.token).cargo;
@@ -560,6 +671,23 @@ describe('POST /game/cargo/clear-export', () => {
     const stale = await call(pilot, 'POST', '/game/cargo/manifest', { manifest: manifestFor(pilot, session.leaseId, session.sessionId, 5, [CLEARABLE]) });
     assert.notEqual(stale.statusCode, 200, stale.body);
     assert.deepEqual((await holdOf(pilot)).lots, body.cargo.lots);
+  });
+
+  test('clears ore the engine stamps DOMESTIC_OR_FREE, and leaves the poached ore beside it', async () => {
+    const pilot = await newPilot('Licensed');
+    await setCredits(pilot, 500);
+    await stockHold(pilot, [DOMESTIC, POACHED]);
+    const res = await clearExport(pilot, dockedAt(pilot, randomUUID(), 'alpha'));
+    assert.equal(res.statusCode, 200, res.body);
+    const body = json(res);
+    assert.deepEqual([body.cleared_lots, body.value_credits, body.toll_credits, body.credits], [1, 360, 43, 457]);
+    assert.deepEqual(body.cargo.lots.map((l) => l.customs_status), ['EXPORT_CLEARED', 'UNLICENSED_POACHED']);
+    assert.deepEqual((await holdOf(pilot)).lots, body.cargo.lots);
+    // Cleared once: the same dock has nothing more to clear, and the poached lot is never cleared by the toll.
+    const again = await clearExport(pilot, dockedAt(pilot, randomUUID(), 'alpha'));
+    assert.equal(again.statusCode, 409, again.body);
+    assert.equal(codeOf(again), 'nothing_to_clear');
+    assert.equal(await creditsOf(pilot), 457);
   });
 
   test('poached ore is not cleared by the toll and answers nothing_to_clear', async () => {

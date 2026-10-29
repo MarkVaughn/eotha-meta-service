@@ -39,10 +39,11 @@ model Player {
   customsSeizures CustomsSeizure[]
   stationLockouts StationLockout[]
   miningPermits SystemMiningPermit[]
+  miningPermitRedemptions MiningPermitRedemption[]
   miningViolations MiningViolation[]
   // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
   // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
-  // was relayed. Signed into the token's `factions.customs_flagged` claim, so a reconnect cannot shed it.
+  // was relayed. Signed into the token's `factions.customs_flagged_*` claim, so a reconnect cannot shed it.
   customsFlaggedFactionId String?
   customsFlaggedUntil DateTime?
   // The faction whose colors the pilot flies (src/config/factions.js FACTION_IDS), or null. Set while
@@ -354,8 +355,8 @@ model PlayerReputation {
 }
 
 // A 2 hour mining permit the pilot bought by hailing a station of the faction that controls `systemH3`
-// (POST /game/factions/mining-permit). One row per (pilot, system); buying again once it has expired
-// renews it. Signed into the token's `factions.mining_permits` claim while it is unexpired.
+// (POST /game/factions/mining-permit). One row per (pilot, system); each further purchase renews it to 2 hours
+// from then. Signed into the token's `factions.mining_permits` claim while it is unexpired.
 model SystemMiningPermit {
   id        String   @id @default(uuid()) @db.Uuid
   playerId  String   @db.Uuid
@@ -367,6 +368,21 @@ model SystemMiningPermit {
 
   @@unique([playerId, systemH3])
   @@index([playerId, expiresAt])
+}
+
+// A station hail receipt redeemed for a mining permit, once per nonce, so a repeat of the receipt answers with
+// this permit (`expiresAt` as granted) and charges nothing, and a spent receipt cannot buy another permit.
+model MiningPermitRedemption {
+  id        String   @id @default(uuid()) @db.Uuid
+  playerId  String   @db.Uuid
+  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  nonce     String   // hex of the receipt's 16 nonce bytes
+  systemH3  String   @db.VarChar(15)
+  factionId String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([playerId, nonce])
 }
 
 // A mining violation notice the engine signed when the pilot's Patrol Alert filled, applied once per nonce

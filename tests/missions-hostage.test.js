@@ -12,7 +12,7 @@ import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 import { missionOfferVersion } from '../src/lib/mission-offer.js';
 import { accruedPenalty, basePenalty, disembarkPlace, hostageState } from '../src/lib/hostage.js';
 
-const F5_EMPTY = { mining_permits: {}, active_lockouts: [], customs_flagged: null };
+const F5_EMPTY = { mining_permits: {}, active_lockouts: [], customs_flagged_until_ms: 0 };
 before(async () => { await app.ready(); });
 after(closeApp);
 

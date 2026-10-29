@@ -83,9 +83,11 @@ export const CUSTOMS_STATUS = Object.freeze({
 });
 const KNOWN_STATUSES = new Set(['', ...Object.values(CUSTOMS_STATUS)]);
 
-// The one status the toll clears: ore legitimately mined under a permit that leaves the system without its toll paid.
-// Poached ore is not clearable; it meets the amnesty or seizure instead.
-export const isClearableStatus = (status) => status === CUSTOMS_STATUS.PERMITTED_UNDECLARED_EXPORT;
+// The statuses the toll clears: ore legitimately mined in the system, which the engine stamps DOMESTIC_OR_FREE when
+// the pilot holds a permit or an exemption, and ore that left it undeclared. Poached ore is not clearable; it meets
+// the amnesty or seizure instead.
+export const isClearableStatus = (status) =>
+  status === CUSTOMS_STATUS.DOMESTIC_OR_FREE || status === CUSTOMS_STATUS.PERMITTED_UNDECLARED_EXPORT;
 
 // Poached ore is what the engine calls UNLICENSED_POACHED, and, as the contract says, any status this service does
 // not know: a reader that does not know a value treats the lot as it treats the strictest.

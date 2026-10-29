@@ -5,7 +5,7 @@ import { app, call, closeApp, dockedReceipt, json, newPilot, receiptAtOrigin, rt
 import { clampStandingsWithCaps, withColorsBonus } from '../src/config/factions.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 
-const F5_EMPTY = { mining_permits: {}, active_lockouts: [], customs_flagged: null };
+const F5_EMPTY = { mining_permits: {}, active_lockouts: [], customs_flagged_until_ms: 0 };
 const setStanding = (pilot, factionId, standing) =>
   app.prisma.playerReputation.upsert({
     where: { playerId_factionId: { playerId: pilot.id, factionId } },
