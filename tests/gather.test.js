@@ -10,7 +10,8 @@ import { canonicalMissionOfferPayload, verifyMissionOffer } from '../src/lib/mis
 const OFFER_SIGNATURE =
   'KMm99/Mjtr4Y+qEpQcH5opDtHklAsNkdUCRoviYwAun2XDW649YauJVgz0yuD56XfsymYQeV1cyYHj9fJXDBCA==';
 const CLAIM_VECTOR =
-  '454f5448415f4d495353494f4e5f434c41494d5f5631020000006d310400000073686970020000007374a0eee6cf8b0100008082ebcf8b010000881300000000000005000000111111111111111111111111111111112222222222222222222222222222222209000000000000000100000008000000544954414e49554d9411000004000000401f0000';
+  '454f5448415f4d495353494f4e5f434c41494d5f5633020000006d310400000073686970020000007374a0eee6cf8b0100008082ebcf8b010000881300000000000005000000111111111111111111111111111111112222222222222222222222222222222209000000000000000100000008000000544954414e49554d9411000004000000401f0000' +
+  '0f000000383832383330383238316666666666040000006265746112000000554e4c4943454e5345445f504f4143484544';
 const vectorKey = createPrivateKey({
   key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, 7)]),
   format: 'der',
@@ -102,11 +103,13 @@ describe('gather offer verifier', () => {
       leaseId: '11111111-1111-1111-1111-111111111111',
       sessionId: '22222222-2222-2222-2222-222222222222',
       cargoSeq: 9,
-      remaining: [{ resourceType: 'TITANIUM', unitsMilli: 4500, grade: 4, purityBp: 8000 }]
+      remaining: [{ resourceType: 'TITANIUM', unitsMilli: 4500, grade: 4, purityBp: 8000, originSystemH3: '8828308281fffff', originFactionId: 'beta', customsStatus: 'UNLICENSED_POACHED' }]
     };
     assert.equal(canonicalClaimPayload(claim, true).toString('hex'), CLAIM_VECTOR);
-    // Without the flag the suffix is not signed.
-    assert.equal(CLAIM_VECTOR.startsWith(canonicalClaimPayload(claim).toString('hex')), true);
+    // Without the flag the suffix is not signed, and the domain is the V1 one.
+    const v1 = canonicalClaimPayload(claim).toString('hex');
+    assert.equal(CLAIM_VECTOR.slice(44).startsWith(v1.slice(44)), true);
+    assert.equal(Buffer.from(v1.slice(0, 44), 'hex').toString(), 'EOTHA_MISSION_CLAIM_V1');
   });
 });
 
@@ -166,11 +169,14 @@ function gatherClaim(pilot, active, cargo, overrides = {}, key = rtseKey) {
   };
   claim.durationTakenMs = claim.completedAtMs - claim.acceptedAtMs;
   const bytes = [
-    Buffer.from('EOTHA_MISSION_CLAIM_V1', 'ascii'),
+    Buffer.from('EOTHA_MISSION_CLAIM_V3', 'ascii'),
     str(claim.missionId), str(claim.playerShipId), str(claim.destinationStationId),
     u64(claim.acceptedAtMs), u64(claim.completedAtMs), u64(claim.rewardCredits), i32(claim.reputationChange),
     id(claim.leaseId), id(claim.sessionId), u64(claim.cargoSeq), u32(claim.remaining.length),
-    ...claim.remaining.flatMap((lot) => [str(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp)])
+    ...claim.remaining.flatMap((lot) => [
+      str(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp),
+      str(lot.originSystemH3 ?? ''), str(lot.originFactionId ?? ''), str(lot.customsStatus ?? '')
+    ])
   ];
   claim.signature = sign(null, Buffer.concat(bytes), key).toString('base64');
   return claim;
@@ -183,7 +189,12 @@ const lease = async (pilot) => {
   return json(res).cargo.lease_id;
 };
 const held = async (pilot) => json(await call(pilot, 'GET', '/game/cargo'));
-const stored = (lot) => ({ resource_type: lot.resourceType, units_milli: lot.unitsMilli, grade: lot.grade, purity_bp: lot.purityBp });
+const stored = (lot) => ({
+  resource_type: lot.resourceType, units_milli: lot.unitsMilli, grade: lot.grade, purity_bp: lot.purityBp,
+  ...(lot.originSystemH3 ? { origin_system_h3: lot.originSystemH3 } : {}),
+  ...(lot.originFactionId ? { origin_faction_id: lot.originFactionId } : {}),
+  ...(lot.customsStatus ? { customs_status: lot.customsStatus } : {})
+});
 const LEFTOVER = { resourceType: 'TITANIUM', unitsMilli: 4500, grade: 4, purityBp: 8000 };
 
 describe('gather missions', () => {

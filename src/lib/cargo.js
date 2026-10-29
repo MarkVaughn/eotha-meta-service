@@ -1,9 +1,12 @@
 import { verify } from 'node:crypto';
 import { CARGO_MAX_LOTS } from '../config/cargo.js';
+import { H3_PATTERN } from '../config/patterns.js';
 import { DOCKED_ENTITY_ID_PATTERN, NONCE_B64_PATTERN, SIGNATURE_B64_PATTERN } from './docked-receipt.js';
 
-export const CARGO_MANIFEST_DOMAIN = Buffer.from('EOTHA_CARGO_MANIFEST_V1', 'utf8'); // 23 bytes
-export const SALE_RECORD_DOMAIN = Buffer.from('EOTHA_SALE_RECORD_V2', 'utf8'); // 20 bytes
+// V1 and V2 lots carried no provenance. A verifier checks V2 and V3 only and never falls back, since accepting an
+// older signature would let a pilot strip a lot's origin and customs status.
+export const CARGO_MANIFEST_DOMAIN = Buffer.from('EOTHA_CARGO_MANIFEST_V2', 'utf8'); // 23 bytes
+export const SALE_RECORD_DOMAIN = Buffer.from('EOTHA_SALE_RECORD_V3', 'utf8'); // 20 bytes
 
 // What `applyCargoWrite` decided about a record (eotha-contracts README, "Cargo lease claim").
 export const CARGO_WRITE = Object.freeze({
@@ -56,12 +59,17 @@ export function bytesToUuid(bytes) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-// `CargoLot` layout: lp(resource_type) || u32le(units_milli) || u32le(grade) || u32le(purity_bp),
-// the list prefixed with its u32le count.
-function lotsPayload(lots) {
+// `CargoLot` layout: lp(resource_type) || u32le(units_milli) || u32le(grade) || u32le(purity_bp) ||
+// lp(origin_system_h3) || lp(origin_faction_id) || lp(customs_status), the list prefixed with its u32le count. An
+// empty provenance string is a valid signed value (a zero length prefix); proto-JSON omits it, hence the defaults.
+// The gather mission claim signs its `remaining` lots in this same layout (see src/lib/mission-claim.js).
+export function lotsPayload(lots) {
   return Buffer.concat([
     u32(lots.length),
-    ...lots.flatMap((lot) => [lenPrefixed(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp)])
+    ...lots.flatMap((lot) => [
+      lenPrefixed(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp ?? 0),
+      lenPrefixed(lot.originSystemH3 ?? ''), lenPrefixed(lot.originFactionId ?? ''), lenPrefixed(lot.customsStatus ?? '')
+    ])
   ]);
 }
 
@@ -81,7 +89,7 @@ export function canonicalCargoManifestPayload(manifest) {
   ]);
 }
 
-// Mirrors the `SaleRecord` V2 layout in eotha-contracts `rtse/v1/simulation.proto` and the vector in
+// Mirrors the `SaleRecord` V3 layout in eotha-contracts `rtse/v1/simulation.proto` and the vector in
 // `scripts/check-sale-record-vector.js`. `record` carries { pilotId, stationId, items, totalCredits,
 // soldAtMs, nonce (base64, 16 bytes), leaseId, sessionId, seq, remaining }. Throws on a malformed
 // field; `verifySaleRecord` is the caller that never does.
@@ -121,14 +129,25 @@ export const verifyCargoManifest = (manifest, publicKey) =>
 // `signature` is the base64-encoded 64-byte Ed25519 signature. Never throws.
 export const verifySaleRecord = (record, publicKey) => verifySigned(record, publicKey, canonicalSaleRecordPayload);
 
-// Signed lots (camelCase, as relayed) in the stored and lease-claim form (snake_case).
+// Signed lots (camelCase, as relayed) in the stored and lease-claim form (snake_case). The provenance keys are kept
+// only when set, so a lot from before provenance (or without any) stays four keys and reads back as empty strings.
 export const toStoredLots = (lots) =>
   lots.map((lot) => ({
     resource_type: lot.resourceType,
     units_milli: lot.unitsMilli,
     grade: lot.grade,
-    purity_bp: lot.purityBp
+    purity_bp: lot.purityBp ?? 0,
+    ...(lot.originSystemH3 && { origin_system_h3: lot.originSystemH3 }),
+    ...(lot.originFactionId && { origin_faction_id: lot.originFactionId }),
+    ...(lot.customsStatus && { customs_status: lot.customsStatus })
   }));
+
+// A stored lot's provenance, '' for what it does not carry.
+export const provenanceOf = (stored) => ({
+  originSystemH3: stored.origin_system_h3 ?? '',
+  originFactionId: stored.origin_faction_id ?? '',
+  customsStatus: stored.customs_status ?? ''
+});
 
 // Volume of a stored hold in m3.
 export const usedM3 = (lots) => lots.reduce((sum, lot) => sum + lot.units_milli, 0) / 1000;
@@ -174,8 +193,13 @@ const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 const uint32 = { type: 'integer', minimum: 0, maximum: 4_294_967_295 };
 const uuid = { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN };
 
+// The factions a lot's origin may name: the three, or `independent` for free space. Empty is a lot from before
+// provenance, which the engine signs as a zero length prefix.
+const ORIGIN_FACTION_IDS = ['', 'alpha', 'beta', 'gamma', 'independent'];
+
 // A `CargoLot` (eotha-contracts `rtse/v1/cargo.proto`) as proto-JSON. Proto-JSON may omit a field
-// holding its zero value, so purity defaults to it.
+// holding its zero value, so purity and each provenance field default to it. `customsStatus` is an open string: a
+// later value needs no schema change here.
 export const cargoLotSchema = {
   type: 'object',
   additionalProperties: false,
@@ -184,7 +208,10 @@ export const cargoLotSchema = {
     resourceType: { type: 'string', minLength: 1, maxLength: 32 },
     unitsMilli: uint32,
     grade: { type: 'integer', minimum: 1, maximum: 5 },
-    purityBp: { type: 'integer', minimum: 0, maximum: 10_000, default: 0 }
+    purityBp: { type: 'integer', minimum: 0, maximum: 10_000, default: 0 },
+    originSystemH3: { type: 'string', pattern: `^$|${H3_PATTERN}`, default: '' },
+    originFactionId: { type: 'string', enum: ORIGIN_FACTION_IDS, default: '' },
+    customsStatus: { type: 'string', maxLength: 64, default: '' }
   }
 };
 
@@ -207,7 +234,7 @@ export const cargoManifestSchema = {
   }
 };
 
-// The `saleRecord` of a request body: a `SaleRecord` (V2), ids as lowercase hyphenated UUIDs.
+// The `saleRecord` of a request body: a `SaleRecord` (V3), ids as lowercase hyphenated UUIDs.
 export const saleRecordSchema = {
   type: 'object',
   additionalProperties: false,

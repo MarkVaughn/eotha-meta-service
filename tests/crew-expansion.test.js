@@ -372,7 +372,7 @@ const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
 const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
 const str = (s) => Buffer.concat([u32(Buffer.byteLength(s)), Buffer.from(s, 'utf8')]);
 const uuidBytes = (uuid) => Buffer.from(uuid.replaceAll('-', ''), 'hex');
-const lotBytes = (lots) => [u32(lots.length), ...lots.flatMap((l) => [str(l.resourceType), u32(l.unitsMilli), u32(l.grade), u32(l.purityBp)])];
+const lotBytes = (lots) => [u32(lots.length), ...lots.flatMap((l) => [str(l.resourceType), u32(l.unitsMilli), u32(l.grade), u32(l.purityBp), str(l.originSystemH3 ?? ''), str(l.originFactionId ?? ''), str(l.customsStatus ?? '')])];
 const ORE = { resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8000 };
 
 function saleFor(pilot, leaseId, totalCredits) {
@@ -381,7 +381,7 @@ function saleFor(pilot, leaseId, totalCredits) {
     nonce: randomBytes(16).toString('base64'), leaseId, sessionId: randomUUID(), seq: 1, remaining: []
   };
   const bytes = Buffer.concat([
-    Buffer.from('EOTHA_SALE_RECORD_V2', 'ascii'), str(fields.pilotId), str(fields.stationId), ...lotBytes(fields.items),
+    Buffer.from('EOTHA_SALE_RECORD_V3', 'ascii'), str(fields.pilotId), str(fields.stationId), ...lotBytes(fields.items),
     u64(fields.totalCredits), u64(fields.soldAtMs), Buffer.from(fields.nonce, 'base64'), uuidBytes(fields.leaseId),
     uuidBytes(fields.sessionId), u64(fields.seq), ...lotBytes(fields.remaining)
   ]);

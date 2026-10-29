@@ -13,11 +13,16 @@ import { MAX_REWARD_CREDITS } from '../src/config/missions.js';
 // The fixed vectors from eotha-contracts `scripts/check-cargo-manifest-vector.js` and
 // `scripts/check-sale-record-vector.js` (lease id 0x11 x16, session id 0x22 x16).
 const MANIFEST_VECTOR =
-  '454f5448415f434152474f5f4d414e49464553545f56310700000070696c6f742d311111111111111111111111111111111122222222222222222222222222222222070000000000000002000000070000004645525249544584030000010000008025000008000000544954414e49554dd430000004000000401f00000068e5cf8b010000';
+  '454f5448415f434152474f5f4d414e49464553545f56320700000070696c6f742d31111111111111111111111111111111112222222222222222222222222222222207000000000000000200000007000000464552524954458403000001000000802500000f000000383832383330383238316666666666040000006265746110000000444f4d45535449435f4f525f4652454508000000544954414e49554dd430000004000000401f00000f0000003838323833303832383366666666660b000000696e646570656e64656e7412000000554e4c4943454e5345445f504f41434845440068e5cf8b010000';
 const SALE_VECTOR =
-  '454f5448415f53414c455f5245434f52445f56320700000070696c6f742d310900000073746174696f6e2d3102000000070000004645525249544584030000010000008025000008000000544954414e49554dc409000003000000922200003d000000000000000068e5cf8b010000abababababababababababababababab111111111111111111111111111111112222222222222222222222222222222208000000000000000100000008000000544954414e49554dd430000004000000401f0000';
+  '454f5448415f53414c455f5245434f52445f56330700000070696c6f742d310900000073746174696f6e2d310200000007000000464552524954458403000001000000802500000f000000383832383330383238316666666666040000006265746110000000444f4d45535449435f4f525f4652454508000000544954414e49554dc409000003000000922200000f0000003838323833303832383366666666660b000000696e646570656e64656e7412000000554e4c4943454e5345445f504f41434845443d000000000000000068e5cf8b010000abababababababababababababababab111111111111111111111111111111112222222222222222222222222222222208000000000000000100000008000000544954414e49554dd430000004000000401f00000f0000003838323833303832383566666666660500000067616d6d610e0000004558504f52545f434c4541524544';
 const VECTOR_LEASE = '11111111-1111-1111-1111-111111111111';
 const VECTOR_SESSION = '22222222-2222-2222-2222-222222222222';
+
+// Lot provenance from the contract vectors (`originSystemH3`, `originFactionId`, `customsStatus`).
+const BETA_FREE = { originSystemH3: '8828308281fffff', originFactionId: 'beta', customsStatus: 'DOMESTIC_OR_FREE' };
+const INDEPENDENT_POACHED = { originSystemH3: '8828308283fffff', originFactionId: 'independent', customsStatus: 'UNLICENSED_POACHED' };
+const GAMMA_CLEARED = { originSystemH3: '8828308285fffff', originFactionId: 'gamma', customsStatus: 'EXPORT_CLEARED' };
 
 const vectorManifest = () => ({
   pilotId: 'pilot-1',
@@ -25,8 +30,8 @@ const vectorManifest = () => ({
   sessionId: VECTOR_SESSION,
   seq: 7,
   lots: [
-    { resourceType: 'FERRITE', unitsMilli: 900, grade: 1, purityBp: 9600 },
-    { resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8000 }
+    { resourceType: 'FERRITE', unitsMilli: 900, grade: 1, purityBp: 9600, ...BETA_FREE },
+    { resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8000, ...INDEPENDENT_POACHED }
   ],
   issuedAtMs: 1700000000000
 });
@@ -35,8 +40,8 @@ const vectorSale = () => ({
   pilotId: 'pilot-1',
   stationId: 'station-1',
   items: [
-    { resourceType: 'FERRITE', unitsMilli: 900, grade: 1, purityBp: 9600 },
-    { resourceType: 'TITANIUM', unitsMilli: 2500, grade: 3, purityBp: 8850 }
+    { resourceType: 'FERRITE', unitsMilli: 900, grade: 1, purityBp: 9600, ...BETA_FREE },
+    { resourceType: 'TITANIUM', unitsMilli: 2500, grade: 3, purityBp: 8850, ...INDEPENDENT_POACHED }
   ],
   totalCredits: 61,
   soldAtMs: 1700000000000,
@@ -44,7 +49,7 @@ const vectorSale = () => ({
   leaseId: VECTOR_LEASE,
   sessionId: VECTOR_SESSION,
   seq: 8,
-  remaining: [{ resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8000 }]
+  remaining: [{ resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8000, ...GAMMA_CLEARED }]
 });
 
 const vectorKey = createPrivateKey({
@@ -69,18 +74,21 @@ const str = (s) => Buffer.concat([u32(Buffer.byteLength(s)), Buffer.from(s, 'utf
 const id = (uuid) => Buffer.from(uuid.replaceAll('-', ''), 'hex');
 const lotBytes = (lots) => [
   u32(lots.length),
-  ...lots.flatMap((lot) => [str(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp)])
+  ...lots.flatMap((lot) => [
+    str(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp),
+    str(lot.originSystemH3 ?? ''), str(lot.originFactionId ?? ''), str(lot.customsStatus ?? '')
+  ])
 ];
 
 const manifestBytes = (m) =>
   Buffer.concat([
-    Buffer.from('EOTHA_CARGO_MANIFEST_V1', 'ascii'),
+    Buffer.from('EOTHA_CARGO_MANIFEST_V2', 'ascii'),
     str(m.pilotId), id(m.leaseId), id(m.sessionId), u64(m.seq), ...lotBytes(m.lots), u64(m.issuedAtMs)
   ]);
 
 const saleBytes = (r) =>
   Buffer.concat([
-    Buffer.from('EOTHA_SALE_RECORD_V2', 'ascii'),
+    Buffer.from('EOTHA_SALE_RECORD_V3', 'ascii'),
     str(r.pilotId), str(r.stationId), ...lotBytes(r.items), u64(r.totalCredits), u64(r.soldAtMs),
     Buffer.from(r.nonce, 'base64'), id(r.leaseId), id(r.sessionId), u64(r.seq), ...lotBytes(r.remaining)
   ]);
@@ -91,7 +99,12 @@ const ORE = { resourceType: 'TITANIUM', unitsMilli: 12500, grade: 4, purityBp: 8
 const ROCK = { resourceType: 'FERRITE', unitsMilli: 900, grade: 1, purityBp: 9600 };
 // The revenue-share fields of a sale answer when no crew is aboard.
 const noCrewShare = (gross) => ({ grossCredits: gross, crewShareCredits: 0, netCredits: gross });
-const stored = (lot) => ({ resource_type: lot.resourceType, units_milli: lot.unitsMilli, grade: lot.grade, purity_bp: lot.purityBp });
+const stored = (lot) => ({
+  resource_type: lot.resourceType, units_milli: lot.unitsMilli, grade: lot.grade, purity_bp: lot.purityBp,
+  ...(lot.originSystemH3 ? { origin_system_h3: lot.originSystemH3 } : {}),
+  ...(lot.originFactionId ? { origin_faction_id: lot.originFactionId } : {}),
+  ...(lot.customsStatus ? { customs_status: lot.customsStatus } : {})
+});
 
 /** A manifest the engine would sign for `pilot` in (`leaseId`, `sessionId`) at `seq`. */
 const manifestFor = (pilot, leaseId, sessionId, seq, lots, key = rtseKey) =>

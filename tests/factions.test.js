@@ -5,6 +5,7 @@ import { app, call, closeApp, dockedReceipt, json, newPilot, receiptAtOrigin, rt
 import { clampStandingsWithCaps, withColorsBonus } from '../src/config/factions.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 
+const F5_EMPTY = { mining_permits: {}, active_lockouts: [], customs_flagged: null };
 const setStanding = (pilot, factionId, standing) =>
   app.prisma.playerReputation.upsert({
     where: { playerId_factionId: { playerId: pilot.id, factionId } },
@@ -86,7 +87,7 @@ describe('faction routes and settlement', () => {
 
   test('login embeds the factions claim, neutral for a new pilot', async () => {
     const pilot = await newPilot();
-    assert.deepEqual(app.jwt.verify(pilot.token).factions, { alpha: 0, beta: 0, gamma: 0, active_colors: null });
+    assert.deepEqual(app.jwt.verify(pilot.token).factions, { alpha: 0, beta: 0, gamma: 0, active_colors: null, ...F5_EMPTY });
   });
 
   test('TEST-2.1-META-CLAMP-RIVAL: an alpha gain to 470 holds beta at 449 or below', async () => {
@@ -95,7 +96,7 @@ describe('faction routes and settlement', () => {
     const res = await settleMission(pilot, 'alpha', 30);
     assert.equal(res.statusCode, 200, res.body);
     assert.deepEqual(json(res).standings, { alpha: 470, beta: 440 });
-    assert.deepEqual(tokenFactions(res), { alpha: 470, beta: 440, gamma: 0, active_colors: null });
+    assert.deepEqual(tokenFactions(res), { alpha: 470, beta: 440, gamma: 0, active_colors: null, ...F5_EMPTY });
 
     // Beta can no longer rise past the rival cap while alpha leads.
     const capped = await settleMission(pilot, 'beta', 30);
@@ -121,7 +122,7 @@ describe('faction routes and settlement', () => {
     const body = json(res);
     assert.equal(body.success, true);
     assert.equal(body.gammaScore, 799);
-    assert.deepEqual(body.factions, { alpha: 799, beta: 0, gamma: 799, active_colors: null });
+    assert.deepEqual(body.factions, { alpha: 799, beta: 0, gamma: 799, active_colors: null, ...F5_EMPTY });
     assert.deepEqual(tokenFactions(res), body.factions);
     const [row] = await ledger(pilot);
     assert.deepEqual([row.reason, row.factionId, row.gammaDelta], ['RENOUNCE_PARAGON', 'gamma', -51]);
@@ -182,7 +183,7 @@ describe('faction routes and settlement', () => {
     const res = await colors(pilot, { factionId: 'alpha', dockedReceipt: dockedReceipt(pilot) });
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(json(res).active_colors, 'alpha');
-    assert.deepEqual(tokenFactions(res), { alpha: 500, beta: 0, gamma: 0, active_colors: 'alpha' });
+    assert.deepEqual(tokenFactions(res), { alpha: 500, beta: 0, gamma: 0, active_colors: 'alpha', ...F5_EMPTY });
     assert.equal(await colorsOf(pilot), 'alpha');
 
     const off = await colors(pilot, { factionId: null, dockedReceipt: dockedReceipt(pilot) });
@@ -198,7 +199,7 @@ describe('faction routes and settlement', () => {
     const flown = await settleMission(pilot, 'alpha', 30);
     assert.equal(json(flown).reputation_change, 36);
     assert.deepEqual(json(flown).standings, { alpha: 536 });
-    assert.deepEqual(tokenFactions(flown), { alpha: 536, beta: 0, gamma: 0, active_colors: 'alpha' });
+    assert.deepEqual(tokenFactions(flown), { alpha: 536, beta: 0, gamma: 0, active_colors: 'alpha', ...F5_EMPTY });
 
     const other = await settleMission(pilot, 'gamma', 30);
     assert.equal(json(other).reputation_change, 30);
@@ -214,7 +215,7 @@ describe('faction routes and settlement', () => {
     const res = await call(pilot, 'POST', '/game/missions/abandon', { missionId: offer.mission_id });
     assert.equal(res.statusCode, 200, res.body);
     assert.deepEqual(json(res).standings, { alpha: 497 });
-    assert.deepEqual(tokenFactions(res), { alpha: 497, beta: 0, gamma: 0, active_colors: null });
+    assert.deepEqual(tokenFactions(res), { alpha: 497, beta: 0, gamma: 0, active_colors: null, ...F5_EMPTY });
     assert.equal(await colorsOf(pilot), null);
     const [row] = await ledger(pilot);
     assert.deepEqual([row.reason, row.missionId, row.alphaDelta], ['MISSION_ABANDONED', offer.mission_id, -8]);
