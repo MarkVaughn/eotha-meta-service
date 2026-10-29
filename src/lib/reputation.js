@@ -19,7 +19,9 @@ export const LEDGER_REASONS = Object.freeze({
   HOSTAGE_DISEMBARKED: 'HOSTAGE_DISEMBARKED',
   COMPLETE_BRIBED: 'COMPLETE_BRIBED',
   CUSTOMS_CAUGHT: 'CUSTOMS_CAUGHT',
-  RENOUNCE_PARAGON: 'RENOUNCE_PARAGON'
+  RENOUNCE_PARAGON: 'RENOUNCE_PARAGON',
+  DOMESTIC_ORE_SALE: 'DOMESTIC_ORE_SALE',
+  MINING_VIOLATION: 'MINING_VIOLATION'
 });
 
 // The faction a mission's reputation goes to: its signed sponsor, else DEFAULT_FACTION_ID.
@@ -141,10 +143,31 @@ export async function standingsOf(db, playerId) {
   return Object.fromEntries(rows.map((row) => [row.factionId, row.standing]));
 }
 
-// `db` is the Prisma client or an open transaction. The token's `factions` claim: the pilot's
-// standings with the three factions and the faction whose colors it flies (or null).
-export async function factionsClaim(db, playerId) {
+// `db` is the Prisma client or an open transaction. The token's `factions` claim: the pilot's standings with the
+// three factions and the faction whose colors it flies (or null), plus what the engine enforces without asking us:
+// - `mining_permits`: the unexpired mining permits, `{ [system_h3]: expires_at_ms }`;
+// - `active_lockouts`: the stations whose customs lockout of the pilot still runs, as lowercase station ids;
+// - `customs_flagged_until_ms` and `customs_flagged_faction_id`: while a mining violation has the transponder flagged,
+//   when the flag ends (else 0) and the faction whose docks inspect the pilot for certain; the faction is left out
+//   when two factions have cited the pilot inside the hour, which the engine reads as every faction.
+// All three are read as of `nowMs`; the permits carry their own expiry and the flag its end, so a token outlives
+// them harmlessly, but a lockout that ends first stays listed until the token is next reissued.
+export async function factionsClaim(db, playerId, nowMs = Date.now()) {
+  const now = new Date(nowMs);
   const standings = await factionStandings(db, playerId);
-  const player = await db.player.findUnique({ where: { id: playerId }, select: { activeColorsFactionId: true } });
-  return { ...standings, active_colors: player?.activeColorsFactionId ?? null };
+  const player = await db.player.findUnique({
+    where: { id: playerId },
+    select: { activeColorsFactionId: true, customsFlaggedFactionId: true, customsFlaggedUntil: true }
+  });
+  const permits = await db.systemMiningPermit.findMany({ where: { playerId, expiresAt: { gt: now } }, orderBy: { systemH3: 'asc' } });
+  const lockouts = await db.stationLockout.findMany({ where: { playerId, until: { gt: now } }, orderBy: { stationId: 'asc' } });
+  const flagged = player?.customsFlaggedUntil?.getTime() > nowMs;
+  return {
+    ...standings,
+    active_colors: player?.activeColorsFactionId ?? null,
+    mining_permits: Object.fromEntries(permits.map((permit) => [permit.systemH3, permit.expiresAt.getTime()])),
+    active_lockouts: lockouts.map((lockout) => lockout.stationId),
+    customs_flagged_until_ms: flagged ? player.customsFlaggedUntil.getTime() : 0,
+    ...(flagged && player.customsFlaggedFactionId && { customs_flagged_faction_id: player.customsFlaggedFactionId })
+  };
 }

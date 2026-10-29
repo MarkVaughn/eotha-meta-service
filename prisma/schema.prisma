@@ -38,6 +38,14 @@ model Player {
   reputationLedger ReputationLedger[]
   customsSeizures CustomsSeizure[]
   stationLockouts StationLockout[]
+  miningPermits SystemMiningPermit[]
+  miningPermitRedemptions MiningPermitRedemption[]
+  miningViolations MiningViolation[]
+  // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
+  // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
+  // was relayed. Signed into the token's `factions.customs_flagged_*` claim, so a reconnect cannot shed it.
+  customsFlaggedFactionId String?
+  customsFlaggedUntil DateTime?
   // The faction whose colors the pilot flies (src/config/factions.js FACTION_IDS), or null. Set while
   // docked by POST /game/factions/colors; cleared when the standing with it falls below 500.
   activeColorsFactionId String?
@@ -337,17 +345,69 @@ model PlayerReputation {
   player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
   factionId String
   standing  Int      @default(0)
+  // Domestic ore units (in milli-units, 0 to 49 999) sold toward the next DOMESTIC_ORE_SALE reputation point
+  // with this faction: a point is earned per 50 units, and the part short of one is kept here.
+  domesticOreRemainder Int @default(0)
   updatedAt DateTime @updatedAt
 
   // Also serves lookups by player alone (its leading column).
   @@unique([playerId, factionId])
 }
 
+// A 2 hour mining permit the pilot bought by hailing a station of the faction that controls `systemH3`
+// (POST /game/factions/mining-permit). One row per (pilot, system); each further purchase renews it to 2 hours
+// from then. Signed into the token's `factions.mining_permits` claim while it is unexpired.
+model SystemMiningPermit {
+  id        String   @id @default(uuid()) @db.Uuid
+  playerId  String   @db.Uuid
+  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  systemH3  String   @db.VarChar(15)
+  factionId String   // "alpha", "beta" or "gamma"
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([playerId, systemH3])
+  @@index([playerId, expiresAt])
+}
+
+// A station hail receipt redeemed for a mining permit, once per nonce, so a repeat of the receipt answers with
+// this permit (`expiresAt` as granted) and charges nothing, and a spent receipt cannot buy another permit.
+model MiningPermitRedemption {
+  id        String   @id @default(uuid()) @db.Uuid
+  playerId  String   @db.Uuid
+  player    Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  nonce     String   // hex of the receipt's 16 nonce bytes
+  systemH3  String   @db.VarChar(15)
+  factionId String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@unique([playerId, nonce])
+}
+
+// A mining violation notice the engine signed when the pilot's Patrol Alert filled, applied once per nonce
+// (POST /game/factions/mining-violation). `reputationChange` is what the faction's standing actually moved,
+// after its caps, so a replay answers with the first result.
+model MiningViolation {
+  id               String   @id @default(uuid()) @db.Uuid
+  playerId         String   @db.Uuid
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  nonce            String   // hex of the notice's 16 nonce bytes
+  systemH3         String   @db.VarChar(15)
+  factionId        String
+  issuedAtMs       BigInt
+  reputationChange Int
+  flaggedUntil     DateTime
+  createdAt        DateTime @default(now())
+
+  @@unique([playerId, nonce])
+}
+
 // Append-only audit of every standing change (src/lib/reputation.js). `factionId` is the faction the
 // event was for and `factionDelta` its change; `alphaDelta`, `betaDelta` and `gammaDelta` are the
 // changes to the three factions, including those their caps made. `reason`: MISSION_COMPLETED,
 // COMPLETE_COVERT_CLEAN, COMPLETE_COVERT_DETECTED,
-// MISSION_ABANDONED, RENOUNCE_PARAGON, COMPLETE_BRIBED or CUSTOMS_CAUGHT. `bribePaidCredits` is the customs
+// MISSION_ABANDONED, RENOUNCE_PARAGON, COMPLETE_BRIBED, CUSTOMS_CAUGHT, DOMESTIC_ORE_SALE or MINING_VIOLATION. `bribePaidCredits` is the customs
 // bribe a COMPLETE_BRIBED settlement deducted.
 model ReputationLedger {
   id               String   @id @default(uuid()) @db.Uuid
@@ -418,7 +478,7 @@ model CargoLease {
   generation Int      // 1, 2, 3 ... per player; the highest is current
   sessionId  Bytes?   // 16-byte engine session id bound by the first applied write
   lastSeq    BigInt   @default(0)
-  lots       Json     // [{ resource_type, units_milli, grade, purity_bp }] as of lastSeq (or as issued)
+  lots       Json     // [{ resource_type, units_milli, grade, purity_bp, origin_system_h3?, origin_faction_id?, customs_status? }] as of lastSeq (or as issued)
   issuedAt   DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
@@ -439,6 +499,10 @@ model CargoSale {
   // The crew's share of totalCredits taken when the sale was credited; 0 on sales from before crew,
   // so a replay answers with the same split the first credit made.
   crewShareCredits Int  @default(0)
+  // What the amnesty rule took off the signed total for poached ore sold at the station that controls its system,
+  // and the reputation the sale's domestic ore earned; both 0 on sales without either, so a replay answers the same.
+  amnestyCredits Int    @default(0)
+  domesticReputation Int @default(0)
   soldAtMs     BigInt
   creditedAt   DateTime @default(now())
 

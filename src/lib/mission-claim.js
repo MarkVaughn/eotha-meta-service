@@ -1,6 +1,10 @@
 import { verify } from 'node:crypto';
+import { lotsPayload } from './cargo.js';
 
 const DOMAIN = Buffer.from('EOTHA_MISSION_CLAIM_V1', 'utf8'); // 22 bytes
+const DOMAIN_V2 = Buffer.from('EOTHA_MISSION_CLAIM_V2', 'utf8');
+// The gather domain: the cargo suffix's lots carry provenance, which V1 and V2 gather layouts did not.
+const DOMAIN_GATHER = Buffer.from('EOTHA_MISSION_CLAIM_V3', 'utf8');
 
 function lenPrefixed(value) {
   const bytes = Buffer.from(value, 'utf8');
@@ -31,20 +35,24 @@ function u32(value) {
 const uuidBytes = (uuid) => Buffer.from(uuid.replaceAll('-', ''), 'hex');
 
 // Canonical byte layout defined in proto/eotha/rtse/v1/mission.proto (MissionCompletionClaim).
-// A GATHER claim (`gather`, decided by the caller from the stored offer's signed type, never from
-// the claim) also signs the cargo suffix: lease_id (16) || session_id (16) || u64le(cargo_seq) ||
-// u32le(count) || per remaining lot: lp(resource_type) || u32le(units_milli) || u32le(grade) ||
-// u32le(purity_bp). The claim then carries { leaseId, sessionId (UUID spellings), cargoSeq, remaining }.
-// `version` is selected from the stored signed offer, not inferred from claim contents. V2 swaps
-// the domain and appends attribution AFTER any cargo suffix; omitted zero fields stay zero.
+// A GATHER claim (`gather`, decided by the caller from the stored offer's signed type, never from the claim) is
+// signed under EOTHA_MISSION_CLAIM_V3, whatever its offer's visibility, and also signs the cargo suffix: lease_id (16)
+// || session_id (16) || u64le(cargo_seq) || u32le(count) || per remaining lot the CargoLot layout of the cargo
+// records (lp(resource_type) || u32le(units_milli) || u32le(grade) || u32le(purity_bp) || lp(origin_system_h3) ||
+// lp(origin_faction_id) || lp(customs_status), see lotsPayload). The claim then carries { leaseId, sessionId (UUID
+// spellings), cargoSeq, remaining }. There is no fallback: a gather claim is never verified under V1 or V2, nor any
+// other claim under V3.
+// `version` is selected from the stored signed offer, not inferred from claim contents. V2 (a faction mission) swaps
+// the domain of a non-gather claim and appends attribution AFTER any cargo suffix; omitted zero fields stay zero.
 export function canonicalClaimPayload(claim, gather = false, version = 1) {
   if (version !== 1 && version !== 2) throw new Error('Unknown mission signing version.');
   if (version === 1 && ((claim.wasDetected ?? false) !== false || (claim.exposureScoreMilli ?? 0) !== 0
       || (claim.opposedReputationChange ?? 0) !== 0 || BigInt(claim.bribePaidCredits ?? 0) !== 0n)) {
     throw new Error('A V1 claim cannot carry unsigned V2 fields.');
   }
+  const domain = gather ? DOMAIN_GATHER : version === 2 ? DOMAIN_V2 : DOMAIN;
   const v1 = [
-    version === 2 ? Buffer.from('EOTHA_MISSION_CLAIM_V2', 'utf8') : DOMAIN,
+    domain,
     lenPrefixed(claim.missionId),
     lenPrefixed(claim.playerShipId),
     lenPrefixed(claim.destinationStationId),
@@ -53,13 +61,11 @@ export function canonicalClaimPayload(claim, gather = false, version = 1) {
     u64(claim.rewardCredits),
     i32(claim.reputationChange)
   ];
-  const remaining = claim.remaining ?? []; // proto-JSON omits an empty list
   const cargo = gather ? [
     uuidBytes(claim.leaseId),
     uuidBytes(claim.sessionId),
     u64(claim.cargoSeq),
-    u32(remaining.length),
-    ...remaining.flatMap((lot) => [lenPrefixed(lot.resourceType), u32(lot.unitsMilli), u32(lot.grade), u32(lot.purityBp)])
+    lotsPayload(claim.remaining ?? []) // proto-JSON omits an empty list
   ] : [];
   const v2 = version === 2 ? [
     Buffer.from([claim.wasDetected ? 1 : 0]),

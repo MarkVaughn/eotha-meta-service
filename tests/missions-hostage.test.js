@@ -12,6 +12,7 @@ import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 import { missionOfferVersion } from '../src/lib/mission-offer.js';
 import { accruedPenalty, basePenalty, disembarkPlace, hostageState } from '../src/lib/hostage.js';
 
+const F5_EMPTY = { mining_permits: {}, active_lockouts: [], customs_flagged_until_ms: 0 };
 before(async () => { await app.ready(); });
 after(closeApp);
 
@@ -408,7 +409,7 @@ describe('POST /game/missions/disembark', () => {
       assert.equal(json(res).reputation_change, -20);
       assert.equal(await standingOf(pilot, 'alpha'), 485);
       assert.equal(await colorsOf(pilot), null);
-      assert.deepEqual(app.jwt.verify(json(res).token).factions, { alpha: 485, beta: 0, gamma: 0, active_colors: null });
+      assert.deepEqual(app.jwt.verify(json(res).token).factions, { alpha: 485, beta: 0, gamma: 0, active_colors: null, ...F5_EMPTY });
     });
 
     test('the standing never falls below -1000', async () => {
