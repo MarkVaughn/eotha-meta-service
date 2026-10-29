@@ -124,7 +124,7 @@ describe('regulation tables', () => {
 
   test('the export toll is exact, rounded once over the cleared lots', () => {
     const lot = (extra) => ({ resource_type: 'TITANIUM', units_milli: 10_000, grade: 4, purity_bp: 8000, ...extra });
-    const poached = lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'UNLICENSED_POACHED' });
+    const poached = lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'PERMITTED_UNDECLARED_EXPORT' });
     const options = { systemH3: '8828308281fffff', factionId: 'alpha', standing: 0, activeColors: null };
     const plan = planExportClearance([poached], options);
     assert.deepEqual([plan.cleared, plan.valueCredits, plan.tollBp, plan.tollCredits], [1, 360, 1200, 43]);
@@ -138,12 +138,13 @@ describe('regulation tables', () => {
       lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'EXPORT_CLEARED' }),
       lot({ origin_system_h3: '8828308283fffff', origin_faction_id: 'alpha', customs_status: 'UNLICENSED_POACHED' }),
       lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'beta', customs_status: 'UNLICENSED_POACHED' }),
+      lot({ origin_system_h3: '8828308281fffff', origin_faction_id: 'alpha', customs_status: 'UNLICENSED_POACHED' }),
       lot({})
     ];
     const none = planExportClearance(untouched, options);
     assert.deepEqual([none.cleared, none.valueCredits, none.tollCredits], [0, 0, 0]);
     assert.deepEqual(none.lots, untouched);
-    const mixed = planExportClearance([...untouched, poached, lot({ ...poached, customs_status: 'PERMITTED_UNDECLARED_EXPORT' })], options);
+    const mixed = planExportClearance([...untouched, poached, lot({ ...poached })], options);
     assert.equal(mixed.cleared, 2);
     assert.equal(mixed.tollCredits, 86);
   });
@@ -532,14 +533,15 @@ describe('the token\'s active_lockouts', () => {
 
 describe('POST /game/cargo/clear-export', () => {
   const POACHED = mined('alpha', 'UNLICENSED_POACHED');
+  const CLEARABLE = mined('alpha', 'PERMITTED_UNDECLARED_EXPORT');
   const UNDECLARED = mined('alpha', 'PERMITTED_UNDECLARED_EXPORT', { unitsMilli: 20_000 });
   const DOMESTIC = mined('alpha', 'DOMESTIC_OR_FREE');
   const ELSEWHERE = ore({ originSystemH3: OTHER_SYSTEM, originFactionId: 'beta', customsStatus: 'UNLICENSED_POACHED' });
 
-  test('clears the dock\'s poached and undeclared ore at the tier toll, as a new lease the token carries', async () => {
+  test('clears the dock\'s undeclared ore at the tier toll, as a new lease the token carries', async () => {
     const pilot = await newPilot('Exporter');
     await setCredits(pilot, 500);
-    const session = await stockHold(pilot, [POACHED, UNDECLARED, DOMESTIC, ELSEWHERE]);
+    const session = await stockHold(pilot, [CLEARABLE, UNDECLARED, DOMESTIC, ELSEWHERE]);
     const res = await clearExport(pilot, dockedAt(pilot, randomUUID(), 'alpha'));
     assert.equal(res.statusCode, 200, res.body);
     const body = json(res);
@@ -555,15 +557,51 @@ describe('POST /game/cargo/clear-export', () => {
     assert.deepEqual((await holdOf(pilot)).lots, body.cargo.lots);
 
     // The engine session of the old lease is fenced out: its next record cannot revert the paid clearance.
-    const stale = await call(pilot, 'POST', '/game/cargo/manifest', { manifest: manifestFor(pilot, session.leaseId, session.sessionId, 5, [POACHED]) });
+    const stale = await call(pilot, 'POST', '/game/cargo/manifest', { manifest: manifestFor(pilot, session.leaseId, session.sessionId, 5, [CLEARABLE]) });
     assert.notEqual(stale.statusCode, 200, stale.body);
     assert.deepEqual((await holdOf(pilot)).lots, body.cargo.lots);
+  });
+
+  test('poached ore is not cleared by the toll and answers nothing_to_clear', async () => {
+    const pilot = await newPilot('Poacher');
+    await setCredits(pilot, 500);
+    const session = await stockHold(pilot, [POACHED]);
+    const res = await clearExport(pilot, dockedAt(pilot, randomUUID(), 'alpha'));
+    assert.equal(res.statusCode, 409, res.body);
+    assert.equal(codeOf(res), 'nothing_to_clear');
+    assert.equal(await creditsOf(pilot), 500);
+    const hold = await holdOf(pilot);
+    assert.equal(hold.lease_id, session.leaseId);
+    assert.equal(hold.lots[0].customs_status, 'UNLICENSED_POACHED');
+  });
+
+  test('a failure while building the answer rolls the toll back, and a retry charges once', async () => {
+    const pilot = await newPilot('Flaky');
+    await setCredits(pilot, 500);
+    const session = await stockHold(pilot, [CLEARABLE]);
+    const receipt = dockedAt(pilot, randomUUID(), 'alpha');
+    const sign = app.signWithExpiry;
+    app.signWithExpiry = () => { throw new Error('signing down'); };
+    try {
+      const failed = await clearExport(pilot, receipt);
+      assert.equal(failed.statusCode, 500, failed.body);
+    } finally {
+      app.signWithExpiry = sign;
+    }
+    assert.equal(await creditsOf(pilot), 500);
+    assert.equal((await holdOf(pilot)).lease_id, session.leaseId);
+    assert.equal(await app.prisma.cargoLease.count({ where: { playerId: pilot.id } }), 1);
+    const retry = await clearExport(pilot, receipt);
+    assert.equal(retry.statusCode, 200, retry.body);
+    assert.equal(json(retry).toll_credits, 43);
+    assert.equal(await creditsOf(pilot), 457);
+    assert.equal(app.jwt.verify(json(retry).token).cargo.lease_id, json(retry).cargo.lease_id);
   });
 
   test('a second call has nothing to clear and charges nothing', async () => {
     const pilot = await newPilot('Exporter');
     await setCredits(pilot, 500);
-    await stockHold(pilot, [POACHED]);
+    await stockHold(pilot, [CLEARABLE]);
     const station = randomUUID();
     assert.equal((await clearExport(pilot, dockedAt(pilot, station, 'alpha'))).statusCode, 200);
     const credits = await creditsOf(pilot);
@@ -580,7 +618,7 @@ describe('POST /game/cargo/clear-export', () => {
       await setStanding(pilot, 'alpha', standing);
       if (colors) await app.prisma.player.update({ where: { id: pilot.id }, data: { activeColorsFactionId: colors } });
       await setCredits(pilot, 100);
-      await stockHold(pilot, [POACHED]);
+      await stockHold(pilot, [CLEARABLE]);
       const res = await clearExport(pilot, dockedAt(pilot, randomUUID(), 'alpha'));
       assert.equal(res.statusCode, 200, `${standing}: ${res.body}`);
       assert.equal(json(res).toll_credits, toll, String(standing));
@@ -591,7 +629,7 @@ describe('POST /game/cargo/clear-export', () => {
   test('an unaffordable toll is refused 402 at the boundary and the hold stays as it was', async () => {
     const pilot = await newPilot('Short');
     await setCredits(pilot, 42);
-    const session = await stockHold(pilot, [POACHED]);
+    const session = await stockHold(pilot, [CLEARABLE]);
     const receipt = dockedAt(pilot, randomUUID(), 'alpha');
     const res = await clearExport(pilot, receipt);
     assert.equal(res.statusCode, 402, res.body);
@@ -600,7 +638,7 @@ describe('POST /game/cargo/clear-export', () => {
     assert.equal(await creditsOf(pilot), 42);
     const hold = await holdOf(pilot);
     assert.equal(hold.lease_id, session.leaseId);
-    assert.equal(hold.lots[0].customs_status, 'UNLICENSED_POACHED');
+    assert.equal(hold.lots[0].customs_status, 'PERMITTED_UNDECLARED_EXPORT');
     assert.equal(await app.prisma.cargoLease.count({ where: { playerId: pilot.id } }), 1);
     await setCredits(pilot, 43);
     assert.equal((await clearExport(pilot, receipt)).statusCode, 200);
@@ -611,7 +649,7 @@ describe('POST /game/cargo/clear-export', () => {
     const pilot = await newPilot('Docs');
     const other = await newPilot('Other');
     await setCredits(pilot, 500);
-    await stockHold(pilot, [POACHED]);
+    await stockHold(pilot, [CLEARABLE]);
     const missing = await clearExport(pilot);
     assert.equal(missing.statusCode, 403, missing.body);
     assert.equal(codeOf(missing), 'docked_receipt_required');
@@ -625,13 +663,13 @@ describe('POST /game/cargo/clear-export', () => {
     assert.equal(locked.statusCode, 403, locked.body);
     assert.equal(codeOf(locked), 'station_locked_out');
     assert.equal(await creditsOf(pilot), 500);
-    assert.equal((await holdOf(pilot)).lots[0].customs_status, 'UNLICENSED_POACHED');
+    assert.equal((await holdOf(pilot)).lots[0].customs_status, 'PERMITTED_UNDECLARED_EXPORT');
   });
 
   test('an independent dock levies no toll; another faction\'s dock clears none of this ore', async () => {
     const pilot = await newPilot('Neutral');
     await setCredits(pilot, 500);
-    await stockHold(pilot, [POACHED]);
+    await stockHold(pilot, [CLEARABLE]);
     const independent = await clearExport(pilot, dockedAt(pilot, randomUUID(), ''));
     assert.equal(independent.statusCode, 409, independent.body);
     assert.equal(codeOf(independent), 'export_not_regulated');

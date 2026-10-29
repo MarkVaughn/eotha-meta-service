@@ -290,12 +290,14 @@ export default async function cargoRoutes(fastify) {
         data: { id: randomUUID(), playerId, generation: previous.generation + 1, lots: plan.lots }
       });
       const { credits } = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { ship, plan, lease, credits };
+      // Signed inside the transaction: if building the answer fails, the toll and the new lease roll back with it.
+      const { ship_attributes: shipAttributes } = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew);
+      const token = await reissueToken(fastify, request, shipAttributes, ship.factions, { cargo: { lease_id: lease.id, lots: lease.lots } });
+      return { plan, lease, credits, token };
     });
     if (outcome.refusal) return reply.code(outcome.refusal.code === 'toll_unaffordable' ? 402 : 409).send(outcome.refusal);
 
-    const { ship, plan, lease, credits } = outcome;
-    const { ship_attributes: shipAttributes } = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew);
+    const { plan, lease, credits, token } = outcome;
     return {
       success: true,
       system_h3: systemH3,
@@ -306,7 +308,7 @@ export default async function cargoRoutes(fastify) {
       toll_credits: plan.tollCredits,
       credits,
       cargo: holdView(lease),
-      token: await reissueToken(fastify, request, shipAttributes, ship.factions, { cargo: { lease_id: lease.id, lots: lease.lots } })
+      token
     };
   });
 }
