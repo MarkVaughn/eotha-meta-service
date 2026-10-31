@@ -126,6 +126,12 @@ HOST="0.0.0.0"
 # CLAIM_PUBLIC_KEY_FILE=  # alternatively a file holding that hex or a PEM public key
 # Fixed ws:// or wss:// URL of the RTSE gateway handed to clients (see "Gateway address")
 # GATEWAY_WS_URL=wss://gateway.example.com/session
+# Private RTSE control-plane auth (see "Trusted penalty delivery"): a random 32+ character development
+# credential, or comma-separated verified TLS client-certificate SHA-256 fingerprints in production
+# INTERNAL_RTSE_CREDENTIAL=
+# INTERNAL_RTSE_MTLS_FINGERPRINTS=
+# Key id RTSE's enforcement-projection key ring associates with keys/public.pem
+# ENFORCEMENT_ISSUER_KEY_ID=eotha-meta-service-v1
 ```
 
 ### 4. Generate Asymmetric Cryptographic Keys
@@ -184,6 +190,15 @@ npm test
   - The Ed25519 public key as a JWK Set (`kid` is the RFC 7638 thumbprint, also set in every token header).
 
 (attested) endpoints require `X-Attestation-Platform` (`play-integrity`, `app-attest` or `device-check`) and `X-Attestation-Token`; see [Device attestation](#device-attestation).
+
+### Trusted penalty delivery (private)
+- `POST /internal/v1/rtse/penalty-events`
+  - Server-side delivery of an engine-signed `CustomsSeizureClaim` or `MiningViolationNotice`. Body is a protobuf `PenaltyDelivery` (`application/x-protobuf`); the response is a protobuf `PenaltyDeliveryAck` whose status is `APPLIED`, `DUPLICATE`, `RETRYABLE` or `REJECTED`. The ack is sent only after an idempotent, nonce-keyed settlement commits the consequences and the pilot's `authorityRevision` together; delivery is at-least-once, so redelivery answers `DUPLICATE`. An applied or duplicate ack carries a signed `EnforcementProjection`. A bad envelope or source proof is `REJECTED`, as is a validly signed claim the settlement refuses on its merits (such as a mission that cannot be inspected, reported as `KIND_PROOF_MISMATCH` because the contract has no closer reason); a missing pilot or a settlement that failed before commit is `RETRYABLE`. The contracts (`PenaltyDelivery`, `PenaltyDeliveryAck`, `EnforcementProjection`) are in eotha-contracts (`internal/v1/penalty_delivery.proto`). The client relay endpoints (`POST /game/missions/seizure`, `POST /game/factions/mining-violation`) remain during migration.
+- `GET /internal/v1/rtse/players/:pilotId/authority`
+  - The pilot's current signed `EnforcementProjection` (protobuf), for RTSE session updates and strict reconnect admission; `404 PILOT_NOT_FOUND` for an unknown pilot.
+  - Both routes require workload identity: the `X-Eotha-Workload-Credential` header matching `INTERNAL_RTSE_CREDENTIAL`, or a verified mTLS client certificate whose SHA-256 fingerprint is in `INTERNAL_RTSE_MTLS_FINGERPRINTS`. A player `Authorization: Bearer` token is always refused with `401 WORKLOAD_CREDENTIAL_REQUIRED`. Source proofs verify against `CLAIM_PUBLIC_KEY`. Login JWTs carry an `authority_revision` claim; RTSE admits a reconnect only at the pilot's current revision, so an older token cannot bypass a penalty.
+- `GET /ready`
+  - `200 { status: "ready", checks }` when the database, claim key and internal workload credential are all available, otherwise `503 { status: "not_ready", checks }`. `GET /health` only reports that the process is reachable.
 
 ### Economy
 - `POST /game/trade/sell` (Protected)

@@ -1,10 +1,13 @@
 import fp from 'fastify-plugin';
 import fastifyJwt from '@fastify/jwt';
-import { createPublicKey, hkdfSync } from 'node:crypto';
+import { createPublicKey, hkdfSync, sign } from 'node:crypto';
 import { readFileSync } from 'fs';
 import { calculateJwkThumbprint, exportJWK } from 'jose';
 import { join, resolve } from 'path';
 import env from '../config/env.js';
+import { EnforcementProjection } from '../lib/contracts/penalty.js';
+
+const ENFORCEMENT_PROJECTION_DOMAIN = Buffer.from('EOTHA_ENFORCEMENT_PROJECTION_V1', 'ascii');
 
 function readKey(dir, name) {
   const path = join(dir, name);
@@ -50,6 +53,22 @@ async function securityPlugin(fastify, opts) {
   // Signs claims that already carry their own `exp`. A configured `expiresIn` would override it, and
   // per-call sign options replace the defaults, so the key id is restated here.
   fastify.decorate('signWithExpiry', (claims) => fastify.jwt.sign(claims, { kid }));
+
+  // RTSE verifies these from a separately provisioned key ring. The canonical protobuf encoding
+  // contains no maps and the projection builder sorts repeated fields, making the generated codec
+  // deterministic for the v1 contract.
+  fastify.decorate('signEnforcementProjection', (projection) => {
+    const unsigned = {
+      ...projection,
+      issuerKeyId: env.ENFORCEMENT_ISSUER_KEY_ID,
+      signature: Buffer.alloc(0)
+    };
+    const signature = sign(null, Buffer.concat([
+      ENFORCEMENT_PROJECTION_DOMAIN,
+      Buffer.from(EnforcementProjection.encode(unsigned).finish())
+    ]), privateKey);
+    return { ...unsigned, signature };
+  });
 
   // Decorator to protect specific meta endpoints
   fastify.decorate('authenticate', async (request, reply) => {

@@ -20,7 +20,7 @@ import {
   dockedReceiptSchema
 } from '../../lib/docked-receipt.js';
 import { awardCaptainXp } from '../../lib/captain.js';
-import { applyCustomsSeizure, activeLockouts, stationLockoutRefusal } from '../../lib/customs.js';
+import { activeLockouts, stationLockoutRefusal } from '../../lib/customs.js';
 import { customsSeizureSchema, verifyCustomsSeizure } from '../../lib/customs-seizure.js';
 import {
   activeCrewOf, clandestineBonusCredits, deductCrewRevenueShare, missionSettlement, payrollCrewOf, recordCovertAcceptance,
@@ -40,6 +40,7 @@ import {
   withCrewReputationBonus, withCrewRivalHarmCut
 } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
+import { settleCustomsSeizure } from '../../lib/penalty-settlement.js';
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 const uint32 = { type: 'integer', minimum: 0, maximum: 4_294_967_295 };
@@ -833,17 +834,7 @@ export default async function missionsRoutes(fastify) {
       return reply.code(403).send({ error: 'Invalid claim signature.' });
     }
 
-    const run = () => prisma.$transaction(async (tx) => {
-      const ship = await lockActiveShip(tx, request.user);
-      return applyCustomsSeizure(tx, { playerId: request.user.sub, ship, claim, nowMs });
-    });
-    let outcome;
-    try {
-      outcome = await run();
-    } catch (err) {
-      if (err?.code !== 'P2002') throw err;
-      outcome = await run(); // a concurrent copy won the nonce: this pass finds it and replays
-    }
+    const outcome = await settleCustomsSeizure({ prisma, fastify, playerId: request.user.sub, claim, nowMs });
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     return {
       ...outcome.body,

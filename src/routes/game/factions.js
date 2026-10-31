@@ -1,19 +1,13 @@
 import { FACTION_IDS, FLYING_COLORS_MIN_REP } from '../../config/factions.js';
-import {
-  CUSTOMS_FLAG_MS,
-  HAIL_INTENT_REQUEST_MINING_PERMIT,
-  MINING_VIOLATION_MAX_FUTURE_SKEW_MS,
-  MINING_VIOLATION_REPUTATION,
-  miningPermitCost,
-  standingTier
-} from '../../config/regulation.js';
+import { HAIL_INTENT_REQUEST_MINING_PERMIT, MINING_VIOLATION_MAX_FUTURE_SKEW_MS, miningPermitCost, standingTier } from '../../config/regulation.js';
 import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { hailReceiptSchema, isHailReceiptFresh, verifyHailReceipt } from '../../lib/hail-receipt.js';
 import { activeMiningPermits, grantMiningPermit, permitView, redeemedMiningPermit } from '../../lib/mining-permits.js';
 import { miningViolationSchema, verifyMiningViolation } from '../../lib/mining-violation.js';
-import { LEDGER_REASONS, adjustReputation, factionsClaim, renounceParagon, standingsOf } from '../../lib/reputation.js';
+import { factionsClaim, renounceParagon, standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
+import { settleMiningViolation } from '../../lib/penalty-settlement.js';
 
 // `dockedReceipt` is optional in both schemas on purpose: the routes answer its absence with the
 // coded 403 `docked_receipt_required` rather than a generic schema 400.
@@ -211,9 +205,10 @@ export default async function factionsRoutes(fastify) {
 
   // Applies a mining violation notice the engine signed when the pilot's Patrol Alert filled, once per nonce: the
   // faction governing the system takes MINING_VIOLATION_REPUTATION off the pilot's standing, and the pilot's
-  // transponder is flagged for a mandatory customs inspection at that faction's docks for an hour from now, signed
-  // into the token's `factions.customs_flagged_*` so a reconnect cannot shed it. A notice never expires on a clock; a
-  // replay changes nothing and answers with the first result and the pilot's standings now.
+  // transponder is flagged for a mandatory customs inspection at that faction's docks for an hour from issuance, signed
+  // into the token's `factions.customs_flagged_*` so a reconnect cannot shed it. A late notice still settles once,
+  // but cannot revive a citation whose signed hour has already elapsed; a replay changes nothing and answers with
+  // the first result and the pilot's standings now.
   fastify.post('/factions/mining-violation', { schema: violationSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
     const { notice } = request.body;
@@ -222,28 +217,8 @@ export default async function factionsRoutes(fastify) {
         || notice.issuedAtMs > nowMs + MINING_VIOLATION_MAX_FUTURE_SKEW_MS) {
       return reply.code(STATUS.mining_violation_invalid).send(refusal({ code: 'mining_violation_invalid' }));
     }
-    const nonce = Buffer.from(notice.nonce, 'base64').toString('hex');
-    const factionId = notice.controllingFactionId;
-
-    const outcome = await prisma.$transaction(async (tx) => {
-      const ship = await lockActiveShip(tx, request.user);
-      const previous = await tx.miningViolation.findUnique({ where: { playerId_nonce: { playerId, nonce } } });
-      if (previous) return { ship, row: previous, replayed: true };
-      const before = ship.factions[factionId];
-      const after = await adjustReputation(tx, playerId, factionId, MINING_VIOLATION_REPUTATION, { reason: LEDGER_REASONS.MINING_VIOLATION });
-      // Flagged for an hour from now. A flag already running for longer is kept, so a relay can only extend it. A flag
-      // that a different faction raised and still runs is not moved to this one (which would lift it at the first
-      // faction's docks): the pilot is then cited by every faction, a null faction.
-      const current = await tx.player.findUnique({ where: { id: playerId }, select: { customsFlaggedUntil: true, customsFlaggedFactionId: true } });
-      const running = (current?.customsFlaggedUntil?.getTime() ?? 0) > nowMs;
-      const flaggedUntil = new Date(Math.max(nowMs + CUSTOMS_FLAG_MS, current?.customsFlaggedUntil?.getTime() ?? 0));
-      const flaggedFactionId = running && current.customsFlaggedFactionId !== factionId ? null : factionId;
-      await tx.player.update({ where: { id: playerId }, data: { customsFlaggedFactionId: flaggedFactionId, customsFlaggedUntil: flaggedUntil } });
-      const row = await tx.miningViolation.create({
-        data: { playerId, nonce, systemH3: notice.systemH3, factionId, issuedAtMs: BigInt(notice.issuedAtMs), reputationChange: after - before, flaggedUntil }
-      });
-      return { ship, row, replayed: false };
-    });
+    const outcome = await settleMiningViolation({ prisma, fastify, playerId, notice, nowMs });
+    if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
 
     const { credits } = await prisma.player.findUnique({ where: { id: playerId }, select: { credits: true } });
     const factions = await factionsClaim(prisma, playerId);

@@ -538,13 +538,16 @@ describe('POST /game/factions/mining-violation', () => {
     assert.equal(await standingOf(pilot, 'alpha'), -10);
   });
 
-  test('a notice never expires on a clock: an old one still applies once', async () => {
+  test('an old notice still applies once without reviving its elapsed citation', async () => {
     const pilot = await newPilot('Old');
-    const res = await reportViolation(pilot, violationFor(pilot, { issuedAtMs: Date.now() - 7 * 86_400_000 }));
+    const issuedAtMs = Date.now() - 7 * 86_400_000;
+    const res = await reportViolation(pilot, violationFor(pilot, { issuedAtMs }));
     assert.equal(res.statusCode, 200, res.body);
     assert.equal(json(res).replayed, false);
-    // The flag runs an hour from the relay, not from the notice.
-    assert.ok(json(res).flagged_until_ms > Date.now() + 3_500_000);
+    assert.equal(json(res).flagged_until_ms, issuedAtMs + 3_600_000);
+    const player = await app.prisma.player.findUnique({ where: { id: pilot.id } });
+    assert.equal(player.customsFlaggedUntil, null);
+    assert.equal(player.customsFlaggedFactionId, null);
   });
 
   test('another notice extends a running flag and never shortens it', async () => {
@@ -552,7 +555,11 @@ describe('POST /game/factions/mining-violation', () => {
     const first = json(await reportViolation(pilot, violationFor(pilot)));
     await app.prisma.player.update({ where: { id: pilot.id }, data: { customsFlaggedUntil: new Date(first.flagged_until_ms + 3_600_000) } });
     const second = await reportViolation(pilot, violationFor(pilot));
-    assert.equal(json(second).flagged_until_ms, first.flagged_until_ms + 3_600_000);
+    // The notice reports its own signed citation; the running flag is the later of the two.
+    assert.equal(json(second).flagged_until_ms >= first.flagged_until_ms, true);
+    const player = await app.prisma.player.findUnique({ where: { id: pilot.id } });
+    assert.equal(player.customsFlaggedUntil.getTime(), first.flagged_until_ms + 3_600_000);
+    assert.equal(tokenFactions(second).customs_flagged_until_ms, first.flagged_until_ms + 3_600_000);
     // The same faction citing again keeps the flag at that faction's docks.
     assert.equal(tokenFactions(second).customs_flagged_faction_id, 'alpha');
     assert.equal(await standingOf(pilot, 'alpha'), -20);

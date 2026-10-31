@@ -57,8 +57,13 @@ export function toLoadout(shipId, components, passengersAboard, traits = [], cre
 export async function reissueToken(fastify, request, shipAttributes, factions, extraClaims = {}) {
   const { iat, iss, cargo, active_mission, ...claims } = request.user;
   const mission = await activeMissionClaim(fastify.prisma, request.user.sub);
+  const authority = await fastify.prisma.player.findUnique({
+    where: { id: request.user.sub },
+    select: { authorityRevision: true }
+  });
   return fastify.signWithExpiry({
     ...claims, ship_attributes: shipAttributes, factions, ...extraClaims,
+    authority_revision: Number(authority?.authorityRevision ?? 0),
     ...(mission && { active_mission: mission })
   });
 }
