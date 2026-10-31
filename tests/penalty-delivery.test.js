@@ -211,7 +211,7 @@ describe('trusted RTSE penalty delivery', () => {
 
     const rejected = await deliver(customsPenalty(pilot, { missionId: offer.mission_id }).delivery);
     assert.equal(rejected.ack.status, PenaltyAckStatus.PENALTY_ACK_STATUS_REJECTED);
-    assert.equal(rejected.ack.rejectionReason, PenaltyRejectionReason.PENALTY_REJECTION_REASON_INVALID_SOURCE_PROOF);
+    assert.equal(rejected.ack.rejectionReason, PenaltyRejectionReason.PENALTY_REJECTION_REASON_KIND_PROOF_MISMATCH);
   });
 
   test('permanently rejects a signed penalty with a non-UUID pilot id before database settlement', async () => {

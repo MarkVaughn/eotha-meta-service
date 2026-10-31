@@ -150,8 +150,8 @@ export default async function rtseInternalRoutes(fastify) {
         ? await settleCustomsSeizure({ prisma: fastify.prisma, fastify, playerId: checked.playerId, claim: checked.claim })
         : await settleMiningViolation({ prisma: fastify.prisma, fastify, playerId: checked.playerId, notice: checked.notice });
       if (outcome.failure) {
-        if (outcome.failure.status === 404) return sendAck(reply, retry(delivery, proofHash));
-        return sendAck(reply, reject(delivery, proofHash, PenaltyRejectionReason.PENALTY_REJECTION_REASON_INVALID_SOURCE_PROOF));
+        if (outcome.failure.body.code === 'pilot_not_found') return sendAck(reply, retry(delivery, proofHash));
+        return sendAck(reply, reject(delivery, proofHash, PenaltyRejectionReason.PENALTY_REJECTION_REASON_KIND_PROOF_MISMATCH));
       }
       return sendAck(reply, {
         deliveryId: delivery.deliveryId,
