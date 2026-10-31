@@ -29,7 +29,7 @@ eotha-meta-service/
 │   └── public.pem              # Public Key (shared with Rust RTSE)
 ├── prisma/
 │   ├── schema.prisma           # Database schema (PostgreSQL + PostGIS)
-│   ├── migrations/             # Additive SQL for the customs and mining-permit tables (see Customs, Regulated mining)
+│   ├── migrations/             # Baseline migration (full schema as of the customs release) plus the additive migrations after it
 │   └── sql/
 │       └── player-mission-list.sql  # One-off step before db push on a single-mission database
 ├── scripts/
@@ -159,9 +159,23 @@ npm start
 Tests run against a real PostgreSQL database through Prisma and sign with throwaway Ed25519 keypairs (a login key and a separate claim key), so they need no `keys/` files and no `CLAIM_PUBLIC_KEY`. Use a dedicated database whose name ends in `_test` (the suite refuses to run against any other):
 ```bash
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/eotha_meta_test?schema=public"
-npx prisma db push
+npx prisma migrate deploy
 npm test
 ```
+
+### Database migrations
+`prisma/migrations` builds a database from empty: `20261027000000_baseline` creates the whole schema as it stood before the customs release, and the later migrations apply on top of it. Create or update a database with:
+```bash
+npx prisma migrate deploy
+```
+`npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code` exits 0 when the database matches `schema.prisma`.
+
+**An environment already built with `prisma db push`** has the baseline's tables but no migration history, so `migrate deploy` would try to create them again. Mark the baseline as applied first, then deploy the rest:
+```bash
+npx prisma migrate resolve --applied 20261027000000_baseline
+npx prisma migrate deploy
+```
+Run this against a database that already has the baseline's tables, as a `db push` from before the customs release does; the later migrations are idempotent, so a database that `db push` has since brought up to date is also safe. Never edit an applied migration; add a new one with `npx prisma migrate dev`.
 
 ---
 
