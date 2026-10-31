@@ -170,12 +170,24 @@ npx prisma migrate deploy
 ```
 `npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code` exits 0 when the database matches `schema.prisma`.
 
-**An environment already built with `prisma db push`** has the baseline's tables but no migration history, so `migrate deploy` would try to create them again. Mark the baseline as applied first, then deploy the rest:
-```bash
-npx prisma migrate resolve --applied 20261027000000_baseline
-npx prisma migrate deploy
-```
-Run this against a database that already has the baseline's tables, as a `db push` from before the customs release does; the later migrations are idempotent, so a database that `db push` has since brought up to date is also safe. Never edit an applied migration; add a new one with `npx prisma migrate dev`.
+**An environment already built with `prisma db push`** has tables but no migration history, so `migrate deploy` would try to create them again. Tell Prisma which migrations the database already contains, then deploy the rest. A migration counts as contained when the database already has everything it adds (its tables and columns), whichever release created it. List them with `npx prisma migrate status` and compare against the migration SQL.
+
+- **Database already up to date with the current `schema.prisma`** (the usual case: `db push` has been run on every release). Mark **all** migrations as applied and do not run `migrate deploy` over them:
+  ```bash
+  for m in 20261027000000_baseline \
+           20261028000000_customs_seizure \
+           20261029000000_mining_permits \
+           20261029010000_mining_permit_redemptions \
+           20261030000000_penalty_delivery_authority; do
+    npx prisma migrate resolve --applied "$m"
+  done
+  npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code   # expect no difference
+  ```
+- **Database from an older release** (it stops before some of the later migrations). Mark the baseline and every later migration it already contains as applied, then `npx prisma migrate deploy` applies the remainder in order. For a database from before the customs release that is only `npx prisma migrate resolve --applied 20261027000000_baseline`.
+
+**Do not let `20261030000000_penalty_delivery_authority` run over a database that already has `Player.authorityRevision`.** Its table and column changes are guarded and harmless to repeat, but its backfill is not: it sets `authorityRevision = 1` and `authorityNotBeforeMs` to the current time for every pilot that has a customs seizure, mining violation or station lockout, or a customs flag. On a database that already carries authority state this lowers revisions already issued and invalidates those pilots' unexpired access tokens. The backfill is intended only for the one-time move from a database without authority columns, where it fences existing penalised pilots at revision 1 and logs them out of old tokens. Check first with `SELECT 1 FROM information_schema.columns WHERE table_name = 'Player' AND column_name = 'authorityRevision';` and mark the migration applied if a row comes back.
+
+Never edit an applied migration; add a new one with `npx prisma migrate dev`.
 
 ---
 
@@ -592,7 +604,7 @@ An active Nominal-or-better Doctor shortens newly started completion cooldowns b
 
 **FLAKY phase-3 scope:** evaluated on **successful mission acceptance only**, as authorized by the captain. Active Q12 crew below 85 morale roll a 10% departure chance, deterministically seeded by SHA-256 of the UTF-8 concatenation `flaky_undock_v1 + crewId + dockedEntityId + decimal floor(nowMs / 900000)`. The first four digest bytes, unsigned big-endian, divided by 2^32, are compared with 0.10. Retrying/reconnecting within the window cannot reroll; departures persist in the same transaction and the response token loses their attributes. Shore leave itself never rolls. **Mining-only departures need a signed-undock contracts/engine followup**; no unsigned departure notification is trusted.
 
-Deployment uses plain `npx prisma db push` (no migrations). Additions are `Spaceship.flightMsSinceLeave` (default 0), `lastLeaveStationId`/`lastLeaveAt` (nullable), `lastCrewDockedAtMs`/`lastCrewPayoutAtMs` (nullable), legacy `crewPayoutSinceDock` (default false), `CrewMember.pendingStipendCredits` (default 0), `CrewMember.juryRigComponentTypes` (JSON, default `[]`), and the per-ship/station `CrewShoreLeave` cooldown table. They preserve existing rows. Standby/dismiss during an outstanding mission still return the phase-2 `409`; replacing that refusal with a morale cost awaits a separate decision.
+The schema additions below are in the baseline migration; see [Database migrations](#database-migrations) for building a database with `npx prisma migrate deploy` and for baselining one built by `db push`. They are `Spaceship.flightMsSinceLeave` (default 0), `lastLeaveStationId`/`lastLeaveAt` (nullable), `lastCrewDockedAtMs`/`lastCrewPayoutAtMs` (nullable), legacy `crewPayoutSinceDock` (default false), `CrewMember.pendingStipendCredits` (default 0), `CrewMember.juryRigComponentTypes` (JSON, default `[]`), and the per-ship/station `CrewShoreLeave` cooldown table. They preserve existing rows. Standby/dismiss during an outstanding mission still return the phase-2 `409`; replacing that refusal with a morale cost awaits a separate decision.
 
 ## Customs
 
