@@ -555,7 +555,11 @@ describe('POST /game/factions/mining-violation', () => {
     const first = json(await reportViolation(pilot, violationFor(pilot)));
     await app.prisma.player.update({ where: { id: pilot.id }, data: { customsFlaggedUntil: new Date(first.flagged_until_ms + 3_600_000) } });
     const second = await reportViolation(pilot, violationFor(pilot));
-    assert.equal(json(second).flagged_until_ms, first.flagged_until_ms + 3_600_000);
+    // The notice reports its own signed citation; the running flag is the later of the two.
+    assert.equal(json(second).flagged_until_ms >= first.flagged_until_ms, true);
+    const player = await app.prisma.player.findUnique({ where: { id: pilot.id } });
+    assert.equal(player.customsFlaggedUntil.getTime(), first.flagged_until_ms + 3_600_000);
+    assert.equal(tokenFactions(second).customs_flagged_until_ms, first.flagged_until_ms + 3_600_000);
     // The same faction citing again keeps the flag at that faction's docks.
     assert.equal(tokenFactions(second).customs_flagged_faction_id, 'alpha');
     assert.equal(await standingOf(pilot, 'alpha'), -20);
