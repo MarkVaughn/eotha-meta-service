@@ -46,7 +46,6 @@ model Player {
   miningPermitRedemptions MiningPermitRedemption[]
   miningViolations MiningViolation[]
   authorityProjections AuthorityProjection[]
-  authorityUpdateOutbox AuthorityUpdateOutbox[]
   // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
   // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
   // was relayed. Signed into the token's `factions.customs_flagged_*` claim, so a reconnect cannot shed it.
@@ -473,21 +472,6 @@ model AuthorityProjection {
 
   @@unique([playerId, authorityRevision])
   @@index([playerId, createdAt])
-}
-
-// Transactional outbox for publishing the same immutable projection to live RTSE sessions. A
-// publisher/transport adapter is deliberately separate from settlement and may retry this row.
-model AuthorityUpdateOutbox {
-  id                String    @id @default(uuid()) @db.Uuid
-  playerId          String    @db.Uuid
-  player            Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  authorityRevision BigInt
-  projection        Bytes
-  createdAt         DateTime  @default(now())
-  publishedAt       DateTime?
-
-  @@unique([playerId, authorityRevision])
-  @@index([publishedAt, createdAt])
 }
 
 // A station that has locked a pilot out of its docking services and mission board until `until`,

@@ -30,7 +30,6 @@ async function recordAuthorityUpdate(tx, fastify, playerId, source, nowMs) {
   const signedProjection = fastify.signEnforcementProjection(projection);
   const payload = Buffer.from(EnforcementProjection.encode(signedProjection).finish());
   await tx.authorityProjection.create({ data: { playerId, authorityRevision: player.authorityRevision, payload } });
-  await tx.authorityUpdateOutbox.create({ data: { playerId, authorityRevision: player.authorityRevision, projection: payload } });
   await source.update(player.authorityRevision);
   return { authorityRevision: player.authorityRevision, projection: signedProjection };
 }

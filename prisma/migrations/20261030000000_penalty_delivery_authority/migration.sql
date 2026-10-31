@@ -23,37 +23,16 @@ CREATE TABLE IF NOT EXISTS "AuthorityProjection" (
   CONSTRAINT "AuthorityProjection_pkey" PRIMARY KEY ("id")
 );
 
-CREATE TABLE IF NOT EXISTS "AuthorityUpdateOutbox" (
-  "id" UUID NOT NULL,
-  "playerId" UUID NOT NULL,
-  "authorityRevision" BIGINT NOT NULL,
-  "projection" BYTEA NOT NULL,
-  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  "publishedAt" TIMESTAMP(3),
-
-  CONSTRAINT "AuthorityUpdateOutbox_pkey" PRIMARY KEY ("id")
-);
-
 -- CreateIndex
 CREATE UNIQUE INDEX IF NOT EXISTS "AuthorityProjection_playerId_authorityRevision_key"
   ON "AuthorityProjection"("playerId", "authorityRevision");
 CREATE INDEX IF NOT EXISTS "AuthorityProjection_playerId_createdAt_idx"
   ON "AuthorityProjection"("playerId", "createdAt");
-CREATE UNIQUE INDEX IF NOT EXISTS "AuthorityUpdateOutbox_playerId_authorityRevision_key"
-  ON "AuthorityUpdateOutbox"("playerId", "authorityRevision");
-CREATE INDEX IF NOT EXISTS "AuthorityUpdateOutbox_publishedAt_createdAt_idx"
-  ON "AuthorityUpdateOutbox"("publishedAt", "createdAt");
 
 -- AddForeignKey
 DO $$ BEGIN
   ALTER TABLE "AuthorityProjection"
     ADD CONSTRAINT "AuthorityProjection_playerId_fkey"
-    FOREIGN KEY ("playerId") REFERENCES "Player"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-DO $$ BEGIN
-  ALTER TABLE "AuthorityUpdateOutbox"
-    ADD CONSTRAINT "AuthorityUpdateOutbox_playerId_fkey"
     FOREIGN KEY ("playerId") REFERENCES "Player"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
@@ -80,6 +59,6 @@ SET "authorityRevision" = p."authorityRevision"
 FROM "Player" AS p
 WHERE p."id" = v."playerId" AND v."authorityRevision" = 0;
 
--- Historical rows intentionally receive no AuthorityProjection/AuthorityUpdateOutbox row: their
+-- Historical rows intentionally receive no AuthorityProjection row: their
 -- current signed projection is built on introspection. New settlement transactions write both
--- immutable projection and outbox rows atomically.
+-- immutable projection row atomically.
