@@ -77,10 +77,20 @@ export async function settleMiningViolation({ prisma, fastify, playerId, notice,
     const before = ship.factions[factionId];
     const after = await adjustReputation(tx, playerId, factionId, MINING_VIOLATION_REPUTATION, { reason: LEDGER_REASONS.MINING_VIOLATION });
     const current = await tx.player.findUnique({ where: { id: playerId }, select: { customsFlaggedUntil: true, customsFlaggedFactionId: true } });
-    const running = (current?.customsFlaggedUntil?.getTime() ?? 0) > nowMs;
-    const flaggedUntil = new Date(Math.max(nowMs + CUSTOMS_FLAG_MS, current?.customsFlaggedUntil?.getTime() ?? 0));
-    const flaggedFactionId = running && current.customsFlaggedFactionId !== factionId ? null : factionId;
-    await tx.player.update({ where: { id: playerId }, data: { customsFlaggedFactionId: flaggedFactionId, customsFlaggedUntil: flaggedUntil } });
+    // A citation starts when the engine observed the violation, never when a queued delivery
+    // happens to arrive. That makes delayed facts unable to extend or resurrect a penalty.
+    const flaggedUntilMs = Number(notice.issuedAtMs) + CUSTOMS_FLAG_MS;
+    const flaggedUntil = new Date(flaggedUntilMs);
+    const currentUntilMs = current?.customsFlaggedUntil?.getTime() ?? 0;
+    if (flaggedUntilMs > nowMs) {
+      const running = currentUntilMs > nowMs;
+      const nextUntilMs = Math.max(flaggedUntilMs, currentUntilMs);
+      const flaggedFactionId = running && current.customsFlaggedFactionId !== factionId ? null : factionId;
+      await tx.player.update({
+        where: { id: playerId },
+        data: { customsFlaggedFactionId: flaggedFactionId, customsFlaggedUntil: new Date(nextUntilMs) }
+      });
+    }
     const row = await tx.miningViolation.create({
       data: {
         playerId, nonce, systemH3: notice.systemH3, factionId, issuedAtMs: BigInt(notice.issuedAtMs),

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { MAX_SEIZURE_FUTURE_SKEW_MS } from '../../config/customs.js';
+import { UUID_PATTERN } from '../../config/patterns.js';
 import { MINING_VIOLATION_MAX_FUTURE_SKEW_MS } from '../../config/regulation.js';
 import { verifyCustomsSeizure } from '../../lib/customs-seizure.js';
 import {
@@ -76,7 +77,7 @@ function validateDelivery(delivery, claimKey, nowMs) {
 
   const proof = customs ?? mining;
   const nonce = Buffer.from(proof.nonce);
-  if (!proof.pilotId || nonce.length !== 16) {
+  if (!proof.pilotId || !UUID_PATTERN.test(proof.pilotId) || nonce.length !== 16) {
     return { rejectionReason: PenaltyRejectionReason.PENALTY_REJECTION_REASON_INVALID_SOURCE_PROOF };
   }
   if (delivery.deliveryId !== deliveryId(delivery.kind, proof.pilotId, nonce)) {
@@ -150,7 +151,7 @@ export default async function rtseInternalRoutes(fastify) {
         : await settleMiningViolation({ prisma: fastify.prisma, fastify, playerId: checked.playerId, notice: checked.notice });
       if (outcome.failure) {
         if (outcome.failure.status === 404) return sendAck(reply, retry(delivery, proofHash));
-        return sendAck(reply, reject(delivery, proofHash, PenaltyRejectionReason.PENALTY_REJECTION_REASON_UNSPECIFIED));
+        return sendAck(reply, reject(delivery, proofHash, PenaltyRejectionReason.PENALTY_REJECTION_REASON_INVALID_SOURCE_PROOF));
       }
       return sendAck(reply, {
         deliveryId: delivery.deliveryId,
@@ -170,6 +171,7 @@ export default async function rtseInternalRoutes(fastify) {
   fastify.get('/players/:pilotId/authority', {
     schema: { params: { type: 'object', required: ['pilotId'], properties: { pilotId: { type: 'string', minLength: 1, maxLength: 256 } } } }
   }, async (request, reply) => {
+    if (!UUID_PATTERN.test(request.params.pilotId)) return reply.code(404).send({ error: 'PILOT_NOT_FOUND' });
     const projection = await buildEnforcementProjection(fastify.prisma, request.params.pilotId);
     if (!projection) return reply.code(404).send({ error: 'PILOT_NOT_FOUND' });
     const signedProjection = fastify.signEnforcementProjection(projection);

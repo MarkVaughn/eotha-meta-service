@@ -205,9 +205,10 @@ export default async function factionsRoutes(fastify) {
 
   // Applies a mining violation notice the engine signed when the pilot's Patrol Alert filled, once per nonce: the
   // faction governing the system takes MINING_VIOLATION_REPUTATION off the pilot's standing, and the pilot's
-  // transponder is flagged for a mandatory customs inspection at that faction's docks for an hour from now, signed
-  // into the token's `factions.customs_flagged_*` so a reconnect cannot shed it. A notice never expires on a clock; a
-  // replay changes nothing and answers with the first result and the pilot's standings now.
+  // transponder is flagged for a mandatory customs inspection at that faction's docks for an hour from issuance, signed
+  // into the token's `factions.customs_flagged_*` so a reconnect cannot shed it. A late notice still settles once,
+  // but cannot revive a citation whose signed hour has already elapsed; a replay changes nothing and answers with
+  // the first result and the pilot's standings now.
   fastify.post('/factions/mining-violation', { schema: violationSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
     const { notice } = request.body;

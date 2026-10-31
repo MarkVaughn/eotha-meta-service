@@ -1,14 +1,16 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID, sign } from 'node:crypto';
-import { app, call, closeApp, internalRtseHeaders, json, newPilot, rtseKey } from './helpers.js';
+import { app, call, closeApp, internalRtseHeaders, json, newPilot, receiptAtOrigin, rtseKey, signedOffer } from './helpers.js';
 import {
   EnforcementProjection,
   PenaltyAckStatus,
   PenaltyDelivery,
   PenaltyDeliveryAck,
-  PenaltyKind
+  PenaltyKind,
+  PenaltyRejectionReason
 } from '../src/lib/contracts/penalty.js';
+import { CUSTOMS_FLAG_MS } from '../src/config/regulation.js';
 
 before(async () => { await app.ready(); });
 after(closeApp);
@@ -178,5 +180,51 @@ describe('trusted RTSE penalty delivery', () => {
     const response = await app.inject({ method: 'GET', url: '/ready' });
     assert.equal(response.statusCode, 200, response.body);
     assert.deepEqual(json(response).checks, { database: true, claim_key: true, internal_workload_credential: true });
+  });
+
+  test('derives mining citation expiry from the signed issue time and never revives an expired violation', async () => {
+    const pilot = await newPilot('DelayedCitation');
+    const issuedAtMs = Date.now() - Math.floor(CUSTOMS_FLAG_MS / 3);
+    const { delivery } = miningPenalty(pilot, { issuedAtMs });
+    const settled = await deliver(delivery);
+    assert.equal(settled.ack.status, PenaltyAckStatus.PENALTY_ACK_STATUS_APPLIED);
+
+    const row = await app.prisma.miningViolation.findFirstOrThrow({ where: { playerId: pilot.id } });
+    const player = await app.prisma.player.findUniqueOrThrow({ where: { id: pilot.id } });
+    assert.equal(row.flaggedUntil.getTime(), issuedAtMs + CUSTOMS_FLAG_MS);
+    assert.equal(player.customsFlaggedUntil.getTime(), issuedAtMs + CUSTOMS_FLAG_MS);
+
+    const expiredPilot = await newPilot('ExpiredCitation');
+    const expiredAtMs = Date.now() - CUSTOMS_FLAG_MS - 1_000;
+    const expired = await deliver(miningPenalty(expiredPilot, { issuedAtMs: expiredAtMs }).delivery);
+    assert.equal(expired.ack.status, PenaltyAckStatus.PENALTY_ACK_STATUS_APPLIED);
+    const expiredPlayer = await app.prisma.player.findUniqueOrThrow({ where: { id: expiredPilot.id } });
+    assert.equal(expiredPlayer.customsFlaggedUntil, null);
+    assert.equal(expiredPlayer.customsFlaggedFactionId, null);
+  });
+
+  test('uses a permanent contract rejection reason when a valid seizure cannot be settled', async () => {
+    const pilot = await newPilot('Uninspectable');
+    const offer = signedOffer(pilot);
+    const accepted = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+
+    const rejected = await deliver(customsPenalty(pilot, { missionId: offer.mission_id }).delivery);
+    assert.equal(rejected.ack.status, PenaltyAckStatus.PENALTY_ACK_STATUS_REJECTED);
+    assert.equal(rejected.ack.rejectionReason, PenaltyRejectionReason.PENALTY_REJECTION_REASON_INVALID_SOURCE_PROOF);
+  });
+
+  test('permanently rejects a signed penalty with a non-UUID pilot id before database settlement', async () => {
+    const rejected = await deliver(miningPenalty({ id: 'not-a-uuid' }).delivery);
+    assert.equal(rejected.ack.status, PenaltyAckStatus.PENALTY_ACK_STATUS_REJECTED);
+    assert.equal(rejected.ack.rejectionReason, PenaltyRejectionReason.PENALTY_REJECTION_REASON_INVALID_SOURCE_PROOF);
+  });
+
+  test('returns not found rather than a server error for a non-UUID authority lookup', async () => {
+    const response = await app.inject({
+      method: 'GET', url: '/internal/v1/rtse/players/not-a-uuid/authority', headers: internalRtseHeaders
+    });
+    assert.equal(response.statusCode, 404, response.body);
+    assert.equal(json(response).error, 'PILOT_NOT_FOUND');
   });
 });
