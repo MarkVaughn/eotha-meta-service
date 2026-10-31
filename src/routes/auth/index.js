@@ -43,7 +43,8 @@ export default async function authRoutes(fastify, opts) {
       callsign: player.callsign,
       home_h3: player.harbor?.h3Index || "881f1d4887fffff",
       ship_attributes: shipAttributes,
-      factions: await factionsClaim(prisma, player.id)
+      factions: await factionsClaim(prisma, player.id),
+      authority_revision: Number(player.authorityRevision ?? 0)
     };
     const token = ttlSeconds
       ? fastify.signWithExpiry({ ...claims, exp: Math.floor(Date.now() / 1000) + ttlSeconds })

@@ -27,6 +27,10 @@ model Player {
   session      GameSession?
   spaceships   Spaceship[]
   credits      Int           @default(0)
+  // Monotonic authority fence carried by login JWTs and checked by RTSE reconnect admission.
+  authorityRevision BigInt   @default(0)
+  // Unix ms invalidating JWTs issued before the latest authority-changing settlement.
+  authorityNotBeforeMs BigInt @default(0)
   // Set when development login grants the pilot its one-time starting credits; never granted twice.
   devCreditsGrantedAt DateTime?
   trades       TradeTransaction[]
@@ -41,6 +45,8 @@ model Player {
   miningPermits SystemMiningPermit[]
   miningPermitRedemptions MiningPermitRedemption[]
   miningViolations MiningViolation[]
+  authorityProjections AuthorityProjection[]
+  authorityUpdateOutbox AuthorityUpdateOutbox[]
   // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
   // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
   // was relayed. Signed into the token's `factions.customs_flagged_*` claim, so a reconnect cannot shed it.
@@ -398,6 +404,8 @@ model MiningViolation {
   issuedAtMs       BigInt
   reputationChange Int
   flaggedUntil     DateTime
+  // The authority revision committed with this nonce. A replay answers with that original revision.
+  authorityRevision BigInt   @default(0)
   createdAt        DateTime @default(now())
 
   @@unique([playerId, nonce])
@@ -444,11 +452,42 @@ model CustomsSeizure {
   exposureScoreMilli   Int
   seizedAtMs           BigInt
   fineCredits          Int      @default(0)
+  // The authority revision committed with this nonce. A replay answers with that original revision.
+  authorityRevision    BigInt   @default(0)
   result               Json
   createdAt            DateTime @default(now())
 
   @@unique([playerId, nonce])
   @@index([playerId, missionId])
+}
+
+// Immutable signed enforcement projection for one committed authority revision. It lets a
+// commit-before-ack retry return the exact projection that the first application committed.
+model AuthorityProjection {
+  id                String   @id @default(uuid()) @db.Uuid
+  playerId          String   @db.Uuid
+  player            Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  authorityRevision BigInt
+  payload           Bytes
+  createdAt         DateTime @default(now())
+
+  @@unique([playerId, authorityRevision])
+  @@index([playerId, createdAt])
+}
+
+// Transactional outbox for publishing the same immutable projection to live RTSE sessions. A
+// publisher/transport adapter is deliberately separate from settlement and may retry this row.
+model AuthorityUpdateOutbox {
+  id                String    @id @default(uuid()) @db.Uuid
+  playerId          String    @db.Uuid
+  player            Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  authorityRevision BigInt
+  projection        Bytes
+  createdAt         DateTime  @default(now())
+  publishedAt       DateTime?
+
+  @@unique([playerId, authorityRevision])
+  @@index([publishedAt, createdAt])
 }
 
 // A station that has locked a pilot out of its docking services and mission board until `until`,

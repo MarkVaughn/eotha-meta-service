@@ -32,6 +32,10 @@ process.env.NODE_ENV = 'test';
 const claimPair = generateKeyPairSync('ed25519');
 process.env.CLAIM_PUBLIC_KEY = claimPair.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex');
 delete process.env.CLAIM_PUBLIC_KEY_FILE;
+// The internal RTSE route deliberately uses a separate workload credential, never a player bearer.
+export const INTERNAL_RTSE_CREDENTIAL = 'test-only-rtse-workload-credential-0123456789';
+process.env.INTERNAL_RTSE_CREDENTIAL = INTERNAL_RTSE_CREDENTIAL;
+export const internalRtseHeaders = { 'x-eotha-workload-credential': INTERNAL_RTSE_CREDENTIAL };
 
 export { keysDir };
 // Stands in for the RTSE, which signs the claims and chart keys the meta service verifies.

@@ -27,6 +27,14 @@ const envSchema = z.object({
   CLAIM_PUBLIC_KEY: optionalString(z.string().regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hex characters (a raw Ed25519 public key)')),
   // File holding the same key as hex or a PEM public key; when both are set they must agree.
   CLAIM_PUBLIC_KEY_FILE: optionalString(z.string().min(1)),
+  // Development workload credential for the private RTSE control plane. Production can use the
+  // mTLS fingerprint allowlist instead; neither accepts a player bearer token.
+  INTERNAL_RTSE_CREDENTIAL: optionalString(z.string().min(32)),
+  // Comma-separated SHA-256 client-certificate fingerprints. mTLS is checked from the verified
+  // TLS socket rather than a forwarded header, so it is safe to enable at the service boundary.
+  INTERNAL_RTSE_MTLS_FINGERPRINTS: optionalString(z.string().min(1)),
+  // Identifies the public key RTSE has provisioned to verify signed enforcement projections.
+  ENFORCEMENT_ISSUER_KEY_ID: z.string().min(1).default('eotha-meta-service-v1'),
   // Credits a development-login pilot receives once, on its first dev login (never in production).
   DEV_STARTING_CREDITS: z.coerce.number().int().min(0).default(20_000),
   // Full WebSocket URL of the RTSE gateway handed to clients (a fixed staging host, say). Unset, it is
