@@ -29,7 +29,7 @@ eotha-meta-service/
 │   └── public.pem              # Public Key (shared with Rust RTSE)
 ├── prisma/
 │   ├── schema.prisma           # Database schema (PostgreSQL + PostGIS)
-│   ├── migrations/             # Additive SQL for the customs and mining-permit tables (see Customs, Regulated mining)
+│   ├── migrations/             # Baseline migration (full schema as of the customs release) plus the additive migrations after it
 │   └── sql/
 │       └── player-mission-list.sql  # One-off step before db push on a single-mission database
 ├── scripts/
@@ -159,9 +159,23 @@ npm start
 Tests run against a real PostgreSQL database through Prisma and sign with throwaway Ed25519 keypairs (a login key and a separate claim key), so they need no `keys/` files and no `CLAIM_PUBLIC_KEY`. Use a dedicated database whose name ends in `_test` (the suite refuses to run against any other):
 ```bash
 export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/eotha_meta_test?schema=public"
-npx prisma db push
+npx prisma migrate deploy
 npm test
 ```
+
+### Database migrations
+`prisma/migrations` builds a database from empty: `20261027000000_baseline` creates the whole schema as it stood before the customs release, and the later migrations apply on top of it. Create or update a database with:
+```bash
+npx prisma migrate deploy
+```
+`npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code` exits 0 when the database matches `schema.prisma`.
+
+**An environment already built with `prisma db push`** has the baseline's tables but no migration history, so `migrate deploy` would try to create them again. Mark the baseline as applied first, then deploy the rest:
+```bash
+npx prisma migrate resolve --applied 20261027000000_baseline
+npx prisma migrate deploy
+```
+Run this against a database that already has the baseline's tables, as a `db push` from before the customs release does; the later migrations are idempotent, so a database that `db push` has since brought up to date is also safe. Never edit an applied migration; add a new one with `npx prisma migrate dev`.
 
 ---
 
@@ -409,7 +423,7 @@ Taking off takes 0.5 s longer per passenger, so the real-time engine needs the s
 
 The count never exceeds the berths the crew leave free, `ship_attributes.passenger_capacity - ship_attributes.crew_aboard` (capacity from the LIFE_SUPPORT tier; see [Crew](#crew)): the attributes clamp it on every read, and `POST /ship/upgrade` writes the clamped count back if a component change leaves it above the new capacity.
 
-Passengers board when a passage or research mission is accepted (`passengers_aboard += required_berths`; a survey carries one surveyor, a gather none, and each counts against berth capacity like any passenger) and disembark when it is completed, abandoned at its origin (a survey or gather abandoned anywhere) or, for an abandoned passage, dropped by `POST /game/missions/disembark` (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push` (the schema is applied that way, there are no migration files).
+Passengers board when a passage or research mission is accepted (`passengers_aboard += required_berths`; a survey carries one surveyor, a gather none, and each counts against berth capacity like any passenger) and disembark when it is completed, abandoned at its origin (a survey or gather abandoned anywhere) or, for an abandoned passage, dropped by `POST /game/missions/disembark` (never below zero); each of those responses carries a re-signed token. `POST /ship/dev/passengers` sets the count directly for testing; it exists only outside production. Existing databases pick up the new column with `npx prisma db push`.
 
 ## Cargo persistence and sales
 
@@ -539,7 +553,7 @@ A pilot hires up to one crew member per class (Pilot, Navigator, Science, Engine
 - **Effects today.** Class modifiers act on `ship_attributes` through `computeShipAttributes` and scale with morale (Inspired x1.15, Nominal x1, Disgruntled x0.6, Mutinous 0), including quirk adjustments. An Adept or Master Engineer may overdrive 1 or 2 selected installed components by one effective operation tier while Nominal or better; this adds no hull budget. Morale, seniority, promotions, shore leave and the assigned capability bits are active (below). Chef and Doctor apply meta-service recovery/cooldown overrides. The expansion classes (rank Novice / Adept / Master, scaled by morale like the rest) are: **Quartermaster**, `cargo_capacity_m3` +10 / 17 / 25 % and +8 / 14 / 20 % on the credits of an ore sale (`POST /game/cargo/sell`); **Comms Officer**, `comms_range_m` +25 / 40 / 60 % and `covert_exposure_mult` -12 / 22 / 35 %; **Diplomat**, +15 / 25 / 35 % on a positive reputation gain and -15 / 25 / 40 % on the harm to the rival faction of a detected covert completion; **Smuggler**, the clean covert bonus paid at 32 / 40 / 50 % of the reward instead of 25 %. Their customs effects are described under [Customs](#customs). A promoted captain's innate class signs only the ship attribute effects, so these perks are not applied for it. Retirement is described under [Retirement, succession and Legacy Doctrines](#retirement-succession-and-legacy-doctrines-phase-4); the faction quirks that act on morale, XP, reputation and shore leave are described below, and the customs text of the rest remains future work.
 - **Abuse guards.** Dismiss and standby are refused while any mission is held, so the crew cannot be fired just before a payout. Engineer departure never blocks on the loadout: effective operation falls to stored tiers without changing or removing installed components or refunding credits. Hire, dismiss, standby and activate all run under the pilot's lock, so berths, the class slot and credits are never over-spent.
 
-`CrewMember` and `CargoSale.crewShareCredits` (default `0`, so a replayed sale reports its own split) are additions only, so existing databases pick them up with `npx prisma db push` (there are no migration files). `CrewMember.sourceCandidateId` (the board candidate the member was hired as; null on existing rows, which never match a candidate) is likewise a nullable addition with no unique constraint, so plain `db push` applies it; a hire checks it under the pilot's lock.
+`CrewMember` and `CargoSale.crewShareCredits` (default `0`, so a replayed sale reports its own split) are additions only, so existing databases pick them up with `npx prisma db push`. `CrewMember.sourceCandidateId` (the board candidate the member was hired as; null on existing rows, which never match a candidate) is likewise a nullable addition with no unique constraint, so plain `db push` applies it; a hire checks it under the pilot's lock.
 
 ### Morale, seniority and crew capabilities (phase 3)
 
@@ -605,7 +619,7 @@ If the claim names a held mission it fails: the mission and its passengers are r
 
 **Interpreted values.** The design leaves these open and this service chose them: the Smuggler and the Doctor/Diplomat bribe discounts; that the class inspection terms hold for any payload (the payload specialities are not modelled); the 10 % damage floor; the deterministic damage and detainee picks; the combined ledger row when the sponsor is the governing faction; reputation losses figured on the offer's `reputation_change` (floored at 0) rather than the claim; that a seizure is applied on submission, not on the engine's clock (the 25 % light-injury chance of tier 3 and the 500 credit bail are not implemented); and that a seizure claim never relayed leaves the mission held (the engine refuses its completion); abandoning it first does not avoid the fine, since the abandon keeps the offer (`AbandonedMission.offer`, covert contraband missions only: a mission abandoned before this change has none, and a capture then only frees its hostages). A crew member customs hold cannot be dismissed, moved to standby or promoted to Captain until the hold ends (`409 crew_detained`).
 
-**Schema.** `CrewMember.detainedUntil` (nullable), `AbandonedMission.offer` (nullable JSON), the new `CustomsSeizure` and `StationLockout` tables, `ReputationLedger.bribePaidCredits` (already present) and no other change: additions only. The repository applies its schema with `npx prisma db push` and has no baseline migration history, so `prisma/migrations/20261028000000_customs_seizure/migration.sql` holds just this change as additive, idempotent (`IF NOT EXISTS`) SQL for a database managed with migrations, and applies cleanly on top of a `db push`ed database (`db push` produces the same result and is what the tests and CI use).
+**Schema.** `CrewMember.detainedUntil` (nullable), `AbandonedMission.offer` (nullable JSON), the new `CustomsSeizure` and `StationLockout` tables, `ReputationLedger.bribePaidCredits` (already present) and no other change: additions only. `prisma/migrations/20261028000000_customs_seizure/migration.sql` holds just this change as additive, idempotent (`IF NOT EXISTS`) SQL on top of the baseline (see Database migrations), and applies cleanly on a `db push`ed database too.
 
 ## Regulated mining and ore trade (Factions stage F5)
 
