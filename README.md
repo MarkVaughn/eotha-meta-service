@@ -163,6 +163,11 @@ npx prisma migrate deploy
 npm test
 ```
 
+#### Local checks and pre-commit hook
+- `npm run check` runs what CI runs after `npm ci`, fastest first: syntax check, Prisma schema validation, `npm run build`, `prisma migrate deploy`, the schema drift check and `npm test`. It needs `DATABASE_URL` set to a `_test` database (it refuses any other), names the failing step and exits non-zero.
+- `npm run check:fast` is the quick subset (syntax check and schema validation); it needs no database and writes no files.
+- `npm run hooks:install` opts in to `.githooks/pre-commit`, which runs `check:fast` before each commit (it sets `core.hooksPath`; nothing installs it automatically). Skip it for one commit with `git commit --no-verify`; undo with `git config --unset core.hooksPath`.
+
 ### Database migrations
 `prisma/migrations` builds a database from empty: `20261027000000_baseline` creates the whole schema as it stood before the customs release, and the later migrations apply on top of it. Create or update a database with:
 ```bash

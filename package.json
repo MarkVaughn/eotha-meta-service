@@ -8,7 +8,10 @@
     "start": "node src/app.js",
     "test": "node --test",
     "db:migrate": "prisma migrate dev",
-    "keys:generate": "node scripts/generate-keys.js"
+    "keys:generate": "node scripts/generate-keys.js",
+    "check": "bash scripts/check.sh full",
+    "check:fast": "bash scripts/check.sh fast",
+    "hooks:install": "git config core.hooksPath .githooks"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.16.0",
