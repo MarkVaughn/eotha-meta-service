@@ -51,8 +51,12 @@ jobs:
       - name: Build & Generate Prisma Client
         run: npm run build
 
-      - name: Apply Database Schema
-        run: npx prisma db push --skip-generate
+      - name: Apply Prisma Migrations
+        run: npx prisma migrate deploy
+
+      # Fails (exit code 2) if the migrations leave the database different from prisma/schema.prisma.
+      - name: Check Schema Drift
+        run: npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
 
       # Tests sign with a throwaway Ed25519 keypair and run against the Postgres service above.
       - name: Run Test Suite
