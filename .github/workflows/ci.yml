@@ -64,26 +64,40 @@ jobs:
 
   # Regenerates the contract bindings from eotha-contracts main and fails if the vendored copies differ.
   # eotha-contracts is private, so this needs the CONTRACTS_READ_TOKEN secret (fine-grained, read-only
-  # contents access to that repo). Without it (e.g. fork PRs) the job skips instead of failing.
+  # contents access to that repo). A missing secret fails the job; only fork PRs and Dependabot runs, which GitHub never
+  # gives secrets, skip it.
   contract-drift:
     name: Contract Drift
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      HAS_CONTRACTS_TOKEN: ${{ secrets.CONTRACTS_READ_TOKEN != '' }}
     steps:
+      # The only step that evaluates the secret in an expression to test it; it exports a boolean, never the value.
       - name: Check for contracts read token
-        if: env.HAS_CONTRACTS_TOKEN != 'true'
-        run: echo "::notice::CONTRACTS_READ_TOKEN is not available (fork PR or unset); skipping contract drift check."
+        id: token
+        env:
+          HAS_TOKEN: ${{ secrets.CONTRACTS_READ_TOKEN != '' }}
+          NO_SECRETS_RUN: ${{ github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+        run: |
+          if [ "$HAS_TOKEN" = true ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$NO_SECRETS_RUN" = true ]; then
+            echo "::notice::Fork PR or Dependabot run: secrets are unavailable, skipping contract drift check."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::CONTRACTS_READ_TOKEN is not set; the contract drift check cannot run. Add the secret (read-only contents access to MarkVaughn/eotha-contracts)."
+            exit 1
+          fi
 
       - name: Checkout repository
-        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        if: steps.token.outputs.available == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      # The token is used by this step alone, and persist-credentials: false keeps it out of .git/config
+      # so the later steps (npm ci, buf generate) never see it.
       - name: Checkout eotha-contracts (main)
-        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        if: steps.token.outputs.available == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: MarkVaughn/eotha-contracts
@@ -93,14 +107,17 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js (via .nvmrc)
-        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        if: steps.token.outputs.available == 'true'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: '.nvmrc'
 
+      # CONTRACTS_REF: HEAD is the ref checked out above; without it the script would try an
+      # unauthenticated `git fetch origin main`, which cannot succeed on a private repository.
       - name: Check Contract Drift
-        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        if: steps.token.outputs.available == 'true'
         env:
           CONTRACTS_DIR: ${{ github.workspace }}/eotha-contracts
+          CONTRACTS_REF: HEAD
           CONTRACT_DRIFT_REQUIRE: '1'
         run: bash scripts/check-contract-drift.sh
