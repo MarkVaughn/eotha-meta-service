@@ -26,7 +26,7 @@ fi
 
 REF="${CONTRACTS_REF:-}"
 if [ -z "$REF" ]; then
-  git -C "$CONTRACTS" fetch --quiet origin main 2>/dev/null || echo "contract-drift: could not fetch origin/main; using local refs." >&2
+  GIT_TERMINAL_PROMPT=0 git -C "$CONTRACTS" fetch --quiet origin main 2>/dev/null || echo "contract-drift: could not fetch origin/main; using local refs." >&2
   if git -C "$CONTRACTS" rev-parse --verify --quiet origin/main >/dev/null; then REF=origin/main; else REF=HEAD; fi
 fi
 SHA="$(git -C "$CONTRACTS" rev-parse --verify "$REF^{commit}")"
