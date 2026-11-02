@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Re-vendor the exploration schema from a sibling eotha-contracts checkout into
-# src/lib/contracts/exploration.js (compiled to ESM). Skips quietly if the checkout is absent.
+# Re-vendor the contract bindings from a sibling eotha-contracts checkout into src/lib/contracts/ (compiled
+# to ESM with ".js" import specifiers, the same pipeline scripts/check-contract-drift.sh verifies):
+#   exploration.js   standalone copy of eotha/rtse/v1/exploration
+#   penalty/         relative-import closure of eotha/internal/v1/penalty_delivery (stale files are removed)
+# Skips quietly if the checkout is absent.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTRACTS="${CONTRACTS_DIR:-$ROOT/../eotha-contracts}"
-SRC="gen/ts/eotha/rtse/v1/exploration.ts"
-DEST="$ROOT/src/lib/contracts/exploration.js"
+VENDOR="$ROOT/src/lib/contracts"
+TOOLS="$ROOT/scripts/lib/contracts-tools.mjs"
+# shellcheck source=lib/contracts-lib.sh
+. "$ROOT/scripts/lib/contracts-lib.sh"
 
 if [ ! -d "$CONTRACTS" ]; then
   echo "sync-contracts: $CONTRACTS not found; skipping (set CONTRACTS_DIR to override)." >&2
@@ -16,29 +21,42 @@ fi
 # Rebuild the generated TypeScript bindings from the .proto files.
 (cd "$CONTRACTS" && npm run generate)
 
-if [ ! -f "$CONTRACTS/$SRC" ]; then
-  echo "sync-contracts: $CONTRACTS/$SRC was not generated." >&2
-  exit 1
-fi
-
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
+contracts_compile "$CONTRACTS" "$OUT"
 
-# The generated file has Node-typing errors under bare tsc (Buffer/globalThis) but emits valid JS, so type
-# checking is skipped (--noCheck); a real compile failure is fatal and a missing output is too.
-(cd "$CONTRACTS" && ./node_modules/.bin/tsc --ignoreConfig "$SRC" --outDir "$OUT" \
-  --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --noCheck)
+for entry in "$CONTRACTS_EXPLORATION_ENTRY" "$CONTRACTS_PENALTY_ENTRY"; do
+  if [ ! -f "$OUT/$entry" ]; then
+    echo "sync-contracts: compilation produced no $entry." >&2
+    exit 1
+  fi
+done
 
-if [ ! -f "$OUT/exploration.js" ]; then
-  echo "sync-contracts: compilation produced no output." >&2
+SHA="$(git -C "$CONTRACTS" rev-parse --short=40 HEAD 2>/dev/null || echo unknown)"
+
+# vendor <generated-file> <destination> <header-line>...
+vendor() {
+  local src="$1" dest="$2"
+  shift 2
+  mkdir -p "$(dirname "$dest")"
+  { printf '%s\n' "$@"; node "$TOOLS" body "$src"; } > "$dest"
+}
+
+exploration_files="$(node "$TOOLS" closure "$OUT" "$CONTRACTS_EXPLORATION_ENTRY")"
+if [ "$exploration_files" != "$CONTRACTS_EXPLORATION_ENTRY" ]; then
+  echo "sync-contracts: $CONTRACTS_EXPLORATION_ENTRY imports other generated files; the standalone exploration.js cannot hold them." >&2
   exit 1
 fi
+vendor "$OUT/$CONTRACTS_EXPLORATION_ENTRY" "$VENDOR/exploration.js" \
+  "// Vendored from eotha-contracts commit $SHA (gen/ts/eotha/rtse/v1/exploration.ts, compiled to ESM). DO NOT EDIT;" \
+  "// regenerate with scripts/sync-contracts.sh when exploration.proto changes."
+echo "sync-contracts: wrote $VENDOR/exploration.js"
 
-mkdir -p "$(dirname "$DEST")"
-{
-  echo "// Vendored from eotha-contracts (gen/ts/eotha/rtse/v1/exploration.ts, compiled to ESM). DO NOT EDIT;"
-  echo "// regenerate from the contracts repo when exploration.proto changes."
-  cat "$OUT/exploration.js"
-} > "$DEST"
-
-echo "sync-contracts: wrote $DEST"
+# Replace the penalty tree wholesale so files dropped from the import closure do not linger.
+expected="$(node "$TOOLS" closure "$OUT" "$CONTRACTS_PENALTY_ENTRY")"
+rm -rf "$VENDOR/penalty"
+while IFS= read -r rel; do
+  vendor "$OUT/$rel" "$VENDOR/penalty/$rel" \
+    "// Vendored from eotha-contracts commit $SHA (PenaltyDelivery contracts). DO NOT EDIT; regenerate with scripts/sync-contracts.sh."
+done <<< "$expected"
+echo "sync-contracts: wrote $(printf '%s\n' "$expected" | wc -l | tr -d ' ') files under $VENDOR/penalty"

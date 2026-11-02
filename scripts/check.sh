@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local verification entry point. Usage: scripts/check.sh [fast|full]
 #   fast  syntax check of every JS file, Prisma schema validation. No database, no file writes.
-#   full  fast, then the contract drift check (skips if no sibling ../eotha-contracts checkout), then the gates .github/workflows/ci.yml runs after `npm ci`:
+#   full  fast, then the DATABASE_URL guard, the contract drift check (skips if no sibling ../eotha-contracts checkout), then the gates .github/workflows/ci.yml runs after `npm ci`:
 #         build, migrate deploy, schema drift check, test suite. Needs DATABASE_URL (a database ending in _test).
 # Each step is named; the first failure names the step and exits non-zero.
 set -uo pipefail
@@ -52,8 +52,8 @@ step "prisma schema validation" validate_schema
 [ "$mode" = fast ] && { echo "check:fast passed"; exit 0; }
 
 export NODE_ENV=test
-step "contract drift (vendored vs eotha-contracts)" bash scripts/check-contract-drift.sh
 step "test database guard" require_test_database
+step "contract drift (vendored vs eotha-contracts)" bash scripts/check-contract-drift.sh
 step "build (prisma generate)" npm run build
 step "prisma migrate deploy" npx prisma migrate deploy
 step "schema drift check" npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
