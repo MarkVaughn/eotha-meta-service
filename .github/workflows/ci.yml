@@ -64,7 +64,7 @@ jobs:
 
   # Regenerates the contract bindings from eotha-contracts main and fails if the vendored copies differ.
   # eotha-contracts is private, so this needs the CONTRACTS_READ_TOKEN secret (fine-grained, read-only
-  # contents access to that repo). A missing secret fails the job; only fork PRs, which GitHub never
+  # contents access to that repo). A missing secret fails the job; only fork PRs and Dependabot runs, which GitHub never
   # gives secrets, skip it.
   contract-drift:
     name: Contract Drift
@@ -76,12 +76,12 @@ jobs:
         id: token
         env:
           HAS_TOKEN: ${{ secrets.CONTRACTS_READ_TOKEN != '' }}
-          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          NO_SECRETS_RUN: ${{ github.actor == 'dependabot[bot]' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         run: |
           if [ "$HAS_TOKEN" = true ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
-          elif [ "$IS_FORK_PR" = true ]; then
-            echo "::notice::Fork PR: secrets are unavailable, skipping contract drift check."
+          elif [ "$NO_SECRETS_RUN" = true ]; then
+            echo "::notice::Fork PR or Dependabot run: secrets are unavailable, skipping contract drift check."
             echo "available=false" >> "$GITHUB_OUTPUT"
           else
             echo "::error::CONTRACTS_READ_TOKEN is not set; the contract drift check cannot run. Add the secret (read-only contents access to MarkVaughn/eotha-contracts)."
