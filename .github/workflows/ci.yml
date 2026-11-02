@@ -61,3 +61,46 @@ jobs:
       # Tests sign with a throwaway Ed25519 keypair and run against the Postgres service above.
       - name: Run Test Suite
         run: npm test
+
+  # Regenerates the contract bindings from eotha-contracts main and fails if the vendored copies differ.
+  # eotha-contracts is private, so this needs the CONTRACTS_READ_TOKEN secret (fine-grained, read-only
+  # contents access to that repo). Without it (e.g. fork PRs) the job skips instead of failing.
+  contract-drift:
+    name: Contract Drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HAS_CONTRACTS_TOKEN: ${{ secrets.CONTRACTS_READ_TOKEN != '' }}
+    steps:
+      - name: Check for contracts read token
+        if: env.HAS_CONTRACTS_TOKEN != 'true'
+        run: echo "::notice::CONTRACTS_READ_TOKEN is not available (fork PR or unset); skipping contract drift check."
+
+      - name: Checkout repository
+        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout eotha-contracts (main)
+        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: MarkVaughn/eotha-contracts
+          ref: main
+          path: eotha-contracts
+          token: ${{ secrets.CONTRACTS_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup Node.js (via .nvmrc)
+        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: '.nvmrc'
+
+      - name: Check Contract Drift
+        if: env.HAS_CONTRACTS_TOKEN == 'true'
+        env:
+          CONTRACTS_DIR: ${{ github.workspace }}/eotha-contracts
+          CONTRACT_DRIFT_REQUIRE: '1'
+        run: bash scripts/check-contract-drift.sh

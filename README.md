@@ -164,7 +164,8 @@ npm test
 ```
 
 #### Local checks and pre-commit hook
-- `npm run check` runs what CI runs after `npm ci`, fastest first: syntax check, Prisma schema validation, `npm run build`, `prisma migrate deploy`, the schema drift check and `npm test`. It needs `DATABASE_URL` set to a `_test` database (it refuses any other), names the failing step and exits non-zero.
+- `npm run check` runs what CI runs after `npm ci`, fastest first: syntax check, Prisma schema validation, the contract drift check, `npm run build`, `prisma migrate deploy`, the schema drift check and `npm test`. It needs `DATABASE_URL` set to a `_test` database (it refuses any other), names the failing step and exits non-zero.
+- `scripts/check-contract-drift.sh` regenerates the contract bindings from `eotha-contracts` main and fails if the vendored copies under `src/lib/contracts/` differ. Point `CONTRACTS_DIR` at a checkout (default `../eotha-contracts`); locally it skips when none exists, and CI (job `Contract Drift`, needs the `CONTRACTS_READ_TOKEN` secret) requires it. Fix drift by re-vendoring (`scripts/sync-contracts.sh` for exploration; penalty bindings are vendored by hand).
 - `npm run check:fast` is the quick subset (syntax check and schema validation); it needs no database and writes no files.
 - `npm run hooks:install` opts in to `.githooks/pre-commit`, which runs `check:fast` before each commit (it sets `core.hooksPath`; nothing installs it automatically). Skip it for one commit with `git commit --no-verify`; undo with `git config --unset core.hooksPath`.
 

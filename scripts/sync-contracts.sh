@@ -24,10 +24,10 @@ fi
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
-# The generated file has Node-typing errors under bare tsc (Buffer/globalThis) but still emits
-# valid JS, so type errors are tolerated and only a missing output is fatal.
+# The generated file has Node-typing errors under bare tsc (Buffer/globalThis) but emits valid JS, so type
+# checking is skipped (--noCheck); a real compile failure is fatal and a missing output is too.
 (cd "$CONTRACTS" && ./node_modules/.bin/tsc --ignoreConfig "$SRC" --outDir "$OUT" \
-  --target es2022 --module esnext --moduleResolution bundler --skipLibCheck) || true
+  --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --noCheck)
 
 if [ ! -f "$OUT/exploration.js" ]; then
   echo "sync-contracts: compilation produced no output." >&2
