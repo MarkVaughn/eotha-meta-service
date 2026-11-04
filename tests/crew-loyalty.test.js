@@ -298,6 +298,13 @@ describe('Flying Colors morale (pure)', () => {
     assert.deepEqual(view.colors, { factionId: 'alpha', moraleShift: 10 });
     assert.deepEqual(view.loyalty, { alpha: 100, beta: 0, gamma: 50 });
   });
+
+  test('the engineer jury-rig flag follows the shifted morale across the Nominal threshold', () => {
+    const engineer = { ...member({ crewClass: 'ENGINEER', rank: 'MASTER', morale: 45, ...lean(100, 0) }), id: 'e', name: 'e', status: 'ACTIVE', hiredAt: new Date(), seniorityXp: 0, unutilizedStreak: 0, unpaidArrearsCredits: 0, pendingStipendCredits: 0, wageShareBp: 500, homeFactionId: 'alpha', hiredAtStationId: 's' };
+    const [shifted] = withFlyingColors([engineer], 'alpha');
+    assert.equal(crewMemberView(engineer).juryRig.active, false);
+    assert.equal(crewMemberView(shifted).juryRig.active, true);
+  });
 });
 
 // --- Routes: settlements -----------------------------------------------------------------------------------

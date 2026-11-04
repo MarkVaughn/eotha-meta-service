@@ -222,7 +222,7 @@ export function crewMemberView(member, traits = []) {
     ...(member.crewClass === 'ENGINEER' && { juryRig: {
       selectedComponentTypes: member.juryRigComponentTypes ?? [],
       slots: engineerJuryRigSlots(member),
-      active: member.status === CREW_STATUS.ACTIVE && !member.detained && member.morale >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
+      active: member.status === CREW_STATUS.ACTIVE && !member.detained && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
     } }),
     promotion: promotionTerms(member),
     capabilities: capabilitiesView(member),
