@@ -7,6 +7,7 @@ import { join, resolve } from 'path';
 import env from '../config/env.js';
 import { EnforcementProjection } from '../lib/contracts/penalty.js';
 
+const SESSION_TOKEN_HEADER = 'x-eotha-token';
 const ENFORCEMENT_PROJECTION_DOMAIN = Buffer.from('EOTHA_ENFORCEMENT_PROJECTION_V1', 'ascii');
 
 function readKey(dir, name) {
@@ -70,10 +71,18 @@ async function securityPlugin(fastify, opts) {
     return { ...unsigned, signature };
   });
 
-  // Decorator to protect specific meta endpoints
+  // Decorator to protect specific meta endpoints. The session JWT is read from `Authorization: Bearer`
+  // and, only when no Bearer is present, from `X-Eotha-Token`. Browsers behind a basic-auth tunnel
+  // (the ngrok dev client) cannot use Authorization, since it overrides their cached basic-auth login.
+  // Both sources get identical signature, issuer and expiry checks from the same jwtVerify call.
   fastify.decorate('authenticate', async (request, reply) => {
     try {
-      await request.jwtVerify();
+      const hasBearer = /^Bearer\s/i.test(request.headers.authorization ?? '');
+      if (hasBearer) {
+        await request.jwtVerify();
+      } else {
+        await request.jwtVerify({ extractToken: (req) => req.headers[SESSION_TOKEN_HEADER] });
+      }
     } catch (err) {
       reply.code(401).send({ error: 'Unauthorized credentials' });
     }
