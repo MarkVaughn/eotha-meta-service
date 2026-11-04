@@ -6,6 +6,10 @@ import {
   CREW_BOARD_OFFER_COUNT,
   CREW_BOARD_WINDOW_MS,
   CREW_CLASS_IDS,
+  CREW_LOYALTY_ALPHA_ORIGIN,
+  CREW_LOYALTY_BETA_ORIGIN,
+  CREW_LOYALTY_GAMMA_ORIGIN,
+  CREW_LOYALTY_INDEPENDENT_ORIGIN,
   CREW_REP_REQ_SCORE,
   CREW_WAGE_SHARE_BP,
   HOME_FACTION_WEIGHTS,
@@ -69,8 +73,38 @@ function pick(seed, facet, table, total = 1000) {
 
 const QUIRK_TABLE = QUIRK_IDS.map((id) => [id, QUIRKS[id].weight]);
 
-/** The candidate of `slotIndex` on `stationId`'s board in the window `windowIndex`. */
-export function generateCandidate(stationId, windowIndex, slotIndex) {
+// A number in the inclusive range `[lo, hi]` drawn from `seed` for the named facet.
+const rollIn = (seed, facet, [lo, hi]) => lo + roll(seed, facet, hi - lo + 1);
+
+/**
+ * The loyalty `{ alpha, beta, gamma }` of a candidate offered at a station governed by `stationFactionId`
+ * (`''` or `independent` for a Free Port): each facet rolled in the range of that origin
+ * (CREW_LOYALTY_*_ORIGIN). Pure in `seed` and the faction, so every pilot sees the same candidate and a
+ * refresh cannot reroll it. An unknown faction id is read as a Free Port.
+ */
+export function rollLoyalty(seed, stationFactionId = '') {
+  const origin = Object.hasOwn(CREW_LOYALTY_ALPHA_ORIGIN, stationFactionId) ? stationFactionId : null;
+  if (origin) {
+    return {
+      alpha: rollIn(seed, 'loyalty_alpha', CREW_LOYALTY_ALPHA_ORIGIN[origin]),
+      beta: rollIn(seed, 'loyalty_beta', CREW_LOYALTY_BETA_ORIGIN[origin]),
+      gamma: rollIn(seed, 'loyalty_gamma', CREW_LOYALTY_GAMMA_ORIGIN[origin])
+    };
+  }
+  // Free Port: alpha, then beta in what keeps |alpha + beta - 100| within the slack.
+  const { alphaBeta, sumSlack, gamma } = CREW_LOYALTY_INDEPENDENT_ORIGIN;
+  const alpha = rollIn(seed, 'loyalty_alpha', alphaBeta);
+  const beta = rollIn(seed, 'loyalty_beta', [Math.max(alphaBeta[0], 100 - sumSlack - alpha), Math.min(alphaBeta[1], 100 + sumSlack - alpha)]);
+  return { alpha, beta, gamma: rollIn(seed, 'loyalty_gamma', gamma) };
+}
+
+/**
+ * The candidate of `slotIndex` on `stationId`'s board in the window `windowIndex`, at a station governed
+ * by `stationFactionId` (the faction its docked receipt signs, `''` when independent), which seeds the
+ * candidate's loyalty. The engine derives that faction from the station's system cell, so it is a fixed
+ * property of the station: the candidate is the same on every board and on the hire.
+ */
+export function generateCandidate(stationId, windowIndex, slotIndex, stationFactionId = '') {
   const seed = candidateSeed(stationId, windowIndex, slotIndex);
   return {
     slotIndex,
@@ -79,14 +113,15 @@ export function generateCandidate(stationId, windowIndex, slotIndex) {
     crewClass: CREW_CLASS_IDS[roll(seed, 'class', CREW_CLASS_IDS.length)],
     rank: pick(seed, 'rank', slotIndex === HUB_SLOT_INDEX ? HUB_RANK_WEIGHTS : STANDARD_RANK_WEIGHTS),
     homeFactionId: pick(seed, 'faction', HOME_FACTION_WEIGHTS),
-    quirkId: pick(seed, 'quirk', QUIRK_TABLE)
+    quirkId: pick(seed, 'quirk', QUIRK_TABLE),
+    loyalty: rollLoyalty(seed, stationFactionId)
   };
 }
 
-/** `stationId`'s candidates in the window `nowMs` falls in, and that window. */
-export function generateCrewBoard(stationId, nowMs) {
+/** `stationId`'s candidates (of a station governed by `stationFactionId`) in the window `nowMs` falls in, and that window. */
+export function generateCrewBoard(stationId, nowMs, stationFactionId = '') {
   const window = crewBoardWindow(nowMs);
-  const candidates = Array.from({ length: CREW_BOARD_OFFER_COUNT }, (_, slot) => generateCandidate(stationId, window.index, slot));
+  const candidates = Array.from({ length: CREW_BOARD_OFFER_COUNT }, (_, slot) => generateCandidate(stationId, window.index, slot, stationFactionId));
   return { window, candidates };
 }
 
@@ -135,6 +170,7 @@ export function candidateView(candidate, ctx) {
     crewClass: candidate.crewClass,
     rank: candidate.rank,
     homeFactionId: candidate.homeFactionId,
+    loyalty: { ...candidate.loyalty },
     quirk: quirkView(candidate.quirkId),
     effects: classEffectsView(candidate.crewClass, candidate.rank),
     baseWageShareBp,
@@ -145,6 +181,6 @@ export function candidateView(candidate, ctx) {
   };
 }
 
-/** The candidate with `candidateId` on `stationId`'s board at `nowMs`, or undefined once its window has passed. */
-export const findCandidate = (stationId, candidateId, nowMs) =>
-  generateCrewBoard(stationId, nowMs).candidates.find((candidate) => candidate.candidateId === candidateId);
+/** The candidate with `candidateId` on `stationId`'s board (at a station governed by `stationFactionId`) at `nowMs`, or undefined once its window has passed. */
+export const findCandidate = (stationId, candidateId, nowMs, stationFactionId = '') =>
+  generateCrewBoard(stationId, nowMs, stationFactionId).candidates.find((candidate) => candidate.candidateId === candidateId);

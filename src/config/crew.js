@@ -103,6 +103,68 @@ export const HOME_FACTION_WEIGHTS = Object.freeze([
   Object.freeze(['independent', 200])
 ]);
 
+// Factions Stage F6, crew loyalty. Every candidate and crew member carries an integer loyalty in
+// [0, MAX_CREW_LOYALTY] to each great faction (alpha Aegis Directorate, beta Vanguard Freeholds, gamma
+// Veil Syndicate); 50 is neutral, and rows that predate loyalty hold it. The REST API sends the exact
+// integers; the client shows only qualitative bands.
+export const CREW_LOYALTY_FACTIONS = Object.freeze(['alpha', 'beta', 'gamma']);
+export const MIN_CREW_LOYALTY = 0;
+export const MAX_CREW_LOYALTY = 100;
+export const NEUTRAL_CREW_LOYALTY = 50;
+
+// The inclusive range each loyalty facet of a candidate is rolled in, by the faction governing the
+// station that offers them (`''` or `independent` is a Free Port). Aegis, Freehold and Syndicate
+// stations lean their recruits towards themselves and away from their rival.
+export const CREW_LOYALTY_ALPHA_ORIGIN = Object.freeze({
+  alpha: Object.freeze([50, 100]), beta: Object.freeze([0, 49]), gamma: Object.freeze([40, 60])
+});
+export const CREW_LOYALTY_BETA_ORIGIN = Object.freeze({
+  alpha: Object.freeze([0, 49]), beta: Object.freeze([50, 100]), gamma: Object.freeze([40, 60])
+});
+export const CREW_LOYALTY_GAMMA_ORIGIN = Object.freeze({
+  alpha: Object.freeze([35, 65]), beta: Object.freeze([35, 65]), gamma: Object.freeze([55, 95])
+});
+// A Free Port's recruits are moderate: alpha and beta each in INDEPENDENT_LOYALTY_RANGE with their sum
+// within INDEPENDENT_LOYALTY_SUM_SLACK of 100 (a recruit who leans one way leans away from the other),
+// and gamma in its own range.
+export const CREW_LOYALTY_INDEPENDENT_ORIGIN = Object.freeze({
+  alphaBeta: Object.freeze([25, 75]), sumSlack: 30, gamma: Object.freeze([40, 60])
+});
+
+// Berth tension (Factions F6): the ideological distance between two crew aboard is
+// T_ij = (|alpha_i - alpha_j| + |beta_i - beta_j|) / 2, and the roster's tension the mean over all pairs
+// of the crew aboard (two or more). At or above BERTH_TENSION_FRICTION_THRESHOLD the mess hall turns
+// sour: every working member aboard takes BERTH_TENSION_MORALE_HIT morale per mission completed,
+// BERTH_TENSION_CHEF_DOCTOR_MITIGATION of it with a Chef or Doctor aboard. Below BERTH_COHESION_THRESHOLD
+// the crew pulls together: BERTH_COHESION_MORALE_RECOVERY morale per mission and a
+// BERTH_COHESION_CLANDESTINE_BONUS share more on a clean covert bonus.
+export const BERTH_TENSION_FRICTION_THRESHOLD = 55.0;
+export const BERTH_TENSION_MORALE_HIT = -3;
+export const BERTH_TENSION_CHEF_DOCTOR_MITIGATION = 0.5;
+export const BERTH_COHESION_THRESHOLD = 25.0;
+export const BERTH_COHESION_MORALE_RECOVERY = 2;
+export const BERTH_COHESION_CLANDESTINE_BONUS = 0.05;
+
+// Partisan morale (Factions F6): a settled mission or customs seizure that moves a pilot's standing with
+// faction f shifts each working crew member's morale by
+// clamp(round(sum_f sign(dR_f) * w * (L_f - 50) / 50), PARTISAN_MORALE_MIN, PARTISAN_MORALE_MAX),
+// w being PARTISAN_GAIN_WEIGHT for a gain and PARTISAN_HARM_WEIGHT for a loss, and halved
+// (PARTISAN_CLEAN_COVERT_MULT) for a covert mission completed undetected.
+export const PARTISAN_GAIN_WEIGHT = 6.0;
+export const PARTISAN_HARM_WEIGHT = 9.0;
+export const PARTISAN_MORALE_MIN = -20;
+export const PARTISAN_MORALE_MAX = 15;
+export const PARTISAN_CLEAN_COVERT_MULT = 0.5;
+
+// Flying Colors (Factions F6): while a pilot flies faction F's colors, the crew aboard with loyalty to F
+// of FLYING_COLORS_LOYALIST_MIN or more have their effective morale raised by FLYING_COLORS_LOYALIST_MORALE
+// and those at FLYING_COLORS_DISSENTER_MAX or less lowered by FLYING_COLORS_DISSENTER_MORALE. It is
+// applied on read and never stored, so lowering the colors lifts it.
+export const FLYING_COLORS_LOYALIST_MIN = 65;
+export const FLYING_COLORS_DISSENTER_MAX = 30;
+export const FLYING_COLORS_LOYALIST_MORALE = 10;
+export const FLYING_COLORS_DISSENTER_MORALE = -10;
+
 // Rank odds out of 1000: a standard slot is mostly Novices, the hub specialist never one.
 export const STANDARD_RANK_WEIGHTS = Object.freeze([['NOVICE', 650], ['ADEPT', 300], ['MASTER', 50]]);
 export const HUB_RANK_WEIGHTS = Object.freeze([['ADEPT', 750], ['MASTER', 250]]);
@@ -281,6 +343,97 @@ export const inHomeSpace = ({ homeFactionId }, controllingFactionId) => (control
 const isRank = (rank) => RANKS.includes(rank);
 const rankIndex = (rank) => RANKS.indexOf(rank);
 
+const LOYALTY_COLUMNS = Object.freeze({ alpha: 'loyaltyAlpha', beta: 'loyaltyBeta', gamma: 'loyaltyGamma' });
+
+/** `member`'s loyalty to `factionId` (alpha, beta or gamma): neutral for a row without one and for any other faction. */
+export const loyaltyTo = (member, factionId) => (LOYALTY_COLUMNS[factionId] ? member?.[LOYALTY_COLUMNS[factionId]] ?? NEUTRAL_CREW_LOYALTY : NEUTRAL_CREW_LOYALTY);
+
+/** What the client shows of a crew member's loyalty: `{ alpha, beta, gamma }`, exact integers. */
+export const loyaltyView = (member) => Object.fromEntries(CREW_LOYALTY_FACTIONS.map((factionId) => [factionId, loyaltyTo(member, factionId)]));
+
+/**
+ * The morale a member's effective morale is shifted by while its pilot flies `colorsFactionId`'s colors:
+ * +FLYING_COLORS_LOYALIST_MORALE for loyalty of FLYING_COLORS_LOYALIST_MIN or more to that faction,
+ * FLYING_COLORS_DISSENTER_MORALE for FLYING_COLORS_DISSENTER_MAX or less, otherwise 0. A member at 0
+ * morale has resigned and is not shifted.
+ */
+export function colorsMoraleShift(member, colorsFactionId) {
+  if (!colorsFactionId || !LOYALTY_COLUMNS[colorsFactionId] || !(member.morale > 0)) return 0;
+  const loyalty = loyaltyTo(member, colorsFactionId);
+  if (loyalty >= FLYING_COLORS_LOYALIST_MIN) return FLYING_COLORS_LOYALIST_MORALE;
+  if (loyalty <= FLYING_COLORS_DISSENTER_MAX) return FLYING_COLORS_DISSENTER_MORALE;
+  return 0;
+}
+
+/**
+ * `crew` (active members) with `colorsMoraleShift` set on each: the stored `morale` is left as it is, and
+ * effectiveMorale reads the shift. Pass `null` when no colors are flown.
+ */
+export const withFlyingColors = (crew, colorsFactionId) =>
+  crew.map((member) => ({ ...member, colorsMoraleShift: colorsMoraleShift(member, colorsFactionId), colorsFactionId: colorsFactionId ?? null }));
+
+/**
+ * The morale `member` acts at: its stored `morale` shifted by the Flying Colors modifier
+ * (`colorsMoraleShift`, see withFlyingColors) and held to 1..MAX_CREW_MORALE, so the colors never resign a
+ * member nor lift a resigned one. Every effect and threshold reads this; every write reads `morale`.
+ */
+export function effectiveMorale({ morale, colorsMoraleShift: shift = 0 }) {
+  if (!(morale > 0) || !shift) return morale;
+  return Math.min(MAX_CREW_MORALE, Math.max(1, morale + shift));
+}
+
+/**
+ * The crew aboard that berth tension counts: `crew` (active members) less those customs hold. Crew on
+ * Harbor Standby are lodged ashore and are never in `crew` (Factions F6 ruling: friction counts only the
+ * crew actively aboard).
+ */
+const aboardCrew = (crew) => crew.filter((member) => !member.detained);
+
+/** Ideological distance between two members: T_ij = (|alpha_i - alpha_j| + |beta_i - beta_j|) / 2. */
+export const pairTension = (a, b) =>
+  (Math.abs(loyaltyTo(a, 'alpha') - loyaltyTo(b, 'alpha')) + Math.abs(loyaltyTo(a, 'beta') - loyaltyTo(b, 'beta'))) / 2;
+
+export const BERTH_STATE = Object.freeze({ FRICTION: 'FRICTION', COHESION: 'COHESION', NEUTRAL: 'NEUTRAL' });
+
+/**
+ * The mess hall of `crew` (active members): `{ crewCount, averageTension, state, moraleHit, moraleRecovery,
+ * clandestineBonus, chefOrDoctorAboard }`. `averageTension` is the mean T_ij over every pair aboard, null
+ * with fewer than two aboard (then `state` is NEUTRAL). FRICTION (tension at BERTH_TENSION_FRICTION_THRESHOLD
+ * or more) has a `moraleHit` per mission (positive: the loss), cut by BERTH_TENSION_CHEF_DOCTOR_MITIGATION
+ * and not below 1 when a working Chef or Doctor (Nominal or better) is aboard; COHESION (below
+ * BERTH_COHESION_THRESHOLD) a `moraleRecovery` per mission and a `clandestineBonus` rate.
+ */
+export function berthTension(crew = []) {
+  const aboard = aboardCrew(crew);
+  const chefOrDoctorAboard = aboard.some((member) => (member.crewClass === 'CHEF' || member.crewClass === 'DOCTOR')
+    && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD);
+  const result = { crewCount: aboard.length, averageTension: null, state: BERTH_STATE.NEUTRAL, moraleHit: 0, moraleRecovery: 0, clandestineBonus: 0, chefOrDoctorAboard };
+  if (aboard.length < 2) return result;
+  let total = 0;
+  let pairs = 0;
+  for (let i = 0; i < aboard.length; i++) {
+    for (let j = i + 1; j < aboard.length; j++) {
+      total += pairTension(aboard[i], aboard[j]);
+      pairs++;
+    }
+  }
+  result.averageTension = total / pairs;
+  if (result.averageTension >= BERTH_TENSION_FRICTION_THRESHOLD) {
+    const hit = -BERTH_TENSION_MORALE_HIT;
+    return { ...result, state: BERTH_STATE.FRICTION, moraleHit: chefOrDoctorAboard ? Math.max(1, Math.floor(hit * BERTH_TENSION_CHEF_DOCTOR_MITIGATION)) : hit };
+  }
+  if (result.averageTension < BERTH_COHESION_THRESHOLD) {
+    return { ...result, state: BERTH_STATE.COHESION, moraleRecovery: BERTH_COHESION_MORALE_RECOVERY, clandestineBonus: BERTH_COHESION_CLANDESTINE_BONUS };
+  }
+  return result;
+}
+
+/** What the lounge shows of the berth: the roster's tension (to one decimal) and what it does per mission. */
+export function berthView(crew = []) {
+  const { averageTension, ...berth } = berthTension(crew);
+  return { ...berth, averageTension: averageTension === null ? null : Math.round(averageTension * 10) / 10 };
+}
+
 /** What the client shows of a quirk: the full effect, and the numbers enforced today. */
 export function quirkView(quirkId) {
   const q = QUIRKS[quirkId];
@@ -305,8 +458,10 @@ export function quirkView(quirkId) {
  * is 0 does not get. Disgruntled is 0 for EAGER, and PERFECTIONIST is only Inspired from 88. A member customs
  * hold (`detained`, see activeCrewOf) has none. `member` carries { rank, morale, quirkId }.
  */
-export function effectiveMoraleMult({ rank, morale, quirkId, detained }) {
+export function effectiveMoraleMult(member) {
+  const { rank, quirkId, detained } = member;
   if (detained) return 0;
+  const morale = effectiveMorale(member);
   const q = QUIRKS[quirkId];
   let band;
   if (morale >= (q?.inspiredAt ?? INSPIRED_MORALE_THRESHOLD)) band = MORALE_MULT.INSPIRED;
@@ -373,7 +528,7 @@ export const engineerJuryRigSlots = (member) => member?.crewClass === 'ENGINEER'
 
 export function engineerJuryRigTypes(crew = []) {
   const engineer = crew.find((m) => m.crewClass === 'ENGINEER' && m.status !== CREW_STATUS.STANDBY && !m.detained);
-  if (!engineer || engineer.morale < NOMINAL_MORALE_THRESHOLD) return new Set();
+  if (!engineer || effectiveMorale(engineer) < NOMINAL_MORALE_THRESHOLD) return new Set();
   const selected = Array.isArray(engineer.juryRigComponentTypes) ? engineer.juryRigComponentTypes : [];
   return new Set([...new Set(selected.filter((type) => ENGINEER_JURY_RIG_TYPES.includes(type)))].slice(0, engineerJuryRigSlots(engineer)));
 }
@@ -396,7 +551,7 @@ export function innateJuryRigTypes(effectIds = []) {
 
 // Whether `member`'s unique capabilities are on: morale at NOMINAL_MORALE_THRESHOLD or better, and not a
 // LOYALIST flying against its home faction (`flyingAgainstHome`, see markFlyingAgainstHome).
-const capabilitiesOn = (member) => member.morale >= NOMINAL_MORALE_THRESHOLD && !member.flyingAgainstHome && !member.detained;
+const capabilitiesOn = (member) => effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD && !member.flyingAgainstHome && !member.detained;
 
 /**
  * The ShipAttributes.crew_capability_flags `crew` (active members) signs into the ship: the bits of every

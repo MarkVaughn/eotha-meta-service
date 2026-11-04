@@ -15,8 +15,14 @@ import {
   RANKS,
   STANDBY_TRANSFER_FEE_CREDITS,
   classEffectsView,
+  berthTension,
+  berthView,
+  colorsMoraleShift,
+  effectiveMorale,
   effectiveMoraleMult,
   effectiveWageShareBp,
+  loyaltyView,
+  withFlyingColors,
   crewPerk,
   engineerJuryRigSlots,
   maxActiveCrew,
@@ -26,8 +32,11 @@ import { MAX_REWARD_CREDITS } from '../config/missions.js';
 import {
   SETTLEMENT,
   addSeniorityXp,
+  moraleAfterGain,
   moraleAfterLoss,
+  moraleAfterPartisan,
   moraleBand,
+  partisanMoraleDelta,
   promotionTerms,
   seniorityXpGain,
   abandonPenalty,
@@ -140,12 +149,20 @@ const markDetained = (crew) => {
   return crew.map((member) => (member.detainedUntil && member.detainedUntil.getTime() > nowMs ? { ...member, detained: true } : member));
 };
 
+// `db` is the Prisma client or an open transaction. `crew` (active members) with the Flying Colors morale
+// shift of the colors its pilot flies now set on each (withFlyingColors): the stored morale is untouched.
+async function markFlyingColors(db, crew) {
+  if (crew.length === 0) return crew;
+  const player = await db.player.findUnique({ where: { id: crew[0].playerId }, select: { activeColorsFactionId: true } });
+  return withFlyingColors(crew, player?.activeColorsFactionId ?? null);
+}
+
 // `db` is the Prisma client or an open transaction. The crew aboard `shipId`, in the order they were hired.
 export const activeCrewOf = async (db, shipId) =>
-  markFlyingAgainstHome(db, markDetained(await db.crewMember.findMany({
+  markFlyingColors(db, await markFlyingAgainstHome(db, markDetained(await db.crewMember.findMany({
     where: { spaceshipId: shipId, status: CREW_STATUS.ACTIVE },
     orderBy: [{ hiredAt: 'asc' }, { id: 'asc' }]
-  })));
+  }))));
 
 // `db` is the Prisma client or an open transaction. The pilot's crew on standby, in the order they were hired.
 export const standbyCrewOf = (db, playerId) =>
@@ -176,8 +193,14 @@ function capabilitiesView(member) {
   }));
 }
 
-/** What the client shows of a crew member; `traits` are the captain's, which move the wage share. */
+/**
+ * What the client shows of a crew member; `traits` are the captain's, which move the wage share. `morale` is
+ * the stored one. While the pilot flies colors that shift it (a member aboard whose loyalty to them is high
+ * or low, see withFlyingColors) `effectiveMorale`, the band and the multiplier follow the shifted morale and
+ * `colors` names the shift.
+ */
 export function crewMemberView(member, traits = []) {
+  const shifted = member.colorsMoraleShift ? effectiveMorale(member) : member.morale;
   return {
     id: member.id,
     name: member.name,
@@ -187,8 +210,10 @@ export function crewMemberView(member, traits = []) {
     quirk: quirkView(member.quirkId),
     status: member.status,
     morale: member.morale,
-    moraleBand: moraleBand(member.morale, member.quirkId),
+    moraleBand: moraleBand(shifted, member.quirkId),
     moraleMult: effectiveMoraleMult(member),
+    ...(member.colorsMoraleShift && { effectiveMorale: shifted, colors: { factionId: member.colorsFactionId, moraleShift: shifted - member.morale } }),
+    loyalty: loyaltyView(member),
     seniorityXp: member.seniorityXp,
     unutilizedStreak: member.unutilizedStreak,
     unpaidArrearsCredits: member.unpaidArrearsCredits,
@@ -197,7 +222,7 @@ export function crewMemberView(member, traits = []) {
     ...(member.crewClass === 'ENGINEER' && { juryRig: {
       selectedComponentTypes: member.juryRigComponentTypes ?? [],
       slots: engineerJuryRigSlots(member),
-      active: member.status === CREW_STATUS.ACTIVE && !member.detained && member.morale >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
+      active: member.status === CREW_STATUS.ACTIVE && !member.detained && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD && engineerJuryRigSlots(member) > 0
     } }),
     promotion: promotionTerms(member),
     capabilities: capabilitiesView(member),
@@ -252,12 +277,16 @@ export const oreSaleBonusCredits = (crew, signedCredits) =>
   cappedBonus(signedCredits, Math.round(signedCredits * crewPerk(crew, CREW_PERK.ORE_SALE_BONUS)));
 
 /**
- * The credits the active `crew`'s Smuggler adds to a clean covert mission whose signed offer carries
+ * The credits the active `crew` add to a clean covert mission whose signed offer carries
  * `cleanBonusCredits` (at CLANDESTINE_BASE_BONUS_RATE of its reward) and whose claim paid `signedCredits`:
- * the bonus is paid at the Smuggler's rate instead.
+ * the bonus is paid at the Smuggler's rate instead, and a cohesive crew (berthTension COHESION) pays it
+ * BERTH_COHESION_CLANDESTINE_BONUS more, on top of the Smuggler's.
  */
-export const clandestineBonusCredits = (crew, signedCredits, cleanBonusCredits) =>
-  cappedBonus(signedCredits, Math.round(cleanBonusCredits * crewPerk(crew, CREW_PERK.CLANDESTINE_BONUS_RATE, CLANDESTINE_BASE_BONUS_RATE) / CLANDESTINE_BASE_BONUS_RATE));
+export const clandestineBonusCredits = (crew, signedCredits, cleanBonusCredits) => {
+  const smuggler = crewPerk(crew, CREW_PERK.CLANDESTINE_BONUS_RATE, CLANDESTINE_BASE_BONUS_RATE) / CLANDESTINE_BASE_BONUS_RATE;
+  const synergy = berthTension(crew).clandestineBonus;
+  return cappedBonus(signedCredits, Math.round(cleanBonusCredits * (smuggler + synergy * (1 + smuggler))));
+};
 
 // What the utilization predicates and the faction quirks read of a mission's signed offer, and of its
 // claim: `speedBonus` is whether the claim was paid above the offered reward (the engine's speed bonus,
@@ -333,10 +362,13 @@ export async function recordCrewAbandonment(tx, shipId, traits, sponsorFactionId
  * counts a missed settlement and loses morale past its grace. When the pay was `deferred`, every
  * member of `payroll` goes into arrears for its cut (`payout.crewPayouts`) and loses
  * MORALE_DECAY_DEFERRED_PAY morale. A mission settlement also applies the faction quirks (see
- * settleUtilization and seniorityXpGain). Returns `{ crew, effects }`: the active crew as stored now (for the
+ * settleUtilization and seniorityXpGain), the partisan shift of the standing changes it made
+ * (`factionDeltas`, `[{ factionId, delta }]`; halved when `cleanCovert`, see partisanMoraleDelta) and the
+ * berth of the crew aboard: mess-hall friction (`berthFriction`) or cohesion (`berthCohesion`), see
+ * berthTension. Returns `{ crew, effects }`: the active crew as stored now (for the
  * token the caller reissues) and what happened to each member who changed.
  */
-export async function recordCrewSettlement(tx, ship, payroll, { settlement, payout, deferred, captainXp = 0 }) {
+export async function recordCrewSettlement(tx, ship, payroll, { settlement, payout, deferred, captainXp = 0, factionDeltas = [], cleanCovert = false }) {
   // Preserve the payout time across dock consumption; a stale/pre-leg payout cannot waive a new leg.
   const lastCrewPayoutAtMs = BigInt(Date.now());
   await tx.spaceship.update({ where: { id: ship.id }, data: { crewPayoutSinceDock: true, lastCrewPayoutAtMs } });
@@ -351,6 +383,8 @@ export async function recordCrewSettlement(tx, ship, payroll, { settlement, payo
     activeCrew: aboard.size
   };
   const owed = new Map(payout.crewPayouts.map((entry) => [entry.crewId, entry.deferredCredits ?? 0]));
+  const isMissionSettlement = settlement.kind === SETTLEMENT.MISSION;
+  const berth = isMissionSettlement ? berthTension(ship.crew) : null;
   const effects = [];
   for (const member of payroll) {
     let { morale, unutilizedStreak, seniorityXp, unpaidArrearsCredits } = member;
@@ -364,6 +398,20 @@ export async function recordCrewSettlement(tx, ship, payroll, { settlement, payo
       if (used.utilized && captainXp > 0) {
         seniorityXp = addSeniorityXp(seniorityXp, seniorityXpGain(member, captainXp, settlement));
         effect.seniorityXpGained = seniorityXp - member.seniorityXp;
+      }
+    }
+    if (isMissionSettlement && aboard.has(member.id) && morale > 0) {
+      const partisan = partisanMoraleDelta(member, factionDeltas, { cleanCovert });
+      if (partisan !== 0) {
+        morale = moraleAfterPartisan({ ...member, morale }, partisan, ship.traits);
+        effect.partisanMoraleDelta = partisan;
+      }
+      if (berth.moraleHit > 0 && morale > 0) {
+        morale = moraleAfterLoss({ ...member, morale }, berth.moraleHit, ship.traits);
+        effect.berthFriction = { averageTension: Math.round(berth.averageTension * 10) / 10, moraleLoss: berth.moraleHit, mitigated: berth.chefOrDoctorAboard };
+      } else if (berth.moraleRecovery > 0 && morale > 0) {
+        morale = moraleAfterGain({ ...member, morale }, berth.moraleRecovery);
+        effect.berthCohesion = { averageTension: Math.round(berth.averageTension * 10) / 10, moraleGain: berth.moraleRecovery };
       }
     }
     const deferredCredits = deferred ? owed.get(member.id) ?? 0 : 0;

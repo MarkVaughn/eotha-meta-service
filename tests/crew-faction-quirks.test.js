@@ -249,7 +249,9 @@ describe('LOYALIST on a settled mission', () => {
   test('a mission for the home faction: +6 morale, +40% seniority XP and +10% reputation', async () => {
     const pilot = await newPilot('Loyal');
     const loyalist = await addCrew(pilot, { crewClass: 'PILOT', quirkId: LOYALIST, homeFactionId: 'alpha' });
-    const plain = await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: NEUTRAL, homeFactionId: 'alpha' });
+    // Two neutral-loyalty crew would be a cohesive berth (+2 morale a mission): this one leans away, so the
+    // berth is neither cohesive nor sour and the loyalist's morale is the quirk's alone.
+    const plain = await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: NEUTRAL, homeFactionId: 'alpha', loyaltyAlpha: 100, loyaltyBeta: 0 });
     const { active } = await hold(pilot, research(pilot, { faction_id: 'alpha', reputation_change: 20 }));
     await setMorale(loyalist, 75);
     const res = await complete(pilot, active);
@@ -278,7 +280,8 @@ describe('LOYALIST on a settled mission', () => {
   test('a covert mission against the home faction: -12 morale and capabilities off while it is held', async () => {
     const pilot = await newPilot('Betrayer');
     const loyalist = await addCrew(pilot, { crewClass: 'PILOT', rank: 'ADEPT', quirkId: LOYALIST, homeFactionId: 'alpha', morale: 75 });
-    const bystander = await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: LOYALIST, homeFactionId: 'gamma', morale: 75 });
+    // Leans away from the loyalist's neutral loyalties, so the berth is neither cohesive nor sour.
+    const bystander = await addCrew(pilot, { crewClass: 'SCIENCE', quirkId: LOYALIST, homeFactionId: 'gamma', morale: 75, loyaltyAlpha: 100, loyaltyBeta: 0 });
     const before = await call(pilot, 'GET', '/ship/loadout');
     assert.equal(json(before).ship_attributes.crew_capability_flags, CREW_CAPABILITY.HOT_CASTOFF);
 

@@ -167,6 +167,11 @@ model CrewMember {
   // Dock-configured Engineer overdrive; operation only, never persisted component upgrades.
   juryRigComponentTypes Json     @default("[]")
   homeFactionId        String     @default("independent")
+  // Loyalty to each great faction, 0 to 100 (Factions F6): seeded from the governing faction of the
+  // station that offered the candidate. 50 is neutral, which every member hired before it held.
+  loyaltyAlpha         Int        @default(50)
+  loyaltyBeta          Int        @default(50)
+  loyaltyGamma         Int        @default(50)
   hiredAtStationId     String
   sourceCandidateId    String?
   hiredAt              DateTime   @default(now())
