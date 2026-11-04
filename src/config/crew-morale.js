@@ -3,6 +3,7 @@
 // side is src/lib/crew.js. The constants are in src/config/crew.js.
 import { traitCrewTerms } from './captain.js';
 import {
+  CREW_LOYALTY_FACTIONS,
   CREW_TRAINING_FEE_CREDITS,
   CREW_TRAINING_XP_REQ,
   DISGRUNTLED_MORALE_THRESHOLD,
@@ -14,10 +15,17 @@ import {
   MORALE_DECAY_UNUTILIZED,
   MORALE_GAIN_UTILIZED_PAID,
   NOMINAL_MORALE_THRESHOLD,
+  PARTISAN_CLEAN_COVERT_MULT,
+  PARTISAN_GAIN_WEIGHT,
+  PARTISAN_HARM_WEIGHT,
+  PARTISAN_MORALE_MAX,
+  PARTISAN_MORALE_MIN,
   QUIRKS,
   RANKS,
   RESTED_MORALE_CAP,
-  UNUTILIZED_GRACE_MISSIONS
+  UNUTILIZED_GRACE_MISSIONS,
+  effectiveMorale,
+  loyaltyTo
 } from './crew.js';
 
 export const MORALE_BANDS = Object.freeze({
@@ -152,6 +160,34 @@ export function settleUtilization(member, settlement, ctx, { deferred, traits })
 export const seniorityXpGain = (member, captainXp, settlement = {}) =>
   Math.round(captainXp * (QUIRKS[member.quirkId]?.xpMult ?? 1) * (loyalty(member, settlement) === 'HOME' ? QUIRKS[member.quirkId].homeXpMult : 1));
 
+/**
+ * How a change to the pilot's standings moves one crew member's morale (Factions F6): `factionDeltas` is
+ * `[{ factionId, delta }]`, the reputation each faction gained (positive) or lost (negative). Each of the
+ * great factions among them adds sign(delta) * w * (loyalty - 50) / 50, w being PARTISAN_GAIN_WEIGHT for a
+ * gain and PARTISAN_HARM_WEIGHT for a loss: a loyalist is glad of its faction's gain and hurt by its harm,
+ * a dissenter the reverse. `cleanCovert` (a covert mission completed undetected) halves the sum; it is
+ * then rounded and held to PARTISAN_MORALE_MIN..PARTISAN_MORALE_MAX. Positive is a gain, 0 no change.
+ */
+export function partisanMoraleDelta(member, factionDeltas, { cleanCovert = false } = {}) {
+  let sum = 0;
+  for (const { factionId, delta } of factionDeltas) {
+    if (!CREW_LOYALTY_FACTIONS.includes(factionId) || !delta) continue;
+    sum += Math.sign(delta) * (delta > 0 ? PARTISAN_GAIN_WEIGHT : PARTISAN_HARM_WEIGHT) * (loyaltyTo(member, factionId) - 50) / 50;
+  }
+  const scaled = cleanCovert ? sum * PARTISAN_CLEAN_COVERT_MULT : sum;
+  return Math.min(PARTISAN_MORALE_MAX, Math.max(PARTISAN_MORALE_MIN, Math.round(scaled))) || 0;
+}
+
+/**
+ * `member`'s morale after a partisan shift of `delta` (partisanMoraleDelta): a gain like any other (the
+ * quirk's gain bonus counts), a loss like any other (the captain's traits and the quirk scale it). A
+ * member who has resigned (0) stays there.
+ */
+export function moraleAfterPartisan(member, delta, traits = []) {
+  if (delta === 0 || member.morale <= 0) return member.morale;
+  return delta > 0 ? moraleAfterGain(member, delta) : moraleAfterLoss(member, -delta, traits);
+}
+
 /** The morale a member of `quirkId` loses on accepting a covert contract, or 0. */
 export const covertAcceptPenalty = (quirkId) => QUIRKS[quirkId]?.covertAcceptPenalty ?? 0;
 
@@ -200,7 +236,7 @@ export function promotionRefusal(member) {
   return null;
 }
 
-const hasMasterChef = (crew) => crew.some((member) => member.crewClass === 'CHEF' && member.rank === 'MASTER' && member.morale >= NOMINAL_MORALE_THRESHOLD && !member.detained);
+const hasMasterChef = (crew) => crew.some((member) => member.crewClass === 'CHEF' && member.rank === 'MASTER' && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD && !member.detained);
 
 /** The morale shore leave and paid arrears bring the crew up to: 80, or 90 with an active Master Chef (Captain's Table). */
 export const restedMoraleCap = (crew) => (hasMasterChef(crew) ? MASTER_CHEF_RESTED_MORALE_CAP : RESTED_MORALE_CAP);
@@ -208,6 +244,6 @@ export const restedMoraleCap = (crew) => (hasMasterChef(crew) ? MASTER_CHEF_REST
 /** The share of the station mission cooldown an active Doctor (at Nominal morale or better) takes off, 0 to 0.5. */
 export function doctorCooldownReduction(crew) {
   return crew
-    .filter((member) => member.crewClass === 'DOCTOR' && member.morale >= NOMINAL_MORALE_THRESHOLD && !member.detained && RANKS.includes(member.rank))
+    .filter((member) => member.crewClass === 'DOCTOR' && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD && !member.detained && RANKS.includes(member.rank))
     .reduce((best, member) => Math.max(best, DOCTOR_COOLDOWN_REDUCTION[RANKS.indexOf(member.rank)]), 0);
 }

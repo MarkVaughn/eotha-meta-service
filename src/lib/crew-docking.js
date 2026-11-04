@@ -3,7 +3,7 @@ import {
   FLAKY_UNDOCK_LEAVE_CHANCE, FLIGHT_STIPEND_AFTER_MS, FLIGHT_STIPEND_CREDITS,
   MAX_ARREARS_CREDITS, MAX_COUNTED_FLIGHT_LEG_MS, MORALE_DECAY_DEFERRED_PAY, MORALE_GAIN_PAY_ARREARS,
   NOMINAL_MORALE_THRESHOLD, QUIRKS, RANKS, SHORE_LEAVE_COOLDOWN_MS, SHORE_LEAVE_DECAY_INTERVAL_MS,
-  SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_OUTPOST_GAIN, SHORE_LEAVE_STATION_GAIN, inHomeSpace
+  SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_OUTPOST_GAIN, SHORE_LEAVE_STATION_GAIN, effectiveMorale, inHomeSpace
 } from '../config/crew.js';
 import { moraleAfterCappedGain, moraleAfterLoss, restedMoraleCap } from '../config/crew-morale.js';
 import { activeCrewOf, standbyCrewOf } from './crew.js';
@@ -21,7 +21,7 @@ export const fatigueIntervals = (ms, member = {}, controllingFactionId = '') => 
 // member's gain and rested cap depend on whether `controllingFactionId`, the faction the docked receipt
 // signs as governing the dock ('' for an independent system), is its home faction.
 export function shoreLeaveTerms(crew, kind = 'STATION', member = {}, controllingFactionId = '') {
-  const galley = crew.some((m) => m.crewClass === 'CHEF' && RANKS.indexOf(m.rank) >= 1 && m.morale >= NOMINAL_MORALE_THRESHOLD && !m.detained);
+  const galley = crew.some((m) => m.crewClass === 'CHEF' && RANKS.indexOf(m.rank) >= 1 && effectiveMorale(m) >= NOMINAL_MORALE_THRESHOLD && !m.detained);
   const quirk = QUIRKS[member.quirkId];
   const stationLeave = kind === 'STATION' || galley;
   const territorial = quirk?.homeStationGain !== undefined;

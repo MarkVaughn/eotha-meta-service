@@ -2,7 +2,7 @@
 // ship, and what the crew do to the engine's customs rolls. Pure data and functions; the database side is
 // src/lib/customs.js. The engine rolls the inspection and signs the capture; everything below is the
 // meta-service's side of it.
-import { CREW_CLASSES, DISGRUNTLED_MORALE_THRESHOLD, NOMINAL_MORALE_THRESHOLD, QUIRKS, RANKS, effectiveMoraleMult } from './crew.js';
+import { CREW_CLASSES, DISGRUNTLED_MORALE_THRESHOLD, NOMINAL_MORALE_THRESHOLD, QUIRKS, RANKS, effectiveMorale, effectiveMoraleMult } from './crew.js';
 
 const round6 = (value) => Math.round(value * 1e6) / 1e6;
 const MINUTE_MS = 60_000;
@@ -131,10 +131,11 @@ const rankIndex = (rank) => RANKS.indexOf(rank);
 const working = (member) => member.morale > 0 && !member.detained;
 
 function leakOf(member) {
-  if (member.morale >= NOMINAL_MORALE_THRESHOLD) return 0;
+  const morale = effectiveMorale(member);
+  if (morale >= NOMINAL_MORALE_THRESHOLD) return 0;
   const quirk = QUIRKS[member.quirkId];
   if (quirk?.key === 'DISCREET') return 0;
-  const base = (member.morale >= DISGRUNTLED_MORALE_THRESHOLD ? LEAK_DISGRUNTLED : LEAK_MUTINOUS)
+  const base = (morale >= DISGRUNTLED_MORALE_THRESHOLD ? LEAK_DISGRUNTLED : LEAK_MUTINOUS)
     + (quirk?.key === 'NERVOUS_TELL' ? LEAK_NERVOUS_TELL : 0);
   return base * (quirk?.key === 'LOYALIST' && member.flyingAgainstHome ? 2 : 1);
 }
@@ -158,7 +159,7 @@ export function crewCustomsMults(crew = [], traits = []) {
     discount += (BRIBE_DISCOUNT[member.crewClass]?.[rankIndex(member.rank)] ?? 0) * scale;
   }
   const silenced = traits.includes(NO_LEAK_TRAIT)
-    || members.some((member) => member.crewClass === 'CHEF' && member.rank === 'MASTER' && member.morale >= NOMINAL_MORALE_THRESHOLD);
+    || members.some((member) => member.crewClass === 'CHEF' && member.rank === 'MASTER' && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD);
   const leak = silenced ? 0 : members.reduce((sum, member) => sum + leakOf(member), 0);
   const [lo, hi] = EVASION_MULT_RANGE;
   return {

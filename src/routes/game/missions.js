@@ -694,9 +694,16 @@ export default async function missionsRoutes(fastify) {
         // The speed bonus is earned when the claim paid above the offered reward, not counting the clean
         // covert bonus the engine adds after the speed and late terms.
         const cleanBonus = covert && !claim.wasDetected && bribe === 0 ? active.offer.clandestine_bonus_credits ?? 0 : 0;
+        // The standing changes the pilot just made, for the crew's partisan morale (their loyalties to those
+        // factions): the sponsor's gain or loss, and the rival's harm when the covert run was detected. A covert
+        // run completed undetected moves the crew half as much.
+        const factionDeltas = [
+          { factionId, delta: reputationChange },
+          ...(harmsRival ? [{ factionId: active.offer.opposed_faction_id, delta: -Math.abs(withCrewRivalHarmCut(claim.opposedReputationChange, ship.crew)) }] : [])
+        ];
         const settledCrew = await recordCrewSettlement(tx, ship, payroll, {
           settlement: missionSettlement(active.offer, { speedBonus: claim.rewardCredits - cleanBonus > active.offer.reward_credits }),
-          payout, deferred, captainXp: captain.xpGained
+          payout, deferred, captainXp: captain.xpGained, factionDeltas, cleanCovert: covert && !claim.wasDetected
         });
         const currentShip = { ...ship, crew: settledCrew.crew };
         const dock = request.body.dockedReceipt ? await recordCrewDock(tx, currentShip, request.body.dockedReceipt, { payoutSettled: true }) : { ship: currentShip };

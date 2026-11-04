@@ -1,3 +1,5 @@
+import { effectiveMorale, withFlyingColors } from '../../config/crew.js';
+import { moraleBand } from '../../config/crew-morale.js';
 import { FACTION_IDS, FLYING_COLORS_MIN_REP } from '../../config/factions.js';
 import { HAIL_INTENT_REQUEST_MINING_PERMIT, MINING_VIOLATION_MAX_FUTURE_SKEW_MS, miningPermitCost, standingTier } from '../../config/regulation.js';
 import { stationLockoutRefusal } from '../../lib/customs.js';
@@ -99,7 +101,11 @@ export default async function factionsRoutes(fastify) {
     reissueToken(fastify, request, toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, ship.crew).ship_attributes, factions);
 
   // Flies a faction's colors (standing at least FLYING_COLORS_MIN_REP with it), or with a null
-  // `factionId` stops, and answers with a token carrying the new `factions.active_colors`.
+  // `factionId` stops, and answers with a token carrying the new `factions.active_colors`. The crew's
+  // morale is not touched: while the colors fly, the crew aboard who are loyal to the faction act at
+  // +10 morale and those who are not at -10 (withFlyingColors), applied on read, so the token's ship
+  // attributes are signed from the shifted crew and stopping the colors lifts it. `crew_morale` lists
+  // each member the colors shift.
   fastify.post('/factions/colors', { schema: colorsSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const refused = await receiptRefusal(request);
     if (refused) return reply.code(403).send(refused);
@@ -114,10 +120,24 @@ export default async function factionsRoutes(fastify) {
         return { refused: { code: 'insufficient_reputation', required: FLYING_COLORS_MIN_REP, current } };
       }
       await tx.player.update({ where: { id: playerId }, data: { activeColorsFactionId: factionId } });
-      return { ship, factions: { ...ship.factions, active_colors: factionId } };
+      return { ship: { ...ship, crew: withFlyingColors(ship.crew, factionId) }, factions: { ...ship.factions, active_colors: factionId } };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
-    return { success: true, active_colors: factionId, factions: outcome.factions, token: await tokenFor(request, outcome.ship, outcome.factions) };
+    const crewMorale = outcome.ship.crew.filter((member) => member.colorsMoraleShift).map((member) => ({
+      crewId: member.id,
+      crewClass: member.crewClass,
+      morale: member.morale,
+      effectiveMorale: effectiveMorale(member),
+      moraleBand: moraleBand(effectiveMorale(member), member.quirkId),
+      moraleShift: effectiveMorale(member) - member.morale
+    }));
+    return {
+      success: true,
+      active_colors: factionId,
+      factions: outcome.factions,
+      ...(crewMorale.length > 0 && { crew_morale: crewMorale }),
+      token: await tokenFor(request, outcome.ship, outcome.factions)
+    };
   });
 
   // Gives up Paragon standing with a faction: it drops to NON_PARAGON_CAP_WHEN_PARAGON_ACTIVE, so

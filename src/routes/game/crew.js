@@ -1,6 +1,7 @@
 import {
   CREW_STATUS,
   CREW_WAGE_SHARE_BP,
+  berthView,
   ENGINEER_JURY_RIG_TYPES,
   engineerJuryRigSlots,
   MAX_STANDBY_CREW,
@@ -165,10 +166,14 @@ export default async function crewRoutes(fastify) {
     return dockedReceipt.dockedEntityId;
   }
 
+  // The view of `member` (a row just written) as the active `crew` carries it: aboard, it has the Flying
+  // Colors morale shift of the colors now flown; on standby it is as stored.
+  const viewIn = (member, crew, traits) => crewMemberView(crew.find((m) => m.id === member.id) ?? member, traits);
+
   // Re-signs the token with the ship's attributes after `ship.crew` changed to `crew`.
   async function respondWithShip(request, ship, crew, body) {
     const loadout = toLoadout(ship.id, ship.components, ship.passengersAboard, ship.traits, crew);
-    return { ...body, ship_attributes: loadout.ship_attributes, token: await reissueToken(fastify, request, loadout.ship_attributes, ship.factions) };
+    return { ...body, berth: berthView(crew), ship_attributes: loadout.ship_attributes, token: await reissueToken(fastify, request, loadout.ship_attributes, ship.factions) };
   }
 
   // The pilot's roster and the limits the lounge shows.
@@ -179,6 +184,7 @@ export default async function crewRoutes(fastify) {
       return {
         active: ship.crew.map((member) => crewMemberView(member, ship.traits)),
         standby: standby.map((member) => crewMemberView(member, ship.traits)),
+        berth: berthView(ship.crew),
         limits: crewLimits(ship)
       };
     });
@@ -194,7 +200,7 @@ export default async function crewRoutes(fastify) {
     if (!stationId) return reply;
     const stationFactionId = request.body.dockedReceipt.controllingFactionId;
     const nowMs = Date.now();
-    const { window, candidates } = generateCrewBoard(stationId, nowMs);
+    const { window, candidates } = generateCrewBoard(stationId, nowMs, stationFactionId);
     const ctx = await prisma.$transaction(async (tx) => {
       const ship = await lockActiveShip(tx, request.user);
       const player = await tx.player.findUnique({ where: { id: request.user.sub }, select: { credits: true } });
@@ -220,7 +226,7 @@ export default async function crewRoutes(fastify) {
   fastify.post('/crew/hire', { schema: hireSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const stationId = await dockedStation(request, reply);
     if (!stationId) return reply;
-    const candidate = findCandidate(stationId, request.body.candidateId, Date.now());
+    const candidate = findCandidate(stationId, request.body.candidateId, Date.now(), request.body.dockedReceipt.controllingFactionId);
     if (!candidate) return reply.code(404).send(refusal({ code: 'candidate_not_found' }));
 
     const outcome = await prisma.$transaction(async (tx) => {
@@ -254,6 +260,9 @@ export default async function crewRoutes(fastify) {
           morale: startingMorale(candidate.quirkId, ship.traits),
           wageShareBp: CREW_WAGE_SHARE_BP[candidate.rank],
           homeFactionId: candidate.homeFactionId,
+          loyaltyAlpha: candidate.loyalty.alpha,
+          loyaltyBeta: candidate.loyalty.beta,
+          loyaltyGamma: candidate.loyalty.gamma,
           hiredAtStationId: stationId,
           sourceCandidateId: candidate.candidateId
         }
@@ -264,7 +273,7 @@ export default async function crewRoutes(fastify) {
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
 
     const { ship, member, credits, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits,
+    return respondWithShip(request, ship, crew, { crew: viewIn(member, crew, ship.traits), credits,
       ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
@@ -336,7 +345,7 @@ export default async function crewRoutes(fastify) {
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     const { ship, member, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits),
+    return respondWithShip(request, ship, crew, { crew: viewIn(member, crew, ship.traits),
       ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
@@ -365,7 +374,7 @@ export default async function crewRoutes(fastify) {
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     return respondWithShip(request, outcome.ship, outcome.crew, {
-      crew: crewMemberView(outcome.member, outcome.ship.traits), credits: outcome.credits,
+      crew: viewIn(outcome.member, outcome.crew, outcome.ship.traits), credits: outcome.credits,
       ...(outcome.docking.applied && { docking: outcome.docking })
     });
   });
@@ -397,7 +406,7 @@ export default async function crewRoutes(fastify) {
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     const { ship, member, credits, feeCredits, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits, feeCredits });
+    return respondWithShip(request, ship, crew, { crew: viewIn(member, crew, ship.traits), credits, feeCredits });
   });
 
   fastify.post('/crew/shore-leave', { schema: shoreLeaveSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {

@@ -5,7 +5,7 @@ import {
   MIN_COMPONENT_HEALTH_PCT
 } from '../config/customs.js';
 import { isFactionId } from '../config/factions.js';
-import { abandonPenalty, moraleBand, moraleAfterLoss } from '../config/crew-morale.js';
+import { abandonPenalty, moraleAfterLoss, moraleAfterPartisan, moraleBand, partisanMoraleDelta } from '../config/crew-morale.js';
 import { fromStoredOffer } from './active-mission.js';
 import { activeCrewOf } from './crew.js';
 import { isLegacyRow } from './mission-offer.js';
@@ -162,6 +162,9 @@ export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) 
       morale = moraleAfterLoss({ ...member, morale }, penalty.moraleLoss, ship.traits);
       quirkEffects.push({ quirk: penalty.quirk, effect: 'MISSION_FAILED_INSPECTION', moraleLoss: penalty.moraleLoss });
     }
+    // The standing the capture cost the pilot with each faction, weighed by what the member feels for them.
+    const partisan = partisanMoraleDelta(member, reputationChanges.map(({ faction_id: factionId, delta }) => ({ factionId, delta })));
+    if (partisan !== 0) morale = moraleAfterPartisan({ ...member, morale }, partisan, ship.traits);
     if (morale === member.morale) continue;
     await tx.crewMember.update({ where: { id: member.id }, data: { morale } });
     crewMorale.push({
@@ -171,6 +174,7 @@ export async function applyCustomsSeizure(tx, { playerId, ship, claim, nowMs }) 
       morale,
       moraleBand: moraleBand(morale, member.quirkId),
       moraleLoss: tier.moraleLoss,
+      ...(partisan !== 0 && { partisanMoraleDelta: partisan }),
       ...(quirkEffects.length > 0 && { quirkEffects })
     });
   }
