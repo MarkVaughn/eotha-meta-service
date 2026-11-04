@@ -57,7 +57,11 @@ describe('session token header', () => {
   test('an invalid X-Eotha-Token is 401', async () => {
     assert.equal((await whoami({ 'x-eotha-token': 'not-a-jwt' })).statusCode, 401);
     assert.equal((await whoami({ 'x-eotha-token': '' })).statusCode, 401);
-    const tampered = mint('pilot-d').replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'));
+    // Flip a character mid-signature: the final base64url char of a 64-byte signature carries unused
+    // padding bits, so changing only it can decode to identical bytes.
+    const [h, p, sig] = mint('pilot-d').split('.');
+    const mid = Math.floor(sig.length / 2);
+    const tampered = [h, p, sig.slice(0, mid) + (sig[mid] === 'A' ? 'B' : 'A') + sig.slice(mid + 1)].join('.');
     assert.equal((await whoami({ 'x-eotha-token': tampered })).statusCode, 401);
   });
 
