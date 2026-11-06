@@ -4,6 +4,7 @@ import {
   CREW_CAPABILITY,
   CREW_CLASSES,
   CREW_PERK,
+  CREW_LEFT_MID_MISSION_MORALE_PENALTY,
   CREW_STATUS,
   MAX_ACTIVE_CREW_PER_CLASS,
   MAX_ARREARS_CREDITS,
@@ -349,6 +350,32 @@ export async function recordCrewAbandonment(tx, shipId, traits, sponsorFactionId
       morale,
       moraleBand: moraleBand(morale, member.quirkId),
       quirkEffects: [{ quirk: penalty.quirk, effect: 'MISSION_ABANDONED', moraleLoss: penalty.moraleLoss }]
+    });
+  }
+  return { crew: await activeCrewOf(tx, shipId), effects };
+}
+
+/**
+ * Inside the transaction that stands a crew member down to Harbor Standby or dismisses one while the
+ * pilot holds a mission, holding the pilot's lock and after the member has left: every working member
+ * still aboard `shipId` loses CREW_LEFT_MID_MISSION_MORALE_PENALTY morale, and so does the member stood
+ * down (`standbyMemberId`; a dismissed member is gone). Returns `{ crew, effects }` as
+ * recordCovertAcceptance does.
+ */
+export async function recordCrewLeftMidMission(tx, shipId, traits, standbyMemberId = null) {
+  const effects = [];
+  const standingBy = standbyMemberId ? await tx.crewMember.findUnique({ where: { id: standbyMemberId } }) : null;
+  for (const member of [...(await activeCrewOf(tx, shipId)), ...(standingBy ? [standingBy] : [])]) {
+    if (member.morale <= 0) continue;
+    const morale = moraleAfterLoss(member, CREW_LEFT_MID_MISSION_MORALE_PENALTY, traits);
+    await tx.crewMember.update({ where: { id: member.id }, data: { morale } });
+    effects.push({
+      crewId: member.id,
+      crewClass: member.crewClass,
+      moraleBefore: member.morale,
+      morale,
+      moraleBand: moraleBand(morale, member.quirkId),
+      moraleLoss: member.morale - morale
     });
   }
   return { crew: await activeCrewOf(tx, shipId), effects };

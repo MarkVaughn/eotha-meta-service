@@ -13,7 +13,7 @@ import {
 import { moraleAfterCappedGain, moraleBand, promotionRefusal, promotionTerms, restedMoraleCap } from '../../config/crew-morale.js';
 import { UUID_PATTERN } from '../../config/patterns.js';
 import { candidateView, findCandidate, generateCrewBoard, unavailableReasons } from '../../lib/crew-generator.js';
-import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, holdsActiveMission, primaryReason, standbyCrewOf } from '../../lib/crew.js';
+import { activeCrewOf, boardingReasons, crewLimits, crewMemberView, hiredCandidateIdsOf, holdsActiveMission, primaryReason, recordCrewLeftMidMission, standbyCrewOf } from '../../lib/crew.js';
 import { stationLockoutRefusal } from '../../lib/customs.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
 import { standingsOf } from '../../lib/reputation.js';
@@ -88,7 +88,6 @@ const MESSAGES = {
   class_already_active: 'A crew member of that class is already aboard.',
   insufficient_faction_rep: "Your standing with this station's governing faction is too low to hire them.",
   insufficient_credits: 'Not enough credits for the signing bonus.',
-  crew_locked_by_active_mission: 'Crew cannot be dismissed or moved while you hold a mission.',
   crew_detained: 'Customs are holding this crew member: they cannot be dismissed or moved until the hold ends.',
   crew_not_engineer: 'Only an Engineer can configure component overdrive.',
   jury_rig_slots_exceeded: 'That Engineer cannot overdrive that many components.',
@@ -113,7 +112,6 @@ const STATUS = {
   class_already_active: 409,
   insufficient_faction_rep: 403,
   insufficient_credits: 402,
-  crew_locked_by_active_mission: 409,
   crew_detained: 409,
   crew_not_engineer: 409,
   jury_rig_slots_exceeded: 409,
@@ -277,13 +275,15 @@ export default async function crewRoutes(fastify) {
       ...(outcome.docking.applied && { docking: outcome.docking }) });
   });
 
-  // Keep the phase-2 mission wage-dodging guard. Engineer removal needs no loadout guard:
-  // only effective operation falls back; stored components, credits and hull budget never change.
-  async function leaveRefusal(tx, ship, member) {
+  // Engineer removal needs no loadout guard: only effective operation falls back; stored components,
+  // credits and hull budget never change. Leaving while the pilot holds a mission is allowed but costs
+  // morale (recordCrewLeftMidMission), which also takes the place of the phase-2 wage-dodging lock.
+  function leaveRefusal(member) {
     if (member?.detainedUntil && member.detainedUntil.getTime() > Date.now()) return { code: 'crew_detained', detainedUntil: member.detainedUntil.toISOString() };
-    if (await holdsActiveMission(tx, ship.playerId)) return { code: 'crew_locked_by_active_mission' };
     return undefined;
   }
+
+  const moraleCostBody = (effects) => (effects.length > 0 ? { crew_morale: effects } : {});
 
   // Lets a crew member go. The signing bonus is not refunded.
   fastify.post('/crew/dismiss', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
@@ -292,13 +292,15 @@ export default async function crewRoutes(fastify) {
       const ship = await lockActiveShip(tx, request.user);
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId: request.user.sub } });
       if (!member) return { refused: { code: 'crew_not_found' } };
-      const refused = await leaveRefusal(tx, ship, member);
+      const refused = leaveRefusal(member);
       if (refused) return { refused };
+      const onMission = await holdsActiveMission(tx, ship.playerId);
       await tx.crewMember.delete({ where: { id: member.id } });
-      return { ship, crew: await activeCrewOf(tx, ship.id) };
+      if (!onMission) return { ship, crew: await activeCrewOf(tx, ship.id), effects: [] };
+      return { ship, ...(await recordCrewLeftMidMission(tx, ship.id, ship.traits)) };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
-    return respondWithShip(request, outcome.ship, outcome.crew, { dismissed: request.body.crewId });
+    return respondWithShip(request, outcome.ship, outcome.crew, { dismissed: request.body.crewId, ...moraleCostBody(outcome.effects) });
   });
 
   // Moves an active crew member to Harbor Standby for a fee: off the ship's berths, still on the roster.
@@ -310,7 +312,7 @@ export default async function crewRoutes(fastify) {
       const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
       if (!member) return { refused: { code: 'crew_not_found' } };
       if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
-      const refused = await leaveRefusal(tx, ship, member);
+      const refused = leaveRefusal(member);
       if (refused) return { refused };
       if ((await standbyCrewOf(tx, playerId)).length >= MAX_STANDBY_CREW) return { refused: { code: 'standby_full', maxStandbyCrew: MAX_STANDBY_CREW } };
       const paid = await tx.player.updateMany({
@@ -320,11 +322,15 @@ export default async function crewRoutes(fastify) {
       if (paid.count !== 1) return { refused: { code: 'insufficient_credits', requiredCredits: STANDBY_TRANSFER_FEE_CREDITS } };
       const moved = await tx.crewMember.update({ where: { id: member.id }, data: { status: CREW_STATUS.STANDBY, spaceshipId: null } });
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { ship, member: moved, credits: player.credits, crew: await activeCrewOf(tx, ship.id) };
+      const cost = (await holdsActiveMission(tx, playerId))
+        ? await recordCrewLeftMidMission(tx, ship.id, ship.traits, member.id)
+        : { crew: await activeCrewOf(tx, ship.id), effects: [] };
+      const stood = cost.effects.length > 0 ? await tx.crewMember.findUnique({ where: { id: member.id } }) : moved;
+      return { ship, member: stood, credits: player.credits, crew: cost.crew, effects: cost.effects };
     });
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
-    const { ship, member, credits, crew } = outcome;
-    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits, feeCredits: STANDBY_TRANSFER_FEE_CREDITS });
+    const { ship, member, credits, crew, effects } = outcome;
+    return respondWithShip(request, ship, crew, { crew: crewMemberView(member, ship.traits), credits, feeCredits: STANDBY_TRANSFER_FEE_CREDITS, ...moraleCostBody(effects) });
   });
 
   // Brings a crew member from Harbor Standby back aboard, subject to the same class, hull and berth

@@ -68,6 +68,10 @@ export const LOYALIST_BETRAYAL_PENALTY = 12;
 // The morale a LOYALIST loses when the mission abandoned was sponsored by its home faction.
 export const LOYALIST_ABANDON_PENALTY = 8;
 export const BY_THE_BOOK_COVERT_PENALTY = 8;
+// The morale each working crew member loses (before captain traits and quirk shifts) when the pilot
+// stands a crew member down to Harbor Standby or dismisses one while holding a mission. The crew
+// remaining aboard take it, and a stood-down member too (a dismissed one is gone). Tunable.
+export const CREW_LEFT_MID_MISSION_MORALE_PENALTY = 8;
 export const UNUTILIZED_GRACE_MISSIONS = 2;
 export const MORALE_DECAY_UNUTILIZED = 6;
 export const MORALE_DECAY_DEFERRED_PAY = 25;
