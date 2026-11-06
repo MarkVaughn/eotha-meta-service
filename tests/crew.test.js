@@ -7,6 +7,7 @@ import {
   CREW_BOARD_OFFER_COUNT,
   CREW_BOARD_WINDOW_MS,
   CREW_CLASS_IDS,
+  CREW_LEFT_MID_MISSION_MORALE_PENALTY,
   CREW_REP_REQ_SCORE,
   CREW_SIGNING_BONUS_CREDITS,
   CREW_WAGE_SHARE_BP,
@@ -25,6 +26,7 @@ import {
   startingMorale
 } from '../src/config/crew.js';
 import { candidateSeed, crewBoardWindow, generateCrewBoard, unavailableReasons } from '../src/lib/crew-generator.js';
+import { moraleAfterLoss } from '../src/config/crew-morale.js';
 import { deductCrewRevenueShare } from '../src/lib/crew.js';
 
 before(async () => {
@@ -560,23 +562,129 @@ describe('dismiss and standby', () => {
     assert.equal(await app.prisma.crewMember.count({ where: { playerId: pilot.id } }), 1);
   });
 
-  test('ASSERT-2.2.4: dismiss and standby are refused with 409 while the pilot holds a mission', async () => {
-    const pilot = await newPilot('Locked');
-    await setCredits(pilot, 500);
-    const member = await addCrew(pilot);
+  // Accepts a research mission, so the pilot holds an outstanding mission; returns the offer.
+  async function holdMission(pilot) {
     const offer = signedOffer(pilot, { type: 'MISSION_TYPE_RESEARCH', required_berths: 0 });
     const accepted = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
     assert.equal(accepted.statusCode, 200, accepted.body);
+    return offer;
+  }
+  const moraleOf = async (member) => (await app.prisma.crewMember.findUnique({ where: { id: member.id } })).morale;
+
+  // The morale `member` (as stored now) has after the mid-mission cost. Accepting a mission docks the
+  // ship, which can lift morale first, so the tests read what is stored after holdMission.
+  const afterCost = (member) => moraleAfterLoss(member, CREW_LEFT_MID_MISSION_MORALE_PENALTY);
+  const stored = (member) => app.prisma.crewMember.findUnique({ where: { id: member.id } });
+
+  test('dismiss and standby with no outstanding mission cost no morale', async () => {
     for (const act of [dismiss, standby]) {
-      const res = await act(pilot, member.id);
-      assert.equal(res.statusCode, 409);
-      assert.equal(json(res).error, 'crew_locked_by_active_mission');
+      const pilot = await newPilot('NoMission');
+      await setCredits(pilot, 500);
+      const leaver = await addCrew(pilot, { crewClass: 'CHEF', morale: 75 });
+      const stayer = await addCrew(pilot, { crewClass: 'PILOT', morale: 75 });
+      const res = await act(pilot, leaver.id);
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(json(res).crew_morale, undefined);
+      assert.equal(await moraleOf(stayer), 75);
+      if (act === standby) assert.equal(await moraleOf(leaver), 75);
     }
-    assert.equal(await credits(pilot), 500);
-    assert.equal((await roster(pilot)).active.length, 1);
-    // Abandoning the mission frees the crew.
+  });
+
+  test('ASSERT-2.2.4 (phase 3): dismiss while the pilot holds a mission succeeds and costs the crew aboard morale', async () => {
+    const pilot = await newPilot('DismissMission');
+    await setCredits(pilot, 500);
+    const leaver = await addCrew(pilot, { crewClass: 'CHEF', morale: 60 });
+    const stayer = await addCrew(pilot, { crewClass: 'PILOT', morale: 60 });
+    const ashore = await addCrew(pilot, { crewClass: 'DOCTOR', morale: 60, status: 'STANDBY', spaceshipId: null });
+    await holdMission(pilot);
+    const [stayerBefore, ashoreBefore] = [await stored(stayer), await stored(ashore)];
+    const res = await dismiss(pilot, leaver.id);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).dismissed, leaver.id);
+    assert.equal(await app.prisma.crewMember.count({ where: { id: leaver.id } }), 0);
+    assert.equal(await moraleOf(stayer), afterCost(stayerBefore));
+    assert.ok(afterCost(stayerBefore) < stayerBefore.morale);
+    assert.equal(await moraleOf(ashore), ashoreBefore.morale); // ashore: not aboard to see it
+    const effects = json(res).crew_morale;
+    assert.equal(effects.length, 1);
+    assert.deepEqual(
+      { crewId: effects[0].crewId, moraleBefore: effects[0].moraleBefore, morale: effects[0].morale, moraleLoss: effects[0].moraleLoss },
+      { crewId: stayer.id, moraleBefore: stayerBefore.morale, morale: afterCost(stayerBefore), moraleLoss: stayerBefore.morale - afterCost(stayerBefore) }
+    );
+    assert.equal(await credits(pilot), 500); // dismissal stays free
+  });
+
+  test('dismissing a Harbor Standby member while the pilot holds a mission succeeds and costs no morale', async () => {
+    const pilot = await newPilot('DismissAshore');
+    await setCredits(pilot, 500);
+    const stayer = await addCrew(pilot, { crewClass: 'PILOT', morale: 60 });
+    const ashore = await addCrew(pilot, { crewClass: 'DOCTOR', morale: 60, status: 'STANDBY', spaceshipId: null });
+    await holdMission(pilot);
+    const stayerBefore = await stored(stayer);
+    const res = await dismiss(pilot, ashore.id);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).dismissed, ashore.id);
+    assert.equal(json(res).crew_morale, undefined);
+    assert.equal(await app.prisma.crewMember.count({ where: { id: ashore.id } }), 0);
+    assert.equal(await moraleOf(stayer), stayerBefore.morale);
+  });
+
+  test('ASSERT-2.2.4 (phase 3): standby while the pilot holds a mission succeeds, charges the fee and costs morale', async () => {
+    const pilot = await newPilot('StandbyMission');
+    await setCredits(pilot, 500);
+    const leaver = await addCrew(pilot, { crewClass: 'CHEF', morale: 60 });
+    const stayer = await addCrew(pilot, { crewClass: 'PILOT', morale: 60 });
+    await holdMission(pilot);
+    const [leaverBefore, stayerBefore] = [await stored(leaver), await stored(stayer)];
+    const res = await standby(pilot, leaver.id);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).crew.status, 'STANDBY');
+    assert.equal(json(res).crew.morale, afterCost(leaverBefore));
+    assert.equal(json(res).credits, 450);
+    assert.equal(await moraleOf(leaver), afterCost(leaverBefore));
+    assert.equal(await moraleOf(stayer), afterCost(stayerBefore));
+    assert.ok(afterCost(leaverBefore) < leaverBefore.morale);
+    assert.deepEqual(json(res).crew_morale.map((e) => e.crewId).sort(), [leaver.id, stayer.id].sort());
+    const parked = await roster(pilot);
+    assert.deepEqual([parked.active.length, parked.standby.length], [1, 1]);
+  });
+
+  test('leaving mid-mission floors morale at zero, skips members already at zero and keeps the other guards', async () => {
+    const pilot = await newPilot('MissionFloor');
+    await setCredits(pilot, 500);
+    const leaver = await addCrew(pilot, { crewClass: 'CHEF', morale: 75 });
+    const low = await addCrew(pilot, { crewClass: 'PILOT', morale: 0 });
+    const resigned = await addCrew(pilot, { crewClass: 'DOCTOR', morale: 0 });
+    const offer = await holdMission(pilot);
+    // Docking recovery does not lift a member at zero, so both stay there; give `low` a sliver of morale.
+    await app.prisma.crewMember.update({ where: { id: low.id }, data: { morale: 3 } });
+    const res = await dismiss(pilot, leaver.id);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(await moraleOf(low), 0);
+    assert.equal(await moraleOf(resigned), 0);
+    assert.deepEqual(json(res).crew_morale.map((e) => e.crewId), [low.id]);
+    // Unchanged validation: an unknown crew member and a short wallet still refuse.
+    assert.equal((await dismiss(pilot, randomUUID())).statusCode, 404);
+    await setCredits(pilot, 10);
+    assert.equal((await standby(pilot, low.id)).statusCode, 402);
+    assert.equal(await moraleOf(low), 0);
     assert.equal((await call(pilot, 'POST', '/game/missions/abandon', { missionId: offer.mission_id })).statusCode, 200);
-    assert.equal((await dismiss(pilot, member.id)).statusCode, 200);
+  });
+
+  test('a detained crew member still cannot be dismissed or stood down mid-mission, and no morale is lost', async () => {
+    const pilot = await newPilot('DetainedMission');
+    await setCredits(pilot, 500);
+    const held = await addCrew(pilot, { crewClass: 'CHEF', morale: 60, detainedUntil: new Date(Date.now() + 3_600_000) });
+    const stayer = await addCrew(pilot, { crewClass: 'PILOT', morale: 60 });
+    await holdMission(pilot);
+    const stayerBefore = await stored(stayer);
+    for (const act of [dismiss, standby]) {
+      const res = await act(pilot, held.id);
+      assert.equal(res.statusCode, 409);
+      assert.equal(json(res).error, 'crew_detained');
+    }
+    assert.equal(await moraleOf(stayer), stayerBefore.morale);
+    assert.equal(await credits(pilot), 500);
   });
 
   test('Engineer dismissal/standby drops effective operation without blocking or rewriting legacy stored tiers', async () => {
