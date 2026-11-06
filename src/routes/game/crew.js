@@ -294,7 +294,8 @@ export default async function crewRoutes(fastify) {
       if (!member) return { refused: { code: 'crew_not_found' } };
       const refused = leaveRefusal(member);
       if (refused) return { refused };
-      const onMission = await holdsActiveMission(tx, ship.playerId);
+      const aboard = member.status === CREW_STATUS.ACTIVE && member.spaceshipId === ship.id;
+      const onMission = aboard && (await holdsActiveMission(tx, ship.playerId));
       await tx.crewMember.delete({ where: { id: member.id } });
       if (!onMission) return { ship, crew: await activeCrewOf(tx, ship.id), effects: [] };
       return { ship, ...(await recordCrewLeftMidMission(tx, ship.id, ship.traits)) };

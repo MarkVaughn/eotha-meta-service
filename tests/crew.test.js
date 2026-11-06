@@ -614,6 +614,21 @@ describe('dismiss and standby', () => {
     assert.equal(await credits(pilot), 500); // dismissal stays free
   });
 
+  test('dismissing a Harbor Standby member while the pilot holds a mission succeeds and costs no morale', async () => {
+    const pilot = await newPilot('DismissAshore');
+    await setCredits(pilot, 500);
+    const stayer = await addCrew(pilot, { crewClass: 'PILOT', morale: 60 });
+    const ashore = await addCrew(pilot, { crewClass: 'DOCTOR', morale: 60, status: 'STANDBY', spaceshipId: null });
+    await holdMission(pilot);
+    const stayerBefore = await stored(stayer);
+    const res = await dismiss(pilot, ashore.id);
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(json(res).dismissed, ashore.id);
+    assert.equal(json(res).crew_morale, undefined);
+    assert.equal(await app.prisma.crewMember.count({ where: { id: ashore.id } }), 0);
+    assert.equal(await moraleOf(stayer), stayerBefore.morale);
+  });
+
   test('ASSERT-2.2.4 (phase 3): standby while the pilot holds a mission succeeds, charges the fee and costs morale', async () => {
     const pilot = await newPilot('StandbyMission');
     await setCredits(pilot, 500);
