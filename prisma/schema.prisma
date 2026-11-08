@@ -45,6 +45,7 @@ model Player {
   miningPermits SystemMiningPermit[]
   miningPermitRedemptions MiningPermitRedemption[]
   miningViolations MiningViolation[]
+  undockRecords UndockRecord[]
   authorityProjections AuthorityProjection[]
   // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
   // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
@@ -226,6 +227,9 @@ model Spaceship {
   lastLeaveAt        DateTime?
   // Consecutive signed docking times approximate flight until receipts carry an undock time.
   lastCrewDockedAtMs BigInt?
+  // The engine time (signed UndockReceipt.undocked_at_ms) of the last undocking applied to this ship; flight runs
+  // from it to the next signed docking. Null until an undock receipt has been applied.
+  lastCrewUndockedAtMs BigInt?
   crewPayoutSinceDock Boolean @default(false) // legacy compatibility; timestamps govern new settlements
   lastCrewPayoutAtMs BigInt?
   shoreLeaveStations CrewShoreLeave[]
@@ -648,4 +652,23 @@ model RefreshToken {
   createdAt DateTime    @default(now())
 
   @@index([sessionId])
+}
+
+// An engine-signed undock receipt applied once per nonce (POST /game/ship/undock). `departedCrewIds` are the
+// crew the FLAKY roll took with the departure, so a replay answers with the first result and rolls nothing.
+model UndockRecord {
+  id                   String   @id @default(uuid()) @db.Uuid
+  playerId             String   @db.Uuid
+  player               Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  stationId            String   // the receipt's station_entity_id as a lowercase hyphenated UUID
+  systemH3             String   @db.VarChar(15)
+  controllingFactionId String   // '' for an independent system
+  dockedAtMs           BigInt
+  undockedAtMs         BigInt
+  nonce                String   // hex of the receipt's 16 nonce bytes
+  departedCrewIds      String[]
+  createdAt            DateTime @default(now())
+
+  @@unique([playerId, nonce])
+  @@index([playerId, undockedAtMs])
 }
