@@ -43,8 +43,10 @@ export function flakyDeparture(member, stationId, nowMs) {
   return digest.readUInt32BE(0) / 0x1_0000_0000 < FLAKY_UNDOCK_LEAVE_CHANCE;
 }
 
-// Only working crew roll at mission acceptance. Resigned members await explicit shore leave;
-// mining-only undocks still need a signed contracts/engine event. The approved roll is unchanged.
+// Only working crew roll, once per signed undock (POST /game/ship/undock: `receipt.dockedEntityId` is the station
+// cast off from and `nowMs` the receipt's `undockedAtMs`). Resigned members await explicit shore leave. The approved
+// roll is unchanged. `docking`, when the same transaction also docked the ship, lets a departing member's
+// just-charged flight stipend be refunded.
 export async function recordFlakyDeparture(tx, ship, receipt, nowMs, docking) {
   const departed = [];
   for (const m of ship.crew) {
@@ -82,7 +84,11 @@ export async function recordCrewDock(tx, ship, receipt, {
   if (!newDock && (!allowDeparture || (!ship.crew.some((m) => m.morale === 0) && !standby.length))) {
     return { ship, docking: { applied: false } };
   }
-  const gap = last == null || !newDock ? 0 : Number(at - last);
+  // Flight runs from the last applied undock, when one follows the previous dock (or no dock was recorded), to
+  // this dock; otherwise the dock-to-dock gap approximates it, dwell time included.
+  const undocked = ship.lastCrewUndockedAtMs;
+  const legStart = undocked != null && (last == null || undocked >= last) ? undocked : last;
+  const gap = legStart == null || !newDock ? 0 : Number(at > legStart ? at - legStart : 0n);
   const elapsed = Math.min(MAX_COUNTED_FLIGHT_LEG_MS, gap);
   const flight = Math.min(2_147_483_647, ship.flightMsSinceLeave + elapsed);
   const paidDuringLeg = last != null && ship.lastCrewPayoutAtMs != null

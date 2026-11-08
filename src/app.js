@@ -18,6 +18,7 @@ import captainRoutes from './routes/game/captain.js';
 import crewRoutes from './routes/game/crew.js';
 import captainRetirementRoutes from './routes/game/captain-retirement.js';
 import factionsRoutes from './routes/game/factions.js';
+import undockRoutes from './routes/game/undock.js';
 import shipRoutes from './routes/ship/index.js';
 import rtseInternalRoutes from './routes/internal/rtse.js';
 
@@ -55,6 +56,7 @@ await fastify.register(captainRoutes, { prefix: '/game' });
 await fastify.register(captainRetirementRoutes, { prefix: '/game' });
 await fastify.register(crewRoutes, { prefix: '/game' });
 await fastify.register(factionsRoutes, { prefix: '/game' });
+await fastify.register(undockRoutes, { prefix: '/game' });
 await fastify.register(shipRoutes, { prefix: '/ship' });
 await fastify.register(rtseInternalRoutes, { prefix: '/internal/v1/rtse' });
 
