@@ -41,7 +41,7 @@ eotha-meta-service/
 │   │   ├── crew.js             # Crew constants, class and rank tables, signing bonuses, wage shares, quirk catalog Q01-Q20
 │   │   ├── cargo.js            # Cargo lease rules (lot limit)
 │   │   ├── dev.js              # Development-login starting credits
-│   │   ├── docking.js          # Docked-receipt validity window and clock skew
+│   │   ├── docking.js          # Docked- and undock-receipt validity windows and clock skew
 │   │   ├── env.js              # Environment validation via Zod
 │   │   ├── factions.js         # Faction ids, standing caps (clampStandingsWithCaps), Flying Colors rules
 │   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, abandon terms, late cutoff, payout cap, offer clock skew)
@@ -60,6 +60,7 @@ eotha-meta-service/
 │   │   ├── identity.js         # Guest -> linked player conversion
 │   │   ├── mission-claim.js    # Verifies the engine's signed mission completion claims
 │   │   ├── mission-offer.js    # Verifies the engine's signed mission offers
+│   │   ├── undock-receipt.js   # Verifies the engine's signed undock receipts (EOTHA_UNDOCK_RECEIPT_V1) and their freshness
 │   │   ├── refresh-tokens.js   # Refresh rotation with reuse detection
 │   │   ├── reputation.js       # Standings under the caps, the reputation ledger, the factions claim
 │   │   └── ship.js             # Active ship under the player lock, loadout, token reissue

@@ -18,7 +18,7 @@ const u64 = (value) => {
 };
 
 // Mirrors the `UndockReceipt` layout in eotha-contracts `rtse/v1/simulation.proto` and the vectors in
-// `scripts/check-undock-receipt-vector.js`: the domain, lp(pilot_id), the 16 raw station id bytes, lp(system_h3),
+// eotha-contracts `scripts/check-undock-receipt-vector.js`: the domain, lp(pilot_id), the 16 raw station id bytes, lp(system_h3),
 // u64le docked_at_ms, u64le undocked_at_ms, the 16 nonce bytes and lp(controlling_faction_id). `receipt` carries
 // { pilotId, stationEntityId (lowercase hyphenated UUID), systemH3, dockedAtMs, undockedAtMs, nonce (base64, 16
 // bytes), controllingFactionId ('' or a faction key) }. Throws on a malformed id or nonce; `verifyUndockReceipt`
