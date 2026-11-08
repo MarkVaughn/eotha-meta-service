@@ -27,7 +27,7 @@ import {
   recordCrewAbandonment, recordCrewSettlement
 } from '../../lib/crew.js';
 import { doctorCooldownReduction } from '../../config/crew-morale.js';
-import { recordCrewDock, recordFlakyDeparture } from '../../lib/crew-docking.js';
+import { recordCrewDock } from '../../lib/crew-docking.js';
 import { accruedPenalty, basePenalty, disembarkPlace, hostageMinutes, hostageState } from '../../lib/hostage.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import {
@@ -369,7 +369,6 @@ export default async function missionsRoutes(fastify) {
       }
 
       const dock = await recordCrewDock(tx, ship, dockedReceipt);
-      const flaky = await recordFlakyDeparture(tx, dock.ship, dockedReceipt, nowMs, dock.docking);
       await deleteRows(tx, legacy);
       await tx.playerMission.create({
         data: {
@@ -386,7 +385,7 @@ export default async function missionsRoutes(fastify) {
       // sent against its home faction loses its capabilities for as long as the mission is held.
       const accepted = await recordCovertAcceptance(tx, ship.id, ship.traits, isCovert(offer));
       return {
-        ship: { ...flaky.ship, crew: accepted.crew }, passengersAboard, docking: dock.docking, departed: flaky.departed,
+        ship: { ...dock.ship, crew: accepted.crew }, passengersAboard, docking: dock.docking,
         crewMorale: accepted.effects
       };
     });
@@ -394,9 +393,7 @@ export default async function missionsRoutes(fastify) {
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     return { active: toActiveMission(playerId, offer, acceptedAt),
       ...(outcome.docking.applied && { docking: outcome.docking }),
-      ...((outcome.docking.departed?.length || outcome.departed.length) && {
-        departed_crew: [...(outcome.docking.departed ?? []), ...outcome.departed]
-      }),
+      ...(outcome.docking.departed?.length && { departed_crew: outcome.docking.departed }),
       ...(outcome.crewMorale.length > 0 && { crew_morale: outcome.crewMorale }),
       token: await tokenFor(request, outcome.ship, outcome.passengersAboard) };
   });

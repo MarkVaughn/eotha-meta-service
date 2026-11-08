@@ -225,7 +225,7 @@ model Spaceship {
   flightMsSinceLeave Int       @default(0)
   lastLeaveStationId String?
   lastLeaveAt        DateTime?
-  // Consecutive signed docking times approximate flight until receipts carry an undock time.
+  // Flight runs from lastCrewUndockedAtMs when it follows this dock; otherwise consecutive signed docking times approximate it.
   lastCrewDockedAtMs BigInt?
   // The engine time (signed UndockReceipt.undocked_at_ms) of the last undocking applied to this ship; flight runs
   // from it to the next signed docking. Null until an undock receipt has been applied.

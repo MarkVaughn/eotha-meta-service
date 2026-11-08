@@ -1,7 +1,7 @@
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID, sign } from 'node:crypto';
-import { addCrew, app, call, closeApp, credits, dockedReceipt, json, newPilot, receiptAtOrigin, rtseKey, setCredits, signedOffer } from './helpers.js';
+import { addCrew, app, call, closeApp, credits, dockedReceipt, json, newPilot, receiptAtOrigin, rtseKey, setCredits, signedOffer, undockReceipt } from './helpers.js';
 import { generateCrewBoard } from '../src/lib/crew-generator.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
 import { canonicalSaleRecordPayload } from '../src/lib/cargo.js';
@@ -84,7 +84,7 @@ describe('AGY H1/M2: implicit docks never silently delete resigned crew', () => 
       assert.equal((await row(f.crew.id)).morale, 15);
     }
   });
-  test('a working FLAKY departure refunds the stipend charged by that acceptance dock', async () => {
+  test('mission acceptance no longer rolls FLAKY: the dock stipend stands and the crew stay', async () => {
     const { pilot, crew } = await baseline();
     await app.prisma.crewMember.update({ where: { id: crew.id }, data: { quirkId: 'Q12' } });
     const now = Date.now();
@@ -93,21 +93,22 @@ describe('AGY H1/M2: implicit docks never silently delete resigned crew', () => 
     const offer = signedOffer(pilot, { required_berths: 0, origin_station_id: station });
     const res = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
     assert.equal(res.statusCode, 200, res.body);
-    assert.deepEqual(json(res).departed_crew, [crew.id]);
-    assert.equal(json(res).docking.effects[0].stipendRefundedCredits, 40);
-    assert.equal(await row(crew.id), null);
-    assert.equal(await credits(pilot), 1000);
+    assert.equal(json(res).departed_crew, undefined);
+    assert.equal(json(res).docking.effects[0].stipendPaid, true);
+    assert.equal(json(res).docking.effects[0].stipendRefundedCredits, undefined);
+    assert.notEqual(await row(crew.id), null);
+    assert.equal(await credits(pilot), 960);
   });
-  test('a FLAKY Engineer may depart; effective operation falls to the unchanged stored tier', async () => {
+  test('a FLAKY Engineer may depart at undock; effective operation falls to the unchanged stored tier', async () => {
     const { pilot } = await baseline({ withCrew: false, minutes: 10 });
     const now = Date.now();
-    const offer = signedOffer(pilot, { required_berths: 0 });
+    const station = randomUUID();
     let id;
-    do { id = randomUUID(); } while (![now, now + 900_000].every((at) => flakyDeparture({ id, quirkId: 'Q12', morale: 65 }, offer.origin_station_id, at)));
+    do { id = randomUUID(); } while (![now, now + 900_000].every((at) => flakyDeparture({ id, quirkId: 'Q12', morale: 65 }, station, at)));
     const engineer = await addCrew(pilot, { id, crewClass: 'ENGINEER', rank: 'ADEPT', wageShareBp: 800, quirkId: 'Q12', morale: 65, juryRigComponentTypes: ['RADAR'] });
     const ship = await shipOf(pilot);
     await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } }, data: { tier: 2 } });
-    const res = await call(pilot, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(pilot, offer) });
+    const res = await call(pilot, 'POST', '/game/ship/undock', { undockReceipt: undockReceipt(pilot, { stationEntityId: station, undockedAtMs: now }) });
     assert.equal(res.statusCode, 200, res.body);
     assert.deepEqual(json(res).departed_crew, [engineer.id]);
     assert.equal(await row(engineer.id), null);

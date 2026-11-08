@@ -136,6 +136,48 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
   return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }
 
+/**
+ * An undock receipt signed the way the engine signs it (eotha-contracts `UndockReceipt`, domain
+ * EOTHA_UNDOCK_RECEIPT_V1), the bytes assembled here rather than with src/lib/undock-receipt.js. The default is a cast-off
+ * from a fresh independent station a second ago, after a dock 30 s earlier. `overrides` replace any field before
+ * signing; pass `signer` to sign with another key.
+ */
+export function undockReceipt(pilot, overrides = {}, signer = rtseKey) {
+  const nowMs = Date.now();
+  const receipt = {
+    pilotId: typeof pilot === 'string' ? pilot : (pilot.id ?? pilot.player.id),
+    stationEntityId: randomUUID(),
+    systemH3: '8828308281fffff',
+    dockedAtMs: nowMs - 32_000,
+    undockedAtMs: nowMs - 2_000,
+    nonce: randomBytes(16).toString('base64'),
+    controllingFactionId: '',
+    ...overrides
+  };
+  const str = (value) => {
+    const bytes = Buffer.from(value, 'utf8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(bytes.length);
+    return Buffer.concat([len, bytes]);
+  };
+  const u64 = (value) => {
+    const buf = Buffer.alloc(8);
+    buf.writeBigUInt64LE(BigInt(value));
+    return buf;
+  };
+  const payload = Buffer.concat([
+    Buffer.from('EOTHA_UNDOCK_RECEIPT_V1', 'ascii'),
+    str(receipt.pilotId),
+    Buffer.from(receipt.stationEntityId.replaceAll('-', ''), 'hex'),
+    str(receipt.systemH3),
+    u64(receipt.dockedAtMs),
+    u64(receipt.undockedAtMs),
+    Buffer.from(receipt.nonce, 'base64'),
+    str(receipt.controllingFactionId)
+  ]);
+  return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
+}
+
 const MISSION_TYPE_NUMBERS = { MISSION_TYPE_PASSAGE: 1, MISSION_TYPE_RESEARCH: 2, MISSION_TYPE_GATHER: 3 };
 const OFFER_WINDOW_MS = 30 * 60_000;
 const VISIBILITY_NUMBERS = { MISSION_VISIBILITY_UNSPECIFIED: 0, MISSION_VISIBILITY_OVERT: 1, MISSION_VISIBILITY_COVERT: 2 };

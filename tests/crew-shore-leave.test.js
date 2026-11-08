@@ -1,7 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { addCrew, app, call, closeApp, credits, dockedReceipt, json, newPilot, receiptAtOrigin, setCredits, signedOffer } from './helpers.js';
+import { addCrew, app, call, closeApp, credits, dockedReceipt, json, newPilot, receiptAtOrigin, setCredits, signedOffer, undockReceipt } from './helpers.js';
 import { fatigueIntervals, flakyDeparture, shoreLeaveTerms } from '../src/lib/crew-docking.js';
 import { FLIGHT_STIPEND_CREDITS, SHORE_LEAVE_GRACE_MS, SHORE_LEAVE_DECAY_INTERVAL_MS } from '../src/config/crew.js';
 
@@ -216,21 +216,28 @@ describe('POST /game/crew/pay-arrears resignation recovery', () => {
   });
 });
 
-describe('FLAKY mission-acceptance-only departure', () => {
-  test('a deterministic departure removes the crew and reissues attributes; retry cannot restore them', async () => {
+describe('FLAKY departure at undock', () => {
+  test('mission acceptance does not roll; the signed undock removes the crew and reissues attributes', async () => {
     const p = await newPilot('Flaky');
     const offer = signedOffer(p, { required_berths: 0 });
     const at = Date.now();
     let id;
     do { id = randomUUID(); } while (![at, at + 900_000].every((time) => flakyDeparture({ id, quirkId: 'Q12', morale: 80 }, offer.origin_station_id, time)));
     const crew = await addCrew(p, { id, quirkId: 'Q12', morale: 70, rank: 'ADEPT' });
-    const receipt = receiptAtOrigin(p, offer);
-    const res = await call(p, 'POST', '/game/missions/accept', { offer, dockedReceipt: receipt });
+    const accepted = await call(p, 'POST', '/game/missions/accept', { offer, dockedReceipt: receiptAtOrigin(p, offer) });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    assert.equal(json(accepted).departed_crew, undefined);
+    assert.notEqual(await row(crew.id), null);
+    const receipt = undockReceipt(p, { stationEntityId: offer.origin_station_id, undockedAtMs: at });
+    const res = await call(p, 'POST', '/game/ship/undock', { undockReceipt: receipt });
     assert.equal(res.statusCode, 200, res.body);
     assert.deepEqual(json(res).departed_crew, [crew.id]);
     assert.equal(await row(crew.id), null);
     assert.equal(app.jwt.verify(json(res).token).ship_attributes.crew_aboard, 0);
-    assert.equal((await call(p, 'POST', '/game/missions/accept', { offer, dockedReceipt: receipt })).statusCode, 409);
+    const again = await call(p, 'POST', '/game/ship/undock', { undockReceipt: receipt });
+    assert.equal(again.statusCode, 200, again.body);
+    assert.deepEqual(json(again).departed_crew, [crew.id]);
+    assert.equal(json(again).replayed, true);
   });
   test('shore leave itself does not roll a departure (mining-only signed-undock followup remains separate)', async () => {
     const p = await newPilot('NoUndock');
