@@ -154,7 +154,7 @@ export default async function cargoRoutes(fastify) {
           if (CARGO_REFUSALS[write]) return { refusal: CARGO_REFUSALS[write] };
           const domestic = domesticOre(saleRecord.items, station);
           // The amnesty (design-factions §7.3): poached ore sold where it was mined is not seized, the permit it
-          // should have had plus a late surcharge comes off the proceeds instead, never more than the proceeds.
+          // should have had, doubled, plus a late surcharge comes off the proceeds instead, never more than the proceeds.
           // A pilot who holds a permit for the system now has paid it and owes nothing.
           if (domestic.poached && !await runningMiningPermit(tx, playerId, station.systemH3, nowMs)) {
             const fee = amnestyFee(ship.factions[station.factionId], station.factionId, ship.factions.active_colors);

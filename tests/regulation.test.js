@@ -119,7 +119,7 @@ describe('regulation tables', () => {
     assert.equal(miningPermitCost(0, 'alpha', 'beta'), 400);
     assert.deepEqual([800, 450, 150, 0, -150, -500].map((s) => exportTollBp(s, 'alpha', null)), [0, 300, 600, 1200, 1200, 1200]);
     assert.equal(exportTollBp(0, 'alpha', 'alpha'), 0);
-    assert.deepEqual([450, 150, 0, -150, -500, -750].map((s) => amnestyFee(s, 'alpha', null)), [0, 165, 440, 990, 990, 990]);
+    assert.deepEqual([450, 150, 0, -150, -500, -750].map((s) => amnestyFee(s, 'alpha', null)), [0, 315, 840, 1890, 1890, 1890]);
   });
 
   test('the export toll is exact, rounded once over the cleared lots', () => {
@@ -911,18 +911,18 @@ describe('POST /game/cargo/sell with provenance', () => {
     assert.equal(await standingOf(pilot, 'alpha'), 0);
   });
 
-  test('poached ore sold at home pays the permit plus 10%, never more than the proceeds', async () => {
-    for (const [standing, fee] of [[450, 0], [150, 165], [0, 440], [-150, 990], [-600, 990]]) {
+  test('poached ore sold at home pays twice the permit plus a 10% surcharge, never more than the proceeds', async () => {
+    for (const [standing, fee] of [[450, 0], [150, 315], [0, 840], [-150, 1890], [-600, 1890]]) {
       const pilot = await newPilot('Amnesty');
       await setStanding(pilot, 'alpha', standing);
       const session = await stockHold(pilot, []);
       const stationId = station();
-      const sale = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 1500 });
+      const sale = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 3000 });
       const res = await sell(pilot, sale, dockedAt(pilot, stationId, 'alpha'));
       assert.equal(res.statusCode, 200, `${standing}: ${res.body}`);
       assert.equal(json(res).amnestyCredits, fee === 0 ? undefined : fee, String(standing));
-      assert.equal(json(res).total_credits, 1500 - fee);
-      assert.equal(await creditsOf(pilot), 1500 - fee);
+      assert.equal(json(res).total_credits, 3000 - fee);
+      assert.equal(await creditsOf(pilot), 3000 - fee);
     }
   });
 
@@ -936,11 +936,11 @@ describe('POST /game/cargo/sell with provenance', () => {
     assert.equal(json(res).amnestyCredits, 300);
     assert.equal(json(res).total_credits, 0);
     assert.equal(await creditsOf(pilot), 0);
-    const exact = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 440 });
-    assert.equal(json(await sell(pilot, exact, dockedAt(pilot, stationId, 'alpha'))).amnestyCredits, 440);
-    const over = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 441 });
+    const exact = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 840 });
+    assert.equal(json(await sell(pilot, exact, dockedAt(pilot, stationId, 'alpha'))).amnestyCredits, 840);
+    const over = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 841 });
     const overRes = await sell(pilot, over, dockedAt(pilot, stationId, 'alpha'));
-    assert.equal(json(overRes).amnestyCredits, 440);
+    assert.equal(json(overRes).amnestyCredits, 840);
     assert.equal(json(overRes).total_credits, 1);
   });
 
@@ -961,7 +961,7 @@ describe('POST /game/cargo/sell with provenance', () => {
     await buyPermit(other, hailFor(other, { systemH3: OTHER_SYSTEM, controllingFactionId: 'beta' }));
     const otherSession = await stockHold(other, []);
     const res2 = await sell(other, saleFor(other, otherSession, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 1000 }), dockedAt(other, stationId, 'alpha'));
-    assert.equal(json(res2).amnestyCredits, 440);
+    assert.equal(json(res2).amnestyCredits, 840);
   });
 
   test('poached ore of a faction system is refused without the station\'s docked receipt, and stays unsold', async () => {
@@ -981,7 +981,7 @@ describe('POST /game/cargo/sell with provenance', () => {
     // Still creditable once the proof is given.
     const ok = await sell(pilot, sale, dockedAt(pilot, stationId, 'alpha'));
     assert.equal(ok.statusCode, 200, ok.body);
-    assert.equal(await creditsOf(pilot), 560);
+    assert.equal(await creditsOf(pilot), 160);
     assert.equal((await holdOf(pilot)).lots.length, 0);
   });
 
@@ -992,7 +992,7 @@ describe('POST /game/cargo/sell with provenance', () => {
     const sale = saleFor(pilot, session, [mined('alpha', 'SOMETHING_NEW')], { stationId, totalCredits: 1000 });
     assert.equal((await sell(pilot, sale)).statusCode, 403);
     const res = await sell(pilot, sale, dockedAt(pilot, stationId, 'alpha'));
-    assert.equal(json(res).amnestyCredits, 440);
+    assert.equal(json(res).amnestyCredits, 840);
   });
 
   test('poached ore of an independent system, or sold at another system\'s dock, owes no amnesty', async () => {
@@ -1034,18 +1034,18 @@ describe('POST /game/cargo/sell with provenance', () => {
     const first = await sell(pilot, sale, dockedAt(pilot, stationId, 'alpha'));
     assert.equal(first.statusCode, 200, first.body);
     assert.equal(json(first).domesticReputation, 2);
-    assert.equal(json(first).amnestyCredits, 440);
+    assert.equal(json(first).amnestyCredits, 840);
     await setStanding(pilot, 'alpha', 300);
     for (const receipt of [dockedAt(pilot, stationId, 'alpha'), undefined]) {
       const again = await sell(pilot, sale, receipt);
       assert.equal(again.statusCode, 200, again.body);
       const body = json(again);
       assert.equal(body.replayed, true);
-      assert.equal(body.amnestyCredits, 440);
+      assert.equal(body.amnestyCredits, 840);
       assert.equal(body.domesticReputation, 2);
-      assert.equal(body.total_credits, 560);
+      assert.equal(body.total_credits, 160);
     }
-    assert.equal(await creditsOf(pilot), 560);
+    assert.equal(await creditsOf(pilot), 160);
     assert.equal(await standingOf(pilot, 'alpha'), 300);
   });
 
@@ -1062,11 +1062,11 @@ describe('POST /game/cargo/sell with provenance', () => {
     });
     const session = await stockHold(pilot, []);
     const stationId = station();
-    const sale = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 1440 });
+    const sale = saleFor(pilot, session, [mined('alpha', 'UNLICENSED_POACHED')], { stationId, totalCredits: 1840 });
     const res = await sell(pilot, sale, dockedAt(pilot, stationId, 'alpha'));
     assert.equal(res.statusCode, 200, res.body);
-    // 1440 - 440 = 1000 proceeds; the Chef takes 5%.
-    assert.equal(json(res).amnestyCredits, 440);
+    // 1840 - 840 = 1000 proceeds; the Chef takes 5%.
+    assert.equal(json(res).amnestyCredits, 840);
     assert.equal(json(res).grossCredits, 1000);
     assert.equal(json(res).crewShareCredits, 50);
     assert.equal(await creditsOf(pilot), 950);
