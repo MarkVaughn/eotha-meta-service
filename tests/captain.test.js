@@ -6,6 +6,7 @@ import {
   rtseKey, setCredits, signedOffer
 } from './helpers.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
+import { DOCKED_RECEIPT_TTL_MS } from '../src/config/docking.js';
 import { computeShipAttributes, defaultComponents, hullBudget } from '../src/config/components.js';
 import {
   BRANCHES,
@@ -332,7 +333,7 @@ describe('captain over HTTP', () => {
 
   test('ASSERT-1.2.4: a missing or expired docked receipt is refused with docked_receipt_required', async () => {
     const pilot = await captainWith(200);
-    const expired = dockedReceipt(pilot, { dockedAtMs: Date.now() - 60_000, issuedAtMs: Date.now() - 31_000 });
+    const expired = dockedReceipt(pilot, { dockedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 60_000, issuedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 1_000 });
     for (const body of [{ traitId: 'H1_TRIM_THRUSTERS' }, { traitId: 'H1_TRIM_THRUSTERS', dockedReceipt: expired }]) {
       const res = await unlock(pilot, body);
       assert.equal(res.statusCode, 403);

@@ -22,6 +22,7 @@ import {
 } from '../src/config/captain.js';
 import { computeShipAttributes } from '../src/config/components.js';
 import { innateEffectId, innateJuryRigTypes } from '../src/config/crew.js';
+import { DOCKED_RECEIPT_TTL_MS } from '../src/config/docking.js';
 import { awardCaptainXp, effectIdsFor } from '../src/lib/captain.js';
 
 before(async () => { await app.ready(); });
@@ -452,7 +453,7 @@ describe('POST /game/captain/retire', () => {
         [undefined, 'docked_receipt_required', {}],
         [dockedReceipt(pilot, {}, forged), 'docked_receipt_invalid', {}],
         [dockedReceipt(other), 'docked_receipt_invalid', {}],
-        [dockedReceipt(pilot, { issuedAtMs: now - 60_000, dockedAtMs: now - 62_000 }), 'docked_receipt_required', {}],
+        [dockedReceipt(pilot, { issuedAtMs: now - DOCKED_RECEIPT_TTL_MS - 1_000, dockedAtMs: now - DOCKED_RECEIPT_TTL_MS - 3_000 }), 'docked_receipt_required', {}],
         [dockedReceipt(pilot, { issuedAtMs: now + 60_000 }), 'docked_receipt_required', {}],
         [dockedReceipt(pilot), 'docked_receipt_wrong_station', { stationId: randomUUID() }]
       ];
@@ -759,7 +760,7 @@ describe('Legacy Doctrines', () => {
     const now = Date.now();
     for (const [receipt, code] of [
       [dockedReceipt(pilot, {}, generateKeyPairSync('ed25519').privateKey), 'docked_receipt_invalid'],
-      [dockedReceipt(pilot, { issuedAtMs: now - 60_000, dockedAtMs: now - 62_000 }), 'docked_receipt_required']
+      [dockedReceipt(pilot, { issuedAtMs: now - DOCKED_RECEIPT_TTL_MS - 1_000, dockedAtMs: now - DOCKED_RECEIPT_TTL_MS - 3_000 }), 'docked_receipt_required']
     ]) {
       const res = await doctrine(pilot, { retiredCaptainId: row.id, active: false }, receipt);
       assert.equal(res.statusCode, 403);

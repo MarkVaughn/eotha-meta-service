@@ -17,6 +17,7 @@ import {
   signedOffer
 } from './helpers.js';
 import { canonicalClaimPayload } from '../src/lib/mission-claim.js';
+import { DOCKED_RECEIPT_TTL_MS } from '../src/config/docking.js';
 import { canonicalMissionOfferPayload, verifyMissionOffer } from '../src/lib/mission-offer.js';
 import { underMissionLimit } from '../src/config/missions.js';
 
@@ -348,7 +349,7 @@ describe('engine-signed missions', () => {
     test('a stale receipt is refused with docked_receipt_expired', async () => {
       const pilot = await newPilot();
       const offer = signedOffer(pilot);
-      const issuedAtMs = Date.now() - 31_000;
+      const issuedAtMs = Date.now() - DOCKED_RECEIPT_TTL_MS - 1_000;
       const res = await accept(pilot, offer, receiptAtOrigin(pilot, offer, { issuedAtMs, dockedAtMs: issuedAtMs - 1_000 }));
       assert.equal(res.statusCode, 403);
       assert.equal(json(res).code, 'docked_receipt_expired');

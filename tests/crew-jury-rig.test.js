@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { addCrew, app, call, closeApp, credits, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
 import { computeShipAttributes, defaultComponents, hullBudget, totalSubsystemPoints } from '../src/config/components.js';
 import { ENGINEER_JURY_RIG_TYPES, engineerJuryRigSlots } from '../src/config/crew.js';
+import { DOCKED_RECEIPT_TTL_MS } from '../src/config/docking.js';
 
 before(async () => { await app.ready(); });
 after(closeApp);
@@ -92,7 +93,7 @@ describe('POST /game/crew/jury-rig', () => {
     for (const extra of [
       { dockedReceipt: { ...proof, dockedAtMs: 0 } },
       { dockedReceipt: dockedReceipt('other-pilot') },
-      { dockedReceipt: dockedReceipt(pilot, { dockedAtMs: 0, issuedAtMs: Date.now() - 120_000 }) },
+      { dockedReceipt: dockedReceipt(pilot, { dockedAtMs: 0, issuedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 1_000 }) },
       { stationId: '00000000-0000-4000-8000-000000000000', dockedReceipt: proof }
     ]) {
       const res = await call(pilot, 'POST', '/game/crew/jury-rig', { ...request, ...extra });

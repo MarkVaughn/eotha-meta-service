@@ -27,6 +27,7 @@ import {
 } from '../src/config/crew.js';
 import { candidateSeed, crewBoardWindow, generateCrewBoard, unavailableReasons } from '../src/lib/crew-generator.js';
 import { moraleAfterLoss } from '../src/config/crew-morale.js';
+import { DOCKED_RECEIPT_TTL_MS } from '../src/config/docking.js';
 import { deductCrewRevenueShare } from '../src/lib/crew.js';
 
 before(async () => {
@@ -269,7 +270,7 @@ describe('POST /game/crew/board', () => {
     await expect(await call(pilot, 'POST', '/game/crew/board', { stationId: 'nope' }), 400);
     await expect(await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt('someone-else') }), 403, 'docked_receipt_invalid');
     await expect(await call(pilot, 'POST', '/game/crew/board', { stationId, dockedReceipt: dockedReceipt(pilot) }), 403, 'docked_receipt_wrong_station');
-    await expect(await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt(pilot, { issuedAtMs: Date.now() - 60_000, dockedAtMs: Date.now() - 62_000 }) }), 403, 'docked_receipt_required');
+    await expect(await call(pilot, 'POST', '/game/crew/board', { dockedReceipt: dockedReceipt(pilot, { issuedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 1_000, dockedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 3_000 }) }), 403, 'docked_receipt_required');
     assert.equal((await app.inject({ method: 'POST', url: '/game/crew/board', payload: {} })).statusCode, 401);
     assert.equal((await app.inject({ method: 'GET', url: `/game/crew/board?stationId=${stationId}`, headers: pilot.headers })).statusCode, 404);
   });
@@ -317,7 +318,7 @@ describe('POST /game/crew/hire', () => {
     assert.equal(noReceipt.statusCode, 403);
     assert.equal(json(noReceipt).error, 'docked_receipt_required');
     const expired = await hire(pilot, stationId, candidateId, {
-      dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId, dockedAtMs: Date.now() - 60_000, issuedAtMs: Date.now() - 31_000 })
+      dockedReceipt: dockedReceipt(pilot, { dockedEntityId: stationId, dockedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 60_000, issuedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 1_000 })
     });
     assert.equal(json(expired).error, 'docked_receipt_required');
     const elsewhere = await hire(pilot, stationId, candidateId, { stationId, dockedReceipt: dockedReceipt(pilot) });

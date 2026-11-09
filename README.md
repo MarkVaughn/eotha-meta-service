@@ -520,9 +520,9 @@ Ship upgrades are offered only while docked, and the client cannot be trusted to
 |---|---|
 | `docked_receipt_required` | No `dockedReceipt` in the body. |
 | `docked_receipt_invalid` | `pilotId` is not the token's `sub`, or the signature does not verify against the claim key. |
-| `docked_receipt_expired` | `issuedAtMs` is more than `DOCKED_RECEIPT_TTL_MS` (30 s) in the past or more than `DOCKED_RECEIPT_MAX_SKEW_MS` (5 s) in the future, or `dockedAtMs` is after `issuedAtMs`. The client should fetch a new receipt and retry once. |
+| `docked_receipt_expired` | `issuedAtMs` is more than `DOCKED_RECEIPT_TTL_MS` (5 minutes) in the past or more than `DOCKED_RECEIPT_MAX_SKEW_MS` (5 s) in the future, or `dockedAtMs` is after `issuedAtMs`. The client should fetch a new receipt and retry once. |
 
-Both constants are in `src/config/docking.js`; the age (`now - issuedAtMs`) is logged at debug level so clock drift shows up. Enforcement is hard, with no environment flag. A receipt is **not single-use**: it can serve several upgrades inside its window, and `nonce` is signed but not tracked, so the real bound on an upgrade after undocking is the 30 s window. This service does not check that the entity is a known station, because the engine is the only authority on what it can dock at. The docked check runs before the guest hull lock, so an undocked guest is told to dock first.
+Both constants are in `src/config/docking.js`; the age (`now - issuedAtMs`) is logged at debug level so clock drift shows up. Enforcement is hard, with no environment flag. A receipt is **not single-use**: it can serve several upgrades inside its window, and `nonce` is signed but not tracked, so the real bound on an upgrade after undocking is the 5 minute window. This service does not check that the entity is a known station, because the engine is the only authority on what it can dock at. The docked check runs before the guest hull lock, so an undocked guest is told to dock first.
 
 ## Captain progression
 
