@@ -458,7 +458,10 @@ describe('POST /ship/upgrade with quality grades', () => {
       assert.equal((await upgrade(pilot, 'STEALTH', 0, grade)).statusCode, 400, `${grade}`);
     }
     assert.equal(await credits(pilot), before);
-    assert.equal(await rows(pilot, 'STEALTH'), null);
+    // New ships carry a tier-0 placeholder row for every part; the refused requests must leave it untouched.
+    const row = await rows(pilot, 'STEALTH');
+    assert.equal(row.tier, 0);
+    assert.equal(row.quality, 'BASIC');
   });
 
   test('a tier-1 Artisan part is never silently downgraded by an upgrade that omits the grade', async () => {
