@@ -126,14 +126,14 @@ describe('docked receipt verifier', () => {
     assert.equal(verifyDockedReceipt(dockedReceipt('pilot-1'), app.claimKey.key), true);
   });
 
-  test('freshness: 30 s of age and 5 s of skew are inclusive, one more millisecond is not', () => {
-    assert.equal(DOCKED_RECEIPT_TTL_MS, 30_000);
+  test('freshness: the full TTL of age and 5 s of skew are inclusive, one more millisecond is not', () => {
+    assert.equal(DOCKED_RECEIPT_TTL_MS, 300_000);
     assert.equal(DOCKED_RECEIPT_MAX_SKEW_MS, 5_000);
     const now = 1_800_000_000_000;
     const at = (issuedAtMs, dockedAtMs = issuedAtMs - 1_000) => isDockedReceiptFresh({ issuedAtMs, dockedAtMs }, now);
     assert.equal(at(now), true);
-    assert.equal(at(now - 30_000), true);
-    assert.equal(at(now - 30_001), false);
+    assert.equal(at(now - DOCKED_RECEIPT_TTL_MS), true);
+    assert.equal(at(now - DOCKED_RECEIPT_TTL_MS - 1), false);
     assert.equal(at(now + 5_000), true);
     assert.equal(at(now + 5_001), false);
     assert.equal(at(now, now), true);
@@ -202,7 +202,7 @@ describe('POST /ship/upgrade requires a docked receipt', () => {
       await assertRefused(pilot, await upgrade(pilot, receipt), 'docked_receipt_invalid');
     }
     // Pushing the issue time forward to dodge expiry also breaks the signature.
-    const stale = dockedReceipt(pilot, { issuedAtMs: Date.now() - 120_000, dockedAtMs: Date.now() - 130_000 });
+    const stale = dockedReceipt(pilot, { issuedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 120_000, dockedAtMs: Date.now() - DOCKED_RECEIPT_TTL_MS - 130_000 });
     await assertRefused(pilot, await upgrade(pilot, { ...stale, issuedAtMs: Date.now() }), 'docked_receipt_invalid');
   });
 

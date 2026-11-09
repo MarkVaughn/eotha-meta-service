@@ -1,7 +1,8 @@
-// How long a docked receipt, signed by the engine, is honoured after its `issuedAtMs`. A receipt is
-// reusable inside this window (it is not single-use), so this is the real bound on how long after
-// undocking an upgrade can still be redeemed.
-export const DOCKED_RECEIPT_TTL_MS = 30_000;
+// How long a docked receipt, signed by the engine, is honoured after its `issuedAtMs`: 5 minutes, so a pilot has
+// time to fetch the receipt and finish a docked-only action. A receipt is reusable inside this window (it is not
+// single-use), so this is also the real bound on how long after undocking a docked-only action (an upgrade, a
+// hire, an unlock) can still be redeemed. The docking duration itself is unchanged.
+export const DOCKED_RECEIPT_TTL_MS = 300_000;
 
 // Engine and meta-service clocks may disagree by this much before a receipt from the "future" is
 // refused. Deliberately tighter than the mission claims' 60 s, which would double the window.
