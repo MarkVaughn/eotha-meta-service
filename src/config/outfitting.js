@@ -46,7 +46,10 @@ export const advancedMechanicsActive = (healthPct) => !Number.isFinite(healthPct
 
 // The reserved outfitting capability bits (contracts 1.8.0) and the component whose damage clears each.
 // Crew capability bits are NOT gated by component damage (captain's decision), so only these are. Every
-// owner is unassigned (null) until a mechanic claims its bit: assigning one is a one-line change here.
+// owner is unassigned (null). This table only CLEARS a bit when its owner is damaged; nothing grants the
+// reserved bits yet. Granting them (setting a bit when the owning component's tier or the station's
+// capability allows it) belongs to station capability verification (M1-2), which must add that grant
+// to computeShipAttributes before an owner assigned here has any effect.
 export const OUTFITTING_CAPABILITY_BITS = Object.freeze({
   RESERVED_0x20: 0x20,
   RESERVED_0x100: 0x100,
@@ -59,7 +62,7 @@ export const OUTFITTING_CAPABILITY_OWNERS = Object.freeze({
 });
 
 /** `flags` with every outfitting bit whose owning component (`health[type]`, a healthPct) is below 50% cleared. */
-export function gateOutfittingCapabilities(flags, health, owners = OUTFITTING_CAPABILITY_OWNERS) {
+export function gateOutfittingCapabilities(flags, health = {}, owners = OUTFITTING_CAPABILITY_OWNERS) {
   let gated = flags;
   for (const [bit, owner] of Object.entries(owners)) {
     if (owner && !advancedMechanicsActive(health[owner])) gated &= ~Number(bit);
@@ -156,20 +159,24 @@ export function outfitPrice({ qualityBase, basePrice = qualityBase, wealthMult =
 
 /**
  * Prices taking a component from `from` ({ tier, quality }) to `to`, where `tierCost(fromTier, toTier)` is
- * the Basic list price of the tiers between. The new part is worth `M_quality(to) x list(0..to.tier)`, the
- * old one `M_quality(from) x list(0..from.tier)` (list from tier `floorTier`, the lowest the component can
- * sit at), and the quote charges the difference, so laddering up cheaply and then regrading never undercuts
- * buying the grade outright. A better grade over a fitted part adds the labor surcharge: 15% of the old
- * part's value (a Basic part regraded to Artisan: 15% of its Basic value). A lower grade is never quoted
- * (the caller refuses it). Returns `{ price, listPrice, qualityBase, surcharge }`.
+ * the Basic list price of the tiers between. The new part is worth `M_quality(to) x list(0..to.tier)` and the
+ * old one `M_quality(from) x list(0..from.tier)` (a tier-1 part is worth its 250 cr, so a tier-1 regrade is
+ * priced like any other), and the quote charges the difference: laddering up cheaply and then regrading never
+ * undercuts buying the grade outright. A better grade over a fitted part adds the labor surcharge: 15% of the
+ * old part's value (a Basic part regraded to Artisan: 15% of its Basic value). A lower grade is never quoted
+ * (the caller refuses it), with one exception: `starter`, an essential component's free tier-1 Basic part,
+ * moving to a Cheap part is valued as a Cheap part, so the Cheap tier steps cost 0.6x like any other.
+ * Returns `{ price, listPrice, qualityBase, surcharge }`.
  */
-export function quoteOutfit({ from, to, tierCost, floorTier = 0, ...modifiers }) {
-  const fromValue = QUALITY_PRICE_MULT[normalizeQuality(from.quality)] * tierCost(floorTier, from.tier);
-  const toValue = QUALITY_PRICE_MULT[normalizeQuality(to.quality)] * tierCost(floorTier, to.tier);
+export function quoteOutfit({ from, to, tierCost, starter = false, ...modifiers }) {
+  const fromMult = QUALITY_PRICE_MULT[normalizeQuality(from.quality)];
+  const toMult = QUALITY_PRICE_MULT[normalizeQuality(to.quality)];
+  const fromValue = (starter ? Math.min(fromMult, toMult) : fromMult) * tierCost(0, from.tier);
+  const toValue = toMult * tierCost(0, to.tier);
   const qualityBase = toValue - fromValue;
   const tierSteps = tierCost(from.tier, to.tier);
   // A pure regrade has no tier steps: its list price is the Basic price of the part itself.
-  const listPrice = tierSteps > 0 ? tierSteps : tierCost(floorTier, to.tier);
+  const listPrice = tierSteps > 0 ? tierSteps : tierCost(0, to.tier);
   const regrade = qualityRank(to.quality) > qualityRank(from.quality);
   const surcharge = regrade ? Math.round(REGRADE_SURCHARGE_RATE * fromValue) : 0;
   return { price: outfitPrice({ qualityBase, basePrice: listPrice, surcharge, ...modifiers }), listPrice, qualityBase, surcharge };

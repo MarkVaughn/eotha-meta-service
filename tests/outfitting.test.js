@@ -1,6 +1,14 @@
 import { test, describe, before, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { app, call, closeApp, credits, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
+import Fastify from 'fastify';
+import {
+  PASSWORD, app, attestationDouble, attestationHeaders, call, closeApp, credits, dockedReceipt, json, keysDir, newPilot, setCredits, track
+} from './helpers.js';
+import prismaPlugin from '../src/plugins/prisma.js';
+import securityPlugin from '../src/plugins/security.js';
+import attestationPlugin from '../src/plugins/attestation.js';
+import identityPlugin from '../src/plugins/identity.js';
+import authRoutes from '../src/routes/auth/index.js';
 import { computeShipAttributes, upgradeCost } from '../src/config/components.js';
 import {
   ADVANCED_MECHANICS_MIN_HEALTH_PCT,
@@ -22,7 +30,7 @@ import {
 } from '../src/config/outfitting.js';
 import { stationServices } from '../src/lib/outfitting-station.js';
 
-const quote = (from, to, extra = {}) => quoteOutfit({ from, to, tierCost: upgradeCost, floorTier: 1, ...extra });
+const quote = (from, to, extra = {}) => quoteOutfit({ from, to, tierCost: upgradeCost, ...extra });
 
 describe('quality grades', () => {
   test('price and effectiveness multipliers: cheap 0.60x/0.85x, basic 1.0x, artisan 2.5x/1.18x', () => {
@@ -70,31 +78,42 @@ describe('quoteOutfit', () => {
   test('a Basic tier step costs the flat table price, as before quality grades', () => {
     assert.equal(quote(basic(1), basic(2)).price, 750);
     assert.equal(quote(basic(1), basic(3)).price, 750 + 2000);
-    assert.equal(quote({ tier: 0, quality: 'BASIC' }, basic(4), { floorTier: 0 }).price, upgradeCost(0, 4));
+    assert.equal(quote({ tier: 0, quality: 'BASIC' }, basic(4)).price, upgradeCost(0, 4));
   });
 
   test('Cheap costs 0.60x and Artisan 2.5x', () => {
-    assert.equal(quote(basic(1), { tier: 2, quality: 'CHEAP' }).price, 450);
-    assert.equal(quote(basic(1), { tier: 2, quality: 'ARTISAN' }).price, 1875);
+    // An essential component's starter part (free tier-1 Basic) moving to Cheap is valued as a Cheap part.
+    assert.equal(quote(basic(1), { tier: 2, quality: 'CHEAP' }, { starter: true }).price, 450);
+    // Tier 1 is worth its 250 cr: Basic tier 1 to Artisan tier 2 is 2.5 x 1,000 less 250, plus 15% of 250.
+    assert.equal(quote(basic(1), { tier: 2, quality: 'ARTISAN' }, { starter: true }).price, 2500 - 250 + 38);
     // An unequipped optional component installed at a grade is priced from tier 0, with no regrade surcharge.
-    assert.equal(quote({ tier: 0, quality: 'BASIC' }, { tier: 3, quality: 'ARTISAN' }, { floorTier: 0 }).price, 7500);
-    assert.equal(quote({ tier: 0, quality: 'BASIC' }, { tier: 3, quality: 'ARTISAN' }, { floorTier: 0 }).surcharge, 0);
+    assert.equal(quote({ tier: 0, quality: 'BASIC' }, { tier: 3, quality: 'ARTISAN' }).price, 7500);
+    assert.equal(quote({ tier: 0, quality: 'BASIC' }, { tier: 3, quality: 'ARTISAN' }).surcharge, 0);
   });
 
   test('regrading Basic to Artisan costs the value difference plus a 15% labor surcharge', () => {
     const q = quote(basic(3), { tier: 3, quality: 'ARTISAN' });
-    const basicValue = upgradeCost(1, 3); // 2750
+    const basicValue = upgradeCost(0, 3); // 3000: a tier-3 part is worth every tier from 250 up
     assert.equal(q.surcharge, Math.round(0.15 * basicValue));
     assert.equal(q.price, 2.5 * basicValue - basicValue + Math.round(0.15 * basicValue));
-    assert.equal(q.price, 4538); // 412.5 rounds up to 413
+    assert.equal(q.price, 4950);
+  });
+
+  test('a tier-1 part regrades like any other: Basic to Artisan costs 375 + 38 (no free tier-1 grade)', () => {
+    const q = quote(basic(1), { tier: 1, quality: 'ARTISAN' }, { starter: true });
+    assert.equal(q.surcharge, 38); // 37.5 rounds up
+    assert.equal(q.price, 375 + 38);
+    // Tier 1 to tier 2 is not subsidized either: the same total as regrading, then climbing at Artisan prices.
+    const climb = quote(basic(1), { tier: 2, quality: 'ARTISAN' }, { starter: true }).price;
+    assert.ok(climb >= 2.5 * 750, `${climb}`);
   });
 
   test('the surcharge is 15% of the value of the part replaced, also for Cheap and when the tier rises too', () => {
     const cheapToBasic = quote({ tier: 2, quality: 'CHEAP' }, basic(2));
-    assert.equal(cheapToBasic.surcharge, Math.round(0.15 * 0.6 * 750));
-    assert.equal(cheapToBasic.price, Math.round(0.4 * 750) + cheapToBasic.surcharge);
+    assert.equal(cheapToBasic.surcharge, Math.round(0.15 * 0.6 * 1000));
+    assert.equal(cheapToBasic.price, Math.round(0.4 * 1000) + cheapToBasic.surcharge);
     const both = quote(basic(2), { tier: 3, quality: 'ARTISAN' });
-    assert.equal(both.price, 2.5 * upgradeCost(1, 3) - upgradeCost(1, 2) + Math.round(0.15 * 750));
+    assert.equal(both.price, 2.5 * upgradeCost(0, 3) - upgradeCost(0, 2) + Math.round(0.15 * upgradeCost(0, 2)));
   });
 
   test('keeping the grade while the tier rises charges no surcharge', () => {
@@ -105,12 +124,12 @@ describe('quoteOutfit', () => {
 
   test('laddering up cheaply and then regrading never undercuts buying the grade outright', () => {
     for (const target of [2, 3, 4, 5]) {
-      const direct = quote(basic(1), { tier: target, quality: 'ARTISAN' }).price;
-      const cheap = quote(basic(1), { tier: target, quality: 'CHEAP' }).price;
+      const direct = quote(basic(1), { tier: target, quality: 'ARTISAN' }, { starter: true }).price;
+      const cheap = quote(basic(1), { tier: target, quality: 'CHEAP' }, { starter: true }).price;
       const regrade = quote({ tier: target, quality: 'CHEAP' }, { tier: target, quality: 'ARTISAN' }).price;
       assert.ok(cheap + regrade >= direct, `tier ${target}: ${cheap} + ${regrade} < ${direct}`);
       const stepBasic = quote(basic(1), basic(target - 1)).price;
-      const ladder = stepBasic + quote(basic(target - 1), { tier: target, quality: 'ARTISAN' }).price;
+      const ladder = stepBasic + quote(basic(target - 1), { tier: target, quality: 'ARTISAN' }, { starter: target === 2 }).price;
       assert.ok(ladder >= direct, `tier ${target}: laddering ${ladder} < ${direct}`);
     }
   });
@@ -281,10 +300,10 @@ describe('computeShipAttributes: advanced mechanics switch off below 50% health'
   });
 });
 
-describe('POST /ship/upgrade with quality grades', () => {
-  before(async () => { await app.ready(); });
-  after(async () => { await closeApp(); });
+before(async () => { await app.ready(); });
+after(async () => { await closeApp(); });
 
+describe('POST /ship/upgrade with quality grades', () => {
   const upgrade = (pilot, componentType, targetTier, qualityGrade, receiptOverrides = {}) =>
     call(pilot, 'POST', '/ship/upgrade', {
       componentType,
@@ -297,6 +316,8 @@ describe('POST /ship/upgrade with quality grades', () => {
   const rows = (pilot, type) => app.prisma.shipComponentRecord.findFirst({
     where: { type, spaceship: { playerId: pilot.id, active: true } }
   });
+  // Basic tier 1 (the starter part, worth its 250 cr) to an Artisan part of `tier`, with the 15% labor on the 250.
+  const ARTISAN_FROM_STARTER = (tier) => 2.5 * upgradeCost(0, tier) - 250 + Math.round(0.15 * 250);
   // A pilot with a tier-5 hull (budget for anything) and `credits`, the components below it at tier 1.
   async function richPilot(prefix, balance = 1_000_000) {
     const pilot = await newPilot(prefix);
@@ -348,7 +369,7 @@ describe('POST /ship/upgrade with quality grades', () => {
   test('CHEAP charges 0.60x, persists the grade and delivers 0.85x of the attributes in the response and token', async () => {
     const { pilot } = await richPilot('Cheap');
     const res = json(await upgrade(pilot, 'ENGINES', 3, 'CHEAP'));
-    assert.equal(res.cost, Math.round(0.6 * upgradeCost(1, 3)));
+    assert.equal(res.cost, Math.round(0.6 * upgradeCost(1, 3))); // the starter part is replaced by Cheap tier steps
     assert.equal(res.credits, 1_000_000 - res.cost);
     assert.equal(componentOf(res, 'ENGINES').quality, 'CHEAP');
     assert.ok(Math.abs(res.ship_attributes.max_speed_mps - 85 * 0.85) < 1e-9);
@@ -360,7 +381,7 @@ describe('POST /ship/upgrade with quality grades', () => {
   test('ARTISAN charges 2.5x and delivers 1.18x; an unequipped optional part is priced from tier 0', async () => {
     const { pilot } = await richPilot('Artisan');
     const engines = json(await upgrade(pilot, 'ENGINES', 3, 'ARTISAN'));
-    assert.equal(engines.cost, 2.5 * upgradeCost(1, 3));
+    assert.equal(engines.cost, ARTISAN_FROM_STARTER(3));
     assert.ok(Math.abs(engines.ship_attributes.max_speed_mps - 85 * 1.18) < 1e-9);
     const stealth = json(await upgrade(pilot, 'STEALTH', 3, 'ARTISAN'));
     assert.equal(stealth.cost, 2.5 * upgradeCost(0, 3));
@@ -370,10 +391,10 @@ describe('POST /ship/upgrade with quality grades', () => {
 
   test('an Artisan purchase the pilot cannot afford is refused and changes nothing', async () => {
     const { pilot } = await richPilot('ArtisanBroke');
-    await setCredits(pilot, 2.5 * upgradeCost(1, 3) - 1);
+    await setCredits(pilot, ARTISAN_FROM_STARTER(3) - 1);
     const res = await upgrade(pilot, 'ENGINES', 3, 'ARTISAN');
     assert.equal(res.statusCode, 402);
-    assert.equal(json(res).cost, 2.5 * upgradeCost(1, 3));
+    assert.equal(json(res).cost, ARTISAN_FROM_STARTER(3));
     assert.equal((await rows(pilot, 'ENGINES')).quality, 'BASIC');
     assert.equal((await rows(pilot, 'ENGINES')).tier, 1);
   });
@@ -383,7 +404,7 @@ describe('POST /ship/upgrade with quality grades', () => {
     assert.equal((await upgrade(pilot, 'ENGINES', 3)).statusCode, 200);
     await setCredits(pilot, 50_000);
     const res = json(await upgrade(pilot, 'ENGINES', 3, 'ARTISAN'));
-    const basicValue = upgradeCost(1, 3);
+    const basicValue = upgradeCost(0, 3);
     assert.equal(res.cost, 1.5 * basicValue + Math.round(0.15 * basicValue));
     assert.equal(res.credits, 50_000 - res.cost);
     assert.equal(componentOf(res, 'ENGINES').tier, 3);
@@ -397,7 +418,7 @@ describe('POST /ship/upgrade with quality grades', () => {
     assert.equal((await upgrade(pilot, 'ENGINES', 2)).statusCode, 200);
     await setCredits(pilot, 50_000);
     const res = json(await upgrade(pilot, 'ENGINES', 3, 'ARTISAN'));
-    assert.equal(res.cost, 2.5 * upgradeCost(1, 3) - upgradeCost(1, 2) + Math.round(0.15 * upgradeCost(1, 2)));
+    assert.equal(res.cost, 2.5 * upgradeCost(0, 3) - upgradeCost(0, 2) + Math.round(0.15 * upgradeCost(0, 2)));
   });
 
   test('a lower grade over a fitted part is refused, with or without a tier change, and an omitted grade is Basic', async () => {
@@ -415,14 +436,41 @@ describe('POST /ship/upgrade with quality grades', () => {
     assert.equal((await upgrade(pilot, 'ENGINES', 3, 'ARTISAN')).statusCode, 200); // keeping the grade is fine
   });
 
-  test("an essential starter part's grade cannot change without its tier (it would otherwise be free)", async () => {
+  test("an essential component's tier-1 part regrades to Artisan at 375 + 15% labor, and cannot go Cheap", async () => {
     const { pilot } = await richPilot('Starter');
     const before = await credits(pilot);
-    for (const grade of [undefined, 'CHEAP', 'ARTISAN']) assert.equal((await upgrade(pilot, 'ENGINES', 1, grade)).statusCode, 400);
+    for (const grade of [undefined, 'BASIC', 'CHEAP']) assert.equal((await upgrade(pilot, 'ENGINES', 1, grade)).statusCode, 400);
     assert.equal(await credits(pilot), before);
-    // An optional part is bought, so its tier-1 grade can be regraded.
+    const res = json(await upgrade(pilot, 'ENGINES', 1, 'ARTISAN'));
+    assert.equal(res.cost, 375 + 38);
+    assert.equal(componentOf(res, 'ENGINES').quality, 'ARTISAN');
+    assert.equal(componentOf(res, 'ENGINES').tier, 1);
+    assert.ok(Math.abs(res.ship_attributes.max_speed_mps - 20 * 1.18) < 1e-9);
+    // An optional part is bought, so its tier-1 grade can be regraded too.
     assert.equal((await upgrade(pilot, 'STEALTH', 1, 'CHEAP')).statusCode, 200);
     assert.equal(json(await upgrade(pilot, 'STEALTH', 1, 'ARTISAN')).cost, 2.5 * 250 - 0.6 * 250 + Math.round(0.15 * 0.6 * 250));
+  });
+
+  test('a tier-1 Artisan part is never silently downgraded by an upgrade that omits the grade', async () => {
+    const { pilot } = await richPilot('TierOneArtisan');
+    assert.equal((await upgrade(pilot, 'ENGINES', 1, 'ARTISAN')).statusCode, 200);
+    const before = await credits(pilot);
+    for (const grade of [undefined, 'BASIC', 'CHEAP']) {
+      const res = await upgrade(pilot, 'ENGINES', 2, grade);
+      assert.equal(res.statusCode, 400, `${grade}`);
+      assert.equal(json(res).code, 'quality_downgrade_refused');
+      assert.equal(json(res).currentQualityGrade, 'ARTISAN');
+    }
+    assert.equal(await credits(pilot), before);
+    assert.equal((await rows(pilot, 'ENGINES')).quality, 'ARTISAN');
+    const up = json(await upgrade(pilot, 'ENGINES', 2, 'ARTISAN'));
+    assert.equal(up.cost, 2.5 * 750); // keeping the grade charges the tier step at Artisan prices, no surcharge
+  });
+
+  test('upgrading tier 1 to tier 2 as Artisan is not subsidized: it costs the Artisan part less the starter, plus labor', async () => {
+    const { pilot } = await richPilot('TierOneToTwo');
+    assert.equal(json(await upgrade(pilot, 'ENGINES', 2, 'ARTISAN')).cost, ARTISAN_FROM_STARTER(2));
+    assert.equal(ARTISAN_FROM_STARTER(2), 2.5 * 1000 - 250 + 38);
   });
 
   test('the same tier and grade again is refused and not charged; a lower tier is refused', async () => {
@@ -438,7 +486,7 @@ describe('POST /ship/upgrade with quality grades', () => {
     const { pilot } = await richPilot('CheapToBasic');
     assert.equal((await upgrade(pilot, 'ENGINES', 3, 'CHEAP')).statusCode, 200);
     const res = json(await upgrade(pilot, 'ENGINES', 3, 'BASIC'));
-    const basicValue = upgradeCost(1, 3);
+    const basicValue = upgradeCost(0, 3);
     assert.equal(res.cost, Math.round(0.4 * basicValue) + Math.round(0.15 * 0.6 * basicValue));
   });
 
@@ -573,8 +621,8 @@ describe('POST /ship/upgrade with quality grades', () => {
         const pilot = await hostile('BlackMarketArtisan', -600);
         const receipt = dockedReceipt(pilot, { controllingFactionId: 'alpha' });
         const mult = blackMarketMultiplier(receipt.dockedEntityId);
-        // ENGINES sit at Basic tier 2: the Artisan tier 3 part is worth 2.5 x 2,750, less the 750 part replaced, plus labor.
-        const expected = Math.round((2.5 * upgradeCost(1, 3) - upgradeCost(1, 2)) * mult) + Math.round(0.15 * upgradeCost(1, 2));
+        // ENGINES sit at Basic tier 2: the Artisan tier 3 part is worth 2.5 x 3,000, less the 1,000 part replaced, plus labor.
+        const expected = Math.round((2.5 * upgradeCost(0, 3) - upgradeCost(0, 2)) * mult) + Math.round(0.15 * upgradeCost(0, 2));
         await setCredits(pilot, expected - 1);
         const poor = await call(pilot, 'POST', '/ship/upgrade', { componentType: 'ENGINES', targetTier: 3, qualityGrade: 'ARTISAN', dockedReceipt: receipt });
         assert.equal(poor.statusCode, 402);
@@ -598,5 +646,77 @@ describe('POST /ship/upgrade with quality grades', () => {
         lowSec.mock.restore();
       }
     });
+  });
+});
+
+describe('quality survives the auth paths that re-sign ship attributes', () => {
+  const ARTISAN_ENGINES_SPEED = 85 * 1.18;
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} !== ${b}`);
+  const engines = (components) => components.find((c) => c.type === 'ENGINES');
+  const setEngines = (playerId, data) => app.prisma.shipComponentRecord.updateMany({
+    where: { type: 'ENGINES', spaceship: { playerId, active: true } }, data
+  });
+
+  test('login and refresh sign the attributes of the Artisan and Cheap parts the pilot owns', async () => {
+    const pilot = await newPilot('AuthQuality');
+    await call(pilot, 'GET', '/ship/loadout'); // creates the ship
+    await setEngines(pilot.id, { tier: 3, quality: 'ARTISAN' });
+
+    const login = await app.inject({
+      method: 'POST', url: '/auth/login', headers: attestationHeaders,
+      payload: { email: pilot.email, password: PASSWORD, deviceId: 'quality-login-device-id' }
+    });
+    assert.equal(login.statusCode, 200);
+    const session = json(login);
+    near(app.jwt.verify(session.token).ship_attributes.max_speed_mps, ARTISAN_ENGINES_SPEED);
+
+    const refreshed = await app.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken: session.refreshToken } });
+    assert.equal(refreshed.statusCode, 200);
+    near(app.jwt.verify(json(refreshed).token).ship_attributes.max_speed_mps, ARTISAN_ENGINES_SPEED);
+
+    await setEngines(pilot.id, { quality: 'CHEAP' });
+    const again = await app.inject({
+      method: 'POST', url: '/auth/login', headers: attestationHeaders,
+      payload: { email: pilot.email, password: PASSWORD, deviceId: 'quality-login-device-id' }
+    });
+    near(app.jwt.verify(json(again).token).ship_attributes.max_speed_mps, 85 * 0.85);
+  });
+
+  test('the signed token agrees with the loadout for the same ship', async () => {
+    const pilot = await newPilot('AuthAgree');
+    await call(pilot, 'GET', '/ship/loadout');
+    await setEngines(pilot.id, { tier: 2, quality: 'ARTISAN' });
+    const loadout = json(await call(pilot, 'GET', '/ship/loadout'));
+    const login = await app.inject({
+      method: 'POST', url: '/auth/login', headers: attestationHeaders,
+      payload: { email: pilot.email, password: PASSWORD, deviceId: 'quality-login-device-id' }
+    });
+    assert.deepEqual(app.jwt.verify(json(login).token).ship_attributes, loadout.ship_attributes);
+  });
+
+  test('dev login returns the components with their grades and the attributes they give', async () => {
+    const server = Fastify();
+    await server.register(prismaPlugin);
+    await server.register(securityPlugin, { keysDir });
+    await server.register(attestationPlugin, { verifiers: [attestationDouble] });
+    await server.register(identityPlugin);
+    await server.register(authRoutes, { prefix: '/auth', devLogin: true });
+    await server.ready();
+    try {
+      const callsign = `Qual-${Math.random().toString(16).slice(2, 10)}`;
+      const url = `/auth/dev-login?callsign=${callsign}&latitude=37.7749&longitude=-122.4194&h3=8828308281fffff`;
+      const first = json(await server.inject({ method: 'GET', url }));
+      track(first.player.id);
+      assert.ok(first.player.ship.components.every((c) => c.quality === 'BASIC'));
+      // Dev login does not persist a ship; the first loadout read does.
+      await call({ headers: { authorization: `Bearer ${first.token}` } }, 'GET', '/ship/loadout');
+      assert.equal((await setEngines(first.player.id, { tier: 3, quality: 'ARTISAN' })).count, 1);
+      const second = json(await server.inject({ method: 'GET', url }));
+      assert.equal(engines(second.player.ship.components).quality, 'ARTISAN');
+      near(second.player.ship.ship_attributes.max_speed_mps, ARTISAN_ENGINES_SPEED);
+      near(server.jwt.verify(second.token).ship_attributes.max_speed_mps, ARTISAN_ENGINES_SPEED);
+    } finally {
+      await server.close();
+    }
   });
 });

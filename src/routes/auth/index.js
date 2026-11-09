@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import env from '../../config/env.js';
 import { DEV_LOGIN_EMAIL_DOMAIN, DEV_STARTING_CREDITS } from '../../config/dev.js';
 import { computeShipAttributes, defaultComponents } from '../../config/components.js';
+import { normalizeQuality } from '../../config/outfitting.js';
 import { activeDoctrineIdsOf, effectIdsFor, ensureCaptain } from '../../lib/captain.js';
 import { activeCrewOf } from '../../lib/crew.js';
 import { convertGuest } from '../../lib/identity.js';
@@ -31,7 +32,7 @@ export default async function authRoutes(fastify, opts) {
       include: { components: true }
     });
     const components = ship?.components?.length
-      ? ship.components.map(({ type, tier, healthPct }) => ({ type, tier, healthPct }))
+      ? ship.components.map(({ type, tier, quality, healthPct }) => ({ type, tier, quality: normalizeQuality(quality), healthPct }))
       : defaultComponents();
     const captain = await ensureCaptain(prisma, player.id, player.callsign);
     const crew = ship ? await activeCrewOf(prisma, ship.id) : [];

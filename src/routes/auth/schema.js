@@ -146,6 +146,7 @@ export const devLoginSchema = {
                     properties: {
                       type: { type: 'string' },
                       tier: { type: 'integer' },
+                      quality: { type: 'string' },
                       healthPct: { type: 'integer' }
                     }
                   }

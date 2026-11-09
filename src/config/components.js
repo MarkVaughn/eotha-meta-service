@@ -5,6 +5,7 @@ import {
   QUALITY_EFFECTIVENESS,
   QUALITY_INVERSE_ATTRIBUTES,
   QUALITY_SCALED_ATTRIBUTES,
+  DEFAULT_QUALITY,
   advancedMechanicsActive,
   gateOutfittingCapabilities,
   normalizeQuality
@@ -88,7 +89,7 @@ export function defaultComponents() {
     HULL: 1, ENGINES: 1, ENERGY: 1, RADAR: 1, LIFE_SUPPORT: 1, SENSORS: 1, CARGO: 1,
     SHIELDS: 0, WEAPONS: 0, STEALTH: 0, COMMS: 0
   };
-  return COMPONENT_TYPES.map((type) => ({ type, tier: defaultTiers[type], healthPct: 100 }));
+  return COMPONENT_TYPES.map((type) => ({ type, tier: defaultTiers[type], quality: DEFAULT_QUALITY, healthPct: 100 }));
 }
 
 // Hull tier caps the combined tier points of all other installed subsystems.

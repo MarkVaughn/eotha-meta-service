@@ -188,19 +188,19 @@ export default async function shipRoutes(fastify, opts) {
       const fromTier = row?.tier ?? (ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0);
       if (targetTier < fromTier) return fail(400, `${componentType} is already at tier ${fromTier}.`);
       // A fitted part can be replaced by a better grade (a regrade, at its own tier or on the way up) but never
-      // by a worse one: there is no buy-back, so a cheaper grade would only be a discount on the tier. The
-      // starter part of an essential component (its lowest tier, worth nothing) is not fitted in this sense,
-      // and takes any grade on its way up; its grade cannot change without the tier.
-      const floorTier = ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0;
-      const fitted = fromTier > floorTier;
+      // by a worse one: there is no buy-back, so a cheaper grade would only be a discount on the tier. The one
+      // exception is an essential component's starter part (its free tier-1 Basic part), which may become a
+      // Cheap part as its tier rises.
+      const fitted = fromTier > 0;
       const fromQuality = fitted ? normalizeQuality(row?.quality) : DEFAULT_QUALITY;
-      if (fitted && qualityRank(qualityGrade) < qualityRank(fromQuality)) {
+      const starter = ESSENTIAL_COMPONENTS.includes(componentType) && fromTier === MIN_TIER && fromQuality === DEFAULT_QUALITY;
+      if (fitted && qualityRank(qualityGrade) < qualityRank(fromQuality) && !(starter && targetTier > fromTier)) {
         return fail(400, `${componentType} is ${fromQuality} grade and cannot be replaced by a lower grade (${qualityGrade}).`, {
           code: 'quality_downgrade_refused',
           currentQualityGrade: fromQuality
         });
       }
-      if (targetTier === fromTier && (!fitted || qualityGrade === fromQuality)) {
+      if (targetTier === fromTier && qualityGrade === fromQuality) {
         return fail(400, `${componentType} is already at tier ${fromTier}${fitted ? ` (${fromQuality})` : ''}.`);
       }
 
@@ -209,7 +209,7 @@ export default async function shipRoutes(fastify, opts) {
         from: { tier: fromTier, quality: fromQuality },
         to: { tier: targetTier, quality: qualityGrade },
         tierCost: upgradeCost,
-        floorTier,
+        starter,
         discount,
         hostileMult
       }).price;
