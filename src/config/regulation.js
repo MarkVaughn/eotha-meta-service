@@ -102,8 +102,10 @@ export const DOMESTIC_ORE_UNITS_PER_REPUTATION = 50;
 export const DOMESTIC_ORE_MILLI_PER_REPUTATION = DOMESTIC_ORE_UNITS_PER_REPUTATION * 1000;
 export const DOMESTIC_ORE_MAX_REPUTATION_PER_SALE = 6;
 
-// The amnesty: poached ore sold at home is not seized; the permit it should have had, plus this late surcharge
-// (in basis points), comes off the sale's proceeds, never more than the proceeds.
+// The amnesty: poached ore sold at home is not seized; twice the permit it should have had, plus this late surcharge
+// (in basis points) on the permit's price, comes off the sale's proceeds, never more than the proceeds. Settling late
+// therefore always costs more than buying the permit up front.
+export const AMNESTY_PERMIT_MULTIPLIER = 2;
 export const AMNESTY_SURCHARGE_BP = 1000;
 // A pilot the faction will not sell a permit (Hostile, Nemesis) pays the dearest permit's price.
 export const AMNESTY_DENIED_TIER_COST = MINING_PERMIT_COSTS.UNFRIENDLY;
@@ -111,5 +113,5 @@ export const AMNESTY_DENIED_TIER_COST = MINING_PERMIT_COSTS.UNFRIENDLY;
 /** The fee the amnesty asks of a pilot at `standing` flying `activeColors` before the proceeds cap, in credits. */
 export function amnestyFee(standing, factionId, activeColors) {
   const permit = miningPermitCost(standing, factionId, activeColors) ?? AMNESTY_DENIED_TIER_COST;
-  return Math.ceil(permit * (10_000 + AMNESTY_SURCHARGE_BP) / 10_000);
+  return permit * AMNESTY_PERMIT_MULTIPLIER + Math.ceil(permit * AMNESTY_SURCHARGE_BP / 10_000);
 }
