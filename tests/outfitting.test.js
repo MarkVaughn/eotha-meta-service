@@ -451,6 +451,16 @@ describe('POST /ship/upgrade with quality grades', () => {
     assert.equal(json(await upgrade(pilot, 'STEALTH', 1, 'ARTISAN')).cost, 2.5 * 250 - 0.6 * 250 + Math.round(0.15 * 0.6 * 250));
   });
 
+  test('a tier-0 request for an absent optional part is refused: no charge and no row', async () => {
+    const { pilot } = await richPilot('TierZero');
+    const before = await credits(pilot);
+    for (const grade of [undefined, 'BASIC', 'CHEAP', 'ARTISAN']) {
+      assert.equal((await upgrade(pilot, 'STEALTH', 0, grade)).statusCode, 400, `${grade}`);
+    }
+    assert.equal(await credits(pilot), before);
+    assert.equal(await rows(pilot, 'STEALTH'), null);
+  });
+
   test('a tier-1 Artisan part is never silently downgraded by an upgrade that omits the grade', async () => {
     const { pilot } = await richPilot('TierOneArtisan');
     assert.equal((await upgrade(pilot, 'ENGINES', 1, 'ARTISAN')).statusCode, 200);

@@ -186,7 +186,7 @@ export default async function shipRoutes(fastify, opts) {
 
       const row = ship.components.find((c) => c.type === componentType);
       const fromTier = row?.tier ?? (ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0);
-      if (targetTier < fromTier) return fail(400, `${componentType} is already at tier ${fromTier}.`);
+      if (targetTier < fromTier || (fromTier === 0 && targetTier === 0)) return fail(400, `${componentType} is already at tier ${fromTier}.`);
       // A fitted part can be replaced by a better grade (a regrade, at its own tier or on the way up) but never
       // by a worse one: there is no buy-back, so a cheaper grade would only be a discount on the tier. The one
       // exception is an essential component's starter part (its free tier-1 Basic part), which may become a
