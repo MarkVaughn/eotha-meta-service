@@ -1,5 +1,14 @@
 import { applyShipEffects, traitHullBudgetBonus, traitShipEffects } from './captain.js';
 import { HEALTH_SCALED_ATTRIBUTES, crewCustomsMults, healthFactor } from './customs.js';
+import {
+  QUALITY_ATTRIBUTE_CEILINGS,
+  QUALITY_EFFECTIVENESS,
+  QUALITY_INVERSE_ATTRIBUTES,
+  QUALITY_SCALED_ATTRIBUTES,
+  advancedMechanicsActive,
+  gateOutfittingCapabilities,
+  normalizeQuality
+} from './outfitting.js';
 import { LIFE_SUPPORT_BERTHS_BY_TIER, crewCapabilityFlags, engineerJuryRigTypes, innateJuryRigTypes, crewResists, crewShipEffects, innateShipEffects } from './crew.js';
 
 export const COMPONENT_TYPES = [
@@ -130,8 +139,11 @@ export function freeBerths(attributes) {
 
 /**
  * Deterministically derive ship attributes from a list of `{ type, tier }`
- * components. Missing components (and invalid tiers) default to Tier 1. A component's `healthPct` (default 100)
- * scales the attributes it sets (HEALTH_SCALED_ATTRIBUTES) before captain traits and crew are folded in. `passengersAboard` is the
+ * components. Missing components (and invalid tiers) default to Tier 1. A component's `quality` (default BASIC)
+ * scales the performance attributes it sets by the grade's effectiveness (src/config/outfitting.js), and its
+ * `healthPct` (default 100) scales the attributes it sets (HEALTH_SCALED_ATTRIBUTES), both before captain traits
+ * and crew are folded in. Below 50% health its advanced mechanics are off: SENSORS drops to sensor_tier 1 and
+ * the reserved outfitting capability bits it owns clear (crew capability bits are not gated by damage). `passengersAboard` is the
  * ship's persisted manifest count; it is clamped to the life support's passenger_capacity.
  * `traits` are the effect ids in force: the captain's unlocked trait ids, the active Legacy Doctrines'
  * ids and a promoted captain's innate class (innateEffectId), whose ship effects are folded in
@@ -141,10 +153,14 @@ export function freeBerths(attributes) {
 export function computeShipAttributes(components = [], passengersAboard = 0, traits = [], activeCrew = []) {
   const tiers = {};
   const health = {};
+  const healthPct = {};
+  const quality = {};
   for (const c of components) {
     if (COMPONENT_TYPES.includes(c?.type)) {
       tiers[c.type] = c.tier;
       health[c.type] = healthFactor(c.healthPct);
+      healthPct[c.type] = c.healthPct;
+      quality[c.type] = normalizeQuality(c.quality);
     }
   }
 
@@ -158,12 +174,21 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
     const tier = storedTier > 0 && overdrive.has(type) ? Math.min(storedTier + 1, MAX_TIER) : storedTier;
     for (const [attr, values] of Object.entries(TIER_TABLE[type])) {
       attributes[attr] = tier === 0 ? (ZERO_TIER_OVERRIDES[attr] ?? 0) : values[tier - 1];
+      if (tier > 0) {
+        const effectiveness = QUALITY_EFFECTIVENESS[quality[type] ?? 'BASIC'];
+        if (QUALITY_SCALED_ATTRIBUTES[type]?.includes(attr)) attributes[attr] *= effectiveness;
+        else if (QUALITY_INVERSE_ATTRIBUTES[type]?.includes(attr)) attributes[attr] /= effectiveness;
+        const ceiling = QUALITY_ATTRIBUTE_CEILINGS[attr];
+        if (ceiling !== undefined && attributes[attr] > ceiling) attributes[attr] = ceiling;
+      }
       if (HEALTH_SCALED_ATTRIBUTES[type]?.includes(attr)) attributes[attr] *= health[type] ?? 1;
     }
   }
+  // Tier-driven mechanics of a component below 50% health are off until it is repaired.
+  if (!advancedMechanicsActive(healthPct.SENSORS)) attributes.sensor_tier = Math.min(attributes.sensor_tier, 1);
   Object.assign(attributes, BASE_ATTRIBUTES);
   applyShipEffects(attributes, [...traitShipEffects(traits), ...innateShipEffects(traits), ...crewShipEffects(activeCrew)]);
-  Object.assign(attributes, crewResists(activeCrew), crewCustomsMults(activeCrew, traits), { crew_capability_flags: crewCapabilityFlags(activeCrew) });
+  Object.assign(attributes, crewResists(activeCrew), crewCustomsMults(activeCrew, traits), { crew_capability_flags: gateOutfittingCapabilities(crewCapabilityFlags(activeCrew), healthPct) });
   attributes.crew_aboard = activeCrew.length;
   attributes.passengers_aboard = clampPassengers(passengersAboard, attributes.passenger_capacity - attributes.crew_aboard);
   return attributes;
