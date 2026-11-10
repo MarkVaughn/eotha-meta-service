@@ -10,9 +10,22 @@ import {
   totalSubsystemPoints
 } from '../../config/components.js';
 import { repairCost } from '../../config/customs.js';
+import {
+  DEFAULT_QUALITY,
+  QUALITY_GRADES,
+  STANDING_BANDS,
+  STANDING_DISCOUNT,
+  blackMarketMultiplier,
+  normalizeQuality,
+  qualityRank,
+  quoteOutfit,
+  standingBand
+} from '../../config/outfitting.js';
 import { devPassengersEnabled } from '../../config/dev.js';
 import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
+import { stationServices } from '../../lib/outfitting-station.js';
+import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 // `dockedReceipt` is optional here on purpose: the route answers its absence with the coded 403
@@ -24,6 +37,7 @@ const upgradeSchema = {
     properties: {
       componentType: { type: 'string', enum: COMPONENT_TYPES },
       targetTier: { type: 'integer', minimum: 0, maximum: MAX_TIER },
+      qualityGrade: { type: 'string', enum: QUALITY_GRADES },
       dockedReceipt: dockedReceiptSchema
     }
   }
@@ -92,6 +106,7 @@ export default async function shipRoutes(fastify, opts) {
 
   fastify.post('/upgrade', { schema: upgradeSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const { componentType, targetTier, dockedReceipt } = request.body;
+    const qualityGrade = request.body.qualityGrade ?? DEFAULT_QUALITY;
     const playerId = request.user.sub;
 
     // Upgrades are only offered while docked, and the engine alone knows that. These checks are
@@ -131,6 +146,27 @@ export default async function shipRoutes(fastify, opts) {
         }
       }
 
+      // The faction governing the dock decides the pilot's price (standing) and whether they are served at all.
+      const stationFactionId = dockedReceipt.controllingFactionId || '';
+      let band = null;
+      let discount = 0;
+      let hostileMult = 1;
+      if (stationFactionId) {
+        const standing = (await standingsOf(tx, playerId))[stationFactionId] ?? 0;
+        const colors = standing > 0
+          ? (await tx.player.findUnique({ where: { id: playerId }, select: { activeColorsFactionId: true } }))?.activeColorsFactionId
+          : null;
+        band = standingBand(standing, { flyingColors: colors === stationFactionId });
+        discount = STANDING_DISCOUNT[band];
+        if (band === STANDING_BANDS.HOSTILE) {
+          // Civilian terminals refuse a Hostile pilot; only a low-sec dock refits them, on the black market.
+          if (!stationServices.isLowSecDock(dockedReceipt)) {
+            return fail(403, 'This terminal refuses Hostile pilots.', { code: 'terminal_barred_hostile' });
+          }
+          hostileMult = blackMarketMultiplier(dockedReceipt.dockedEntityId);
+        }
+      }
+
       const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
       const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
       const currentPoints = totalSubsystemPoints(ship.components);
@@ -150,10 +186,33 @@ export default async function shipRoutes(fastify, opts) {
 
       const row = ship.components.find((c) => c.type === componentType);
       const fromTier = row?.tier ?? (ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0);
-      if (targetTier <= fromTier) return fail(400, `${componentType} is already at tier ${fromTier}.`);
+      if (targetTier < fromTier || (fromTier === 0 && targetTier === 0)) return fail(400, `${componentType} is already at tier ${fromTier}.`);
+      // A fitted part can be replaced by a better grade (a regrade, at its own tier or on the way up) but never
+      // by a worse one: there is no buy-back, so a cheaper grade would only be a discount on the tier. The one
+      // exception is an essential component's starter part (its free tier-1 Basic part), which may become a
+      // Cheap part as its tier rises.
+      const fitted = fromTier > 0;
+      const fromQuality = fitted ? normalizeQuality(row?.quality) : DEFAULT_QUALITY;
+      const starter = ESSENTIAL_COMPONENTS.includes(componentType) && fromTier === MIN_TIER && fromQuality === DEFAULT_QUALITY;
+      if (fitted && qualityRank(qualityGrade) < qualityRank(fromQuality) && !(starter && targetTier > fromTier)) {
+        return fail(400, `${componentType} is ${fromQuality} grade and cannot be replaced by a lower grade (${qualityGrade}).`, {
+          code: 'quality_downgrade_refused',
+          currentQualityGrade: fromQuality
+        });
+      }
+      if (targetTier === fromTier && qualityGrade === fromQuality) {
+        return fail(400, `${componentType} is already at tier ${fromTier}${fitted ? ` (${fromQuality})` : ''}.`);
+      }
 
       // Guarded deduction: only succeeds while the balance still covers the cost.
-      const cost = upgradeCost(fromTier, targetTier);
+      const cost = quoteOutfit({
+        from: { tier: fromTier, quality: fromQuality },
+        to: { tier: targetTier, quality: qualityGrade },
+        tierCost: upgradeCost,
+        starter,
+        discount,
+        hostileMult
+      }).price;
       const { count } = await tx.player.updateMany({
         where: { id: playerId, credits: { gte: cost } },
         data: { credits: { decrement: cost } }
@@ -168,9 +227,9 @@ export default async function shipRoutes(fastify, opts) {
       }
 
       if (row) {
-        await tx.shipComponentRecord.update({ where: { id: row.id }, data: { tier: targetTier, healthPct: 100 } });
+        await tx.shipComponentRecord.update({ where: { id: row.id }, data: { tier: targetTier, quality: qualityGrade, healthPct: 100 } });
       } else {
-        await tx.shipComponentRecord.create({ data: { spaceshipId: ship.id, type: componentType, tier: targetTier } });
+        await tx.shipComponentRecord.create({ data: { spaceshipId: ship.id, type: componentType, tier: targetTier, quality: qualityGrade } });
       }
 
       // A component change can lower the passenger capacity; persist the clamped count with it.
@@ -182,12 +241,12 @@ export default async function shipRoutes(fastify, opts) {
       }
 
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
-      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, crew: ship.crew, factions: ship.factions, cost, credits: player.credits };
+      return { shipId: ship.id, components, passengersAboard, traits: ship.traits, crew: ship.crew, factions: ship.factions, cost, credits: player.credits, qualityGrade, standingBand: band, blackMarket: hostileMult > 1 };
     });
 
     if (outcome.failure) return reply.code(outcome.failure.status).send(outcome.failure.body);
     const loadout = toLoadout(outcome.shipId, outcome.components, outcome.passengersAboard, outcome.traits, outcome.crew);
-    return { ...loadout, cost: outcome.cost, credits: outcome.credits, token: await reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
+    return { ...loadout, cost: outcome.cost, credits: outcome.credits, qualityGrade: outcome.qualityGrade, standingBand: outcome.standingBand, blackMarket: outcome.blackMarket, token: await reissueToken(fastify, request, loadout.ship_attributes, outcome.factions) };
   });
   // Restores damaged components (customs captures wear them, see config/customs.js) to 100% for
   // REPAIR_CREDITS_PER_PCT credits per missing point, while docked.

@@ -251,6 +251,7 @@ model ShipComponentRecord {
   spaceship   Spaceship @relation(fields: [spaceshipId], references: [id], onDelete: Cascade)
   type        String    // HULL, RADAR, CARGO, STEALTH, SHIELDS, WEAPONS, ENERGY, COMMS, ENGINES
   tier        Int       @default(1)
+  quality     String    @default("BASIC") // QualityGrade: CHEAP, BASIC, ARTISAN
   healthPct   Int       @default(100)
   updatedAt   DateTime  @updatedAt
 

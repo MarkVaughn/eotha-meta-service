@@ -5,6 +5,7 @@ import {
   computeShipAttributes,
   defaultComponents
 } from '../config/components.js';
+import { normalizeQuality } from '../config/outfitting.js';
 import { activeDoctrineIdsOf, effectIdsFor, ensureCaptain } from './captain.js';
 import { activeCrewOf } from './crew.js';
 import { factionsClaim } from './reputation.js';
@@ -43,7 +44,7 @@ export function toLoadout(shipId, components, passengersAboard, traits = [], cre
   const list = COMPONENT_TYPES.map((type) => {
     const found = components.find((c) => c.type === type);
     const fallbackTier = ESSENTIAL_COMPONENTS.includes(type) ? MIN_TIER : 0;
-    return { type, tier: found?.tier ?? fallbackTier, healthPct: found?.healthPct ?? 100 };
+    return { type, tier: found?.tier ?? fallbackTier, quality: normalizeQuality(found?.quality), healthPct: found?.healthPct ?? 100 };
   });
   return { ship_id: shipId, components: list, ship_attributes: computeShipAttributes(list, passengersAboard, traits, crew) };
 }
