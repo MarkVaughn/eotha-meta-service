@@ -194,6 +194,13 @@ function capabilitiesView(member) {
   }));
 }
 
+// Expedition trauma, as the client reads it: `traumaUntil` (ISO) and `traumaType` while the member is still
+// incapacitated, both null once `traumaUntil` has passed or when they were never hurt.
+function traumaView(member) {
+  const hurt = member.traumaUntil != null && member.traumaUntil.getTime() > Date.now();
+  return { traumaUntil: hurt ? member.traumaUntil.toISOString() : null, traumaType: hurt ? member.traumaType ?? null : null };
+}
+
 /**
  * What the client shows of a crew member; `traits` are the captain's, which move the wage share. `morale` is
  * the stored one. While the pilot flies colors that shift it (a member aboard whose loyalty to them is high
@@ -220,6 +227,7 @@ export function crewMemberView(member, traits = []) {
     unpaidArrearsCredits: member.unpaidArrearsCredits,
     pendingStipendCredits: member.pendingStipendCredits,
     ...(member.detained && { detained: true, detainedUntil: member.detainedUntil.toISOString() }),
+    ...traumaView(member),
     ...(member.crewClass === 'ENGINEER' && { juryRig: {
       selectedComponentTypes: member.juryRigComponentTypes ?? [],
       slots: engineerJuryRigSlots(member),
