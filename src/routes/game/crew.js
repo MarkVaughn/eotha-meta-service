@@ -19,6 +19,7 @@ import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } f
 import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 import { recordCrewDock } from '../../lib/crew-docking.js';
+import { hasInfirmary, isTraumatized, treatedMorale, treatmentFee } from '../../lib/infirmary.js';
 
 // `dockedReceipt` is optional in the schema on purpose, like the captain trait route: its absence is
 // answered with the coded 403 `docked_receipt_required` rather than a generic schema 400.
@@ -87,7 +88,7 @@ const MESSAGES = {
   insufficient_free_berths: 'There is no free life support berth for another crew member.',
   class_already_active: 'A crew member of that class is already aboard.',
   insufficient_faction_rep: "Your standing with this station's governing faction is too low to hire them.",
-  insufficient_credits: 'Not enough credits for the signing bonus.',
+  insufficient_credits: 'Not enough credits for this crew service; requiredCredits is the amount needed.',
   crew_detained: 'Customs are holding this crew member: they cannot be dismissed or moved until the hold ends.',
   crew_not_engineer: 'Only an Engineer can configure component overdrive.',
   jury_rig_slots_exceeded: 'That Engineer cannot overdrive that many components.',
@@ -101,6 +102,8 @@ const MESSAGES = {
   insufficient_seniority_xp: 'That crew member has not earned enough Seniority XP for the next rank.',
   crew_refuses_promotion: 'A Mutinous crew member refuses training until their morale recovers.',
   no_arrears: 'No crew pay is owed.',
+  station_has_no_infirmary: 'This station has no medical facilities to treat trauma.',
+  crew_not_traumatized: 'That crew member is not suffering from trauma.',
   resignation_requires_new_dock: 'Resigned crew require a new signed docking receipt and twice their arrears to stay.'
 };
 const STATUS = {
@@ -125,6 +128,8 @@ const STATUS = {
   insufficient_seniority_xp: 409,
   crew_refuses_promotion: 409,
   no_arrears: 409,
+  station_has_no_infirmary: 409,
+  crew_not_traumatized: 409,
   resignation_requires_new_dock: 409
 };
 
@@ -414,6 +419,35 @@ export default async function crewRoutes(fastify) {
     if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
     const { ship, member, credits, feeCredits, crew } = outcome;
     return respondWithShip(request, ship, crew, { crew: viewIn(member, crew, ship.traits), credits, feeCredits });
+  });
+
+  // Pays a station infirmary to clear a crew member's expedition trauma at once and bring their morale up to
+  // the nominal floor. The fee follows the patient's rank and is waived by an active Adept or Master Doctor.
+  fastify.post('/crew/treat-trauma', { schema: crewActionSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
+    if (!(await dockedStation(request, reply))) return reply;
+    if (!hasInfirmary(request.body.dockedReceipt)) return reply.code(STATUS.station_has_no_infirmary).send(refusal({ code: 'station_has_no_infirmary' }));
+    const playerId = request.user.sub;
+    const outcome = await prisma.$transaction(async (tx) => {
+      const ship = await lockActiveShip(tx, request.user);
+      const member = await tx.crewMember.findFirst({ where: { id: request.body.crewId, playerId } });
+      if (!member) return { refused: { code: 'crew_not_found' } };
+      if (member.status !== CREW_STATUS.ACTIVE || member.spaceshipId !== ship.id) return { refused: { code: 'crew_not_active' } };
+      const nowMs = Date.now();
+      if (!isTraumatized(member, nowMs)) return { refused: { code: 'crew_not_traumatized' } };
+      const feeCredits = treatmentFee(member, ship.crew, nowMs);
+      // Guarded decrement, so concurrent spends cannot overdraw; the treatment rolls back with it.
+      const paid = await tx.player.updateMany({
+        where: { id: playerId, credits: { gte: feeCredits } },
+        data: { credits: { decrement: feeCredits } }
+      });
+      if (paid.count !== 1) return { refused: { code: 'insufficient_credits', requiredCredits: feeCredits } };
+      await tx.crewMember.update({ where: { id: member.id }, data: { traumaUntil: null, traumaType: null, morale: treatedMorale(member) } });
+      const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
+      return { ship, memberId: member.id, credits: player.credits, feeCredits, crew: await activeCrewOf(tx, ship.id) };
+    });
+    if (outcome.refused) return reply.code(STATUS[outcome.refused.code]).send(refusal(outcome.refused));
+    const { ship, memberId, credits, feeCredits, crew } = outcome;
+    return respondWithShip(request, ship, crew, { crew: viewIn({ id: memberId }, crew, ship.traits), credits, feeCredits });
   });
 
   fastify.post('/crew/shore-leave', { schema: shoreLeaveSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {

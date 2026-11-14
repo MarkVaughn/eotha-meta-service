@@ -34,3 +34,10 @@ export const EXPEDITION_TRAUMA_DURATION_MS = 45 * 60_000;
 // A claim may be dated this far ahead of this service's clock (the engine's and ours may disagree) and no further:
 // a future `completedAtMs` is refused rather than stored.
 export const EXPEDITION_MAX_FUTURE_SKEW_MS = 60_000;
+
+// Trauma treatment at a station infirmary: the medical fee by the patient's rank, waived when the ship carries an
+// active Doctor of at least TRAUMA_FEE_WAIVER_MIN_RANK. Treatment clears the trauma at once and lifts the patient's
+// morale to at least TRAUMA_TREATED_MORALE_FLOOR (the nominal threshold).
+export const TRAUMA_TREATMENT_FEE_CREDITS = Object.freeze({ NOVICE: 250, ADEPT: 500, MASTER: 1000 });
+export const TRAUMA_FEE_WAIVER_MIN_RANK = 'ADEPT';
+export const TRAUMA_TREATED_MORALE_FLOOR = 50;
