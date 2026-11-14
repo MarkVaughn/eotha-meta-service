@@ -279,10 +279,10 @@ describe('ship components over HTTP', () => {
     assert.equal(start.ship_attributes.lander_tier, 0);
     assert.equal(app.jwt.verify(pilot.token).ship_attributes.lander_capacity, 0);
 
-    // The Tier 1 hull budget (6) is already used by the default loadout.
-    const full = await upgrade(pilot, 'LANDER', 1);
-    assert.equal(full.statusCode, 400);
-    assert.match(json(full).error, /exceeds Hull Tier 1 budget of 6 points \(requested: 7\)/);
+    // A Tier 1 hull may not fit a lander at all (see tests/lander-gate.test.js).
+    const restricted = await upgrade(pilot, 'LANDER', 1);
+    assert.equal(restricted.statusCode, 403);
+    assert.equal(json(restricted).code, 'lander_restricted_guest_or_t1');
     assert.equal((await upgrade(pilot, 'HULL', 2)).statusCode, 200);
 
     const before = await credits(pilot);
@@ -328,9 +328,12 @@ describe('ship components over HTTP', () => {
     await loadout(pilot); // the default ship is created lazily
     const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } });
     await app.prisma.shipComponentRecord.deleteMany({ where: { spaceshipId: ship.id, type: 'LANDER' } });
+    // A Tier 2 hull (the lowest that may fit a lander) with its 10 budget points already spent.
+    await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'HULL' } }, data: { tier: 2 } });
+    await app.prisma.shipComponentRecord.update({ where: { spaceshipId_type: { spaceshipId: ship.id, type: 'RADAR' } }, data: { tier: 5 } });
     const res = await upgrade(pilot, 'LANDER', 1);
     assert.equal(res.statusCode, 400);
-    assert.match(json(res).error, /exceeds Hull Tier 1 budget of 6 points \(requested: 7\)/);
+    assert.match(json(res).error, /exceeds Hull Tier 2 budget of 10 points \(requested: 11\)/);
   });
 
   test('hull_tier 1 to 5 appears in the token, and upgrade reissues carry the new tier', async () => {
