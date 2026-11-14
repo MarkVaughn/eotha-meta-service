@@ -168,7 +168,7 @@ export default async function shipRoutes(fastify, opts) {
       }
 
       const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
-      const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
+      const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? (ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0);
       const currentPoints = totalSubsystemPoints(ship.components);
 
       if (componentType === 'HULL') {

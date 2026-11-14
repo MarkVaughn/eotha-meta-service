@@ -294,6 +294,16 @@ describe('ship components over HTTP', () => {
     assert.match(json(over).error, /exceeds Hull Tier 2 budget of 10 points \(requested: 11\)/);
   });
 
+  test('a ship with no lander row cannot buy a lander past the hull budget', async () => {
+    const pilot = await newPilot('LegacyLander');
+    await setCredits(pilot, 100_000);
+    const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } });
+    await app.prisma.shipComponentRecord.deleteMany({ where: { spaceshipId: ship.id, type: 'LANDER' } });
+    const res = await upgrade(pilot, 'LANDER', 1);
+    assert.equal(res.statusCode, 400);
+    assert.match(json(res).error, /exceeds Hull Tier 1 budget of 6 points \(requested: 7\)/);
+  });
+
   test('hull_tier 1 to 5 appears in the token, and upgrade reissues carry the new tier', async () => {
     const pilot = await newPilot('HullTier');
     await setCredits(pilot, 100_000);
