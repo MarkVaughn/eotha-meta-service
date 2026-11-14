@@ -43,6 +43,7 @@ eotha-meta-service/
 │   │   ├── dev.js              # Development-login starting credits
 │   │   ├── docking.js          # Docked- and undock-receipt validity windows and clock skew
 │   │   ├── env.js              # Environment validation via Zod
+│   │   ├── expedition.js       # Away-team expedition claim bounds: outcome tiers, away-team size, morale, lot and reputation limits
 │   │   ├── factions.js         # Faction ids, standing caps (clampStandingsWithCaps), Flying Colors rules
 │   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, abandon terms, late cutoff, payout cap, offer clock skew)
 │   │   └── patterns.js         # Shapes of engine identifiers (H3 cells, station ids, UUIDs)
@@ -56,6 +57,7 @@ eotha-meta-service/
 │   │   ├── crew-generator.js   # The deterministic hiring board of a station and why a candidate is unavailable
 │   │   ├── crew.js             # Active and standby crew, berth checks, the crew revenue share
 │   │   ├── docked-receipt.js   # Verifies the engine's signed docked receipts
+│   │   ├── expedition.js       # Verifies the engine's signed away-team expedition claims (EOTHA_AWAY_TEAM_CLAIM_V1) and bounds-checks their fields
 │   │   ├── hostage.js          # Hostage state of an abandoned passage: accrued penalty, drop-off place, base penalty
 │   │   ├── identity.js         # Guest -> linked player conversion
 │   │   ├── mission-claim.js    # Verifies the engine's signed mission completion claims
@@ -633,6 +635,14 @@ Every candidate and `CrewMember` carries an integer loyalty `{ alpha, beta, gamm
 - **Berth tension.** For the crew aboard (`ACTIVE`, not held by customs; crew on Harbor Standby are lodged ashore and never counted) the ideological distance of a pair is `T_ij = (|alpha_i - alpha_j| + |beta_i - beta_j|) / 2` and the berth's tension `T` the mean over every pair (needs two aboard). At `T >= 55` the mess hall turns sour: each working member aboard loses 3 morale per mission completed (1 with a Nominal-or-better Chef or Doctor aboard), reported as `berthFriction { averageTension, moraleLoss, mitigated }` on that member's `crew_morale` entry. Below `T < 25` the crew pulls together: each gains 2 morale per mission (`berthCohesion { averageTension, moraleGain }`) and a clean covert mission's clandestine bonus is paid 5 % higher (on top of a Smuggler's rate). Two crew who both hold the neutral default are cohesive. Both apply on `POST /game/missions/complete` only, through the usual morale rules (the quirk and captain trait scaling of a gain or a loss). `GET /game/crew` and every crew route that re-signs the token answer `berth { state: FRICTION | COHESION | NEUTRAL, averageTension (one decimal, null below two aboard), crewCount, moraleHit, moraleRecovery, clandestineBonus, chefOrDoctorAboard }`.
 - **Partisan morale.** A settled mission, and a customs seizure that fails one, moves each working crew member aboard's morale by `clamp(round(sum_f sign(dR_f) * w * (L_f - 50) / 50), -20, +15)` over the factions whose standing it changed (`w` 6.0 for a gain, 9.0 for a loss; a covert mission completed undetected halves the sum before it is rounded). A mission counts the sponsor's reputation change and, for a detected covert run, the rival's harm; a seizure the sponsor's and the governing faction's losses. It is a gain or a loss like any other, and is reported as `partisanMoraleDelta` on the member's `crew_morale` entry.
 - **Flying Colors.** While the pilot flies faction F's colors (`POST /game/factions/colors`), crew aboard with loyalty to F of 65 or more act at +10 morale and those at 30 or less at -10 (held to `1..100`, a resigned member untouched). It is read, never stored: the roster reports `morale` (stored), `effectiveMorale` and `colors { factionId, moraleShift }`, and the morale band, class multiplier, capabilities and customs leak follow the effective morale, so the token's `ship_attributes` change when the colors do and stopping the colors lifts it. The colors route lists the members shifted as `crew_morale`.
+
+### Planetary expeditions (schema and claim verifier)
+
+First pieces of the planetary away-team work; the settle route and station missions are not built yet, so nothing calls the verifier today.
+
+**Schema.** `CrewMember.traumaUntil` / `traumaType` (nullable: severe medical trauma incapacitates a member until then, never removes them) and the `ExpeditionRecord` table (one row per settled claim, replay key `nonceHex`, `onDelete: Cascade` from the player). Additions only; `prisma/migrations/20261110000000_expeditions/migration.sql` is the same change as idempotent SQL.
+
+**Claim verifier (`src/lib/expedition.js`).** `verifyAwayTeamClaim(claim, publicKey)` takes the camelCase proto-JSON of an `AwayTeamClaim` (`nonce` and `signature` base64, a default value may be omitted) and answers whether every field is within bounds (`awayTeamClaimProblem` names the first that is not) and the Ed25519 signature verifies over the `EOTHA_AWAY_TEAM_CLAIM_V1` payload (24 byte domain; the layout and fixed vectors are in eotha-contracts `expedition.proto` and `scripts/check-away-team-claim-vector.js`). Recovered lots use the cargo lot layout, provenance included. It never throws and never falls back to another domain. `class_id`/`rank_id` of a crew state are display only and not signed. Bounds (`src/config/expedition.js`): outcome tier 1 to 5; one to 8 distinct crew members; morale delta within +-100; `traumaType` set exactly when `sufferedTrauma`; at most 32 lots with grade 1 to 5, `unitsMilli >= 1` and `purityBp <= 10000`; reputation deltas within +-2000; `completedAtMs` a uint64.
 
 ## Customs
 
