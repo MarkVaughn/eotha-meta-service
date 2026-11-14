@@ -97,9 +97,20 @@ describe('POST /game/crew/treat-trauma', () => {
       });
     }
 
+    test('a low-morale Master Doctor still waives the fee', async () => {
+      const dock = atKind(DockableKind.DOCKABLE_KIND_COLONY);
+      try {
+        const { pilot, patient } = await setup('MASTER', 100);
+        await addCrew(pilot, doctor({ rank: 'MASTER', morale: 40 }));
+        const res = await treat(pilot, patient);
+        assert.equal(res.statusCode, 200, res.body);
+        assert.equal(json(res).feeCredits, 0);
+        assert.equal(await credits(pilot), 100);
+      } finally { dock.mock.restore(); }
+    });
+
     const noWaiver = {
       'a Novice Doctor': doctor({ rank: 'NOVICE' }),
-      'a Doctor below Nominal morale': doctor({ morale: 40 }),
       'a Doctor held by customs': doctor({ detainedUntil: new Date(Date.now() + 10 * MIN) }),
       'a traumatized Doctor': doctor({ traumaUntil: new Date(Date.now() + 10 * MIN), traumaType: 'BURNS' }),
       'a Doctor on Harbor Standby': doctor({ status: 'STANDBY', spaceshipId: null })

@@ -1,5 +1,5 @@
 import { DockableKind } from './contracts/penalty/eotha/common/v1/sector.js';
-import { NOMINAL_MORALE_THRESHOLD, RANKS, effectiveMorale } from '../config/crew.js';
+import { RANKS } from '../config/crew.js';
 import { TRAUMA_FEE_WAIVER_MIN_RANK, TRAUMA_TREATED_MORALE_FLOOR, TRAUMA_TREATMENT_FEE_CREDITS } from '../config/expedition.js';
 import { stationServices } from './outfitting-station.js';
 
@@ -21,12 +21,11 @@ export function hasInfirmary(receipt) {
 export const isTraumatized = (member, nowMs) => member.traumaUntil != null && member.traumaUntil.getTime() > nowMs;
 
 /**
- * Whether the active `crew` includes a Doctor who treats for free: Adept or Master, at Nominal morale or better,
+ * Whether the active `crew` includes a Doctor who treats for free: Adept or Master,
  * not held by customs and not themselves incapacitated.
  */
 export const hasWaivingDoctor = (crew, nowMs) => crew.some((member) => member.crewClass === 'DOCTOR'
   && RANKS.indexOf(member.rank) >= RANKS.indexOf(TRAUMA_FEE_WAIVER_MIN_RANK)
-  && effectiveMorale(member) >= NOMINAL_MORALE_THRESHOLD
   && !member.detained
   && !isTraumatized(member, nowMs));
 
