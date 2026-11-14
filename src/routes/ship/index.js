@@ -208,7 +208,7 @@ export default async function shipRoutes(fastify, opts) {
       const cost = quoteOutfit({
         from: { tier: fromTier, quality: fromQuality },
         to: { tier: targetTier, quality: qualityGrade },
-        tierCost: upgradeCost,
+        tierCost: (from, to) => upgradeCost(from, to, componentType),
         starter,
         discount,
         hostileMult
