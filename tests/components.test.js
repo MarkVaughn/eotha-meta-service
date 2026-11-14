@@ -325,6 +325,7 @@ describe('ship components over HTTP', () => {
   test('a ship with no lander row cannot buy a lander past the hull budget', async () => {
     const pilot = await newPilot('LegacyLander');
     await setCredits(pilot, 100_000);
+    await loadout(pilot); // the default ship is created lazily
     const ship = await app.prisma.spaceship.findFirst({ where: { playerId: pilot.id } });
     await app.prisma.shipComponentRecord.deleteMany({ where: { spaceshipId: ship.id, type: 'LANDER' } });
     const res = await upgrade(pilot, 'LANDER', 1);
@@ -481,7 +482,7 @@ describe('ship components over HTTP', () => {
     assert.equal(await app.prisma.spaceship.count({ where: { playerId: pilot.id } }), 1);
 
     const lo = json(results[0]);
-    assert.equal(lo.components.length, 11);
+    assert.equal(lo.components.length, 12);
     const tierOneTypes = ['HULL', 'RADAR', 'ENGINES', 'ENERGY', 'LIFE_SUPPORT', 'SENSORS', 'CARGO'];
     for (const c of lo.components) assert.equal(c.tier, tierOneTypes.includes(c.type) ? 1 : 0, `${c.type} default tier`);
     assert.equal(lo.ship_attributes.max_hull_hp, 100);
