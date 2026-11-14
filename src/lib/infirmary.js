@@ -6,8 +6,16 @@ import { stationServices } from './outfitting-station.js';
 // The docks with medical facilities. Mining outposts have none.
 const INFIRMARY_KINDS = Object.freeze([DockableKind.DOCKABLE_KIND_COLONY, DockableKind.DOCKABLE_KIND_RESEARCH, DockableKind.DOCKABLE_KIND_TRADING]);
 
-/** Whether the dock the docked `receipt` vouches for has an infirmary. */
-export const hasInfirmary = (receipt) => INFIRMARY_KINDS.includes(stationServices.dockableKind(receipt));
+/**
+ * Whether the dock the docked `receipt` vouches for has an infirmary: a colony, research or trading dock. A dock
+ * of known kind that is none of those (a mining outpost) has none. A dock of unknown kind qualifies unless
+ * `stationServices.requireKnownDockableKind` is set (receipts do not carry the kind yet).
+ */
+export function hasInfirmary(receipt) {
+  const kind = stationServices.dockableKind(receipt);
+  if (kind === DockableKind.DOCKABLE_KIND_UNSPECIFIED) return !stationServices.requireKnownDockableKind;
+  return INFIRMARY_KINDS.includes(kind);
+}
 
 /** Whether `member` is still incapacitated by an expedition trauma at `nowMs`. */
 export const isTraumatized = (member, nowMs) => member.traumaUntil != null && member.traumaUntil.getTime() > nowMs;

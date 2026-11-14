@@ -120,25 +120,39 @@ describe('POST /game/crew/treat-trauma', () => {
   });
 
   describe('refusals', () => {
-    test('a station without an infirmary refuses and changes nothing', async () => {
-      for (const kind of [DockableKind.DOCKABLE_KIND_MINING, DockableKind.DOCKABLE_KIND_UNSPECIFIED]) {
-        const dock = atKind(kind);
-        try {
-          const { pilot, patient } = await setup('NOVICE', 1000);
-          const res = await treat(pilot, patient);
-          assert.equal(res.statusCode, 409);
-          assert.equal(json(res).error, 'station_has_no_infirmary');
-          assert.equal(await credits(pilot), 1000);
-          assert.notEqual((await row(patient.id)).traumaUntil, null);
-        } finally { dock.mock.restore(); }
-      }
+    test('a dock of known kind without an infirmary refuses and changes nothing', async () => {
+      const dock = atKind(DockableKind.DOCKABLE_KIND_MINING);
+      try {
+        const { pilot, patient } = await setup('NOVICE', 1000);
+        const res = await treat(pilot, patient);
+        assert.equal(res.statusCode, 409);
+        assert.equal(json(res).error, 'station_has_no_infirmary');
+        assert.equal(await credits(pilot), 1000);
+        assert.notEqual((await row(patient.id)).traumaUntil, null);
+      } finally { dock.mock.restore(); }
     });
 
-    test('the default dock kind is unknown, so the route refuses', async () => {
-      const { pilot, patient } = await setup();
+    test('an unknown dock kind is allowed by default, as receipts do not carry the kind yet', async () => {
+      const { pilot, patient } = await setup('NOVICE', 1000);
       const res = await treat(pilot, patient);
-      assert.equal(res.statusCode, 409);
-      assert.equal(json(res).error, 'station_has_no_infirmary');
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(await credits(pilot), 750);
+    });
+
+    test('with requireKnownDockableKind an unknown dock refuses, while a colony still treats', async () => {
+      const strict = mock.property(stationServices, 'requireKnownDockableKind', true);
+      try {
+        const { pilot, patient } = await setup('NOVICE', 1000);
+        const refused = await treat(pilot, patient);
+        assert.equal(refused.statusCode, 409);
+        assert.equal(json(refused).error, 'station_has_no_infirmary');
+        assert.equal(await credits(pilot), 1000);
+        assert.notEqual((await row(patient.id)).traumaUntil, null);
+        const dock = atKind(DockableKind.DOCKABLE_KIND_TRADING);
+        try {
+          assert.equal((await treat(pilot, patient)).statusCode, 200);
+        } finally { dock.mock.restore(); }
+      } finally { strict.mock.restore(); }
     });
 
     test('not docked: no receipt, an expired or foreign receipt, or the wrong station', async () => {

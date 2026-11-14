@@ -9,8 +9,14 @@ export const stationServices = {
   /** Whether the dock `receipt` vouches for is low-security, where a Hostile pilot can buy a black-market refit. */
   isLowSecDock: (receipt) => false, // eslint-disable-line no-unused-vars
   /**
-   * The `DockableKind` of the dock `receipt` vouches for. Until the capability profile exists nothing is known, so
-   * every dock is UNSPECIFIED and the services that need a kind (the infirmary) refuse.
+   * The `DockableKind` of the dock `receipt` vouches for. Receipts do not carry it yet, so until the capability
+   * profile exists every dock is UNSPECIFIED (unknown).
    */
-  dockableKind: (receipt) => DockableKind.DOCKABLE_KIND_UNSPECIFIED // eslint-disable-line no-unused-vars
+  dockableKind: (receipt) => DockableKind.DOCKABLE_KIND_UNSPECIFIED, // eslint-disable-line no-unused-vars
+  /**
+   * Whether a service that needs a dock kind (the infirmary) refuses a dock whose kind is unknown. Off while
+   * kinds are unavailable, so any valid docked receipt will do; switch it on once receipts or the capability
+   * profile carry the kind, and unknown docks then stop qualifying.
+   */
+  requireKnownDockableKind: false
 };
