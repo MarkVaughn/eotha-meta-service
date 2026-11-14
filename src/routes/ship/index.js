@@ -3,6 +3,7 @@ import {
   ESSENTIAL_COMPONENTS,
   MIN_TIER,
   MAX_TIER,
+  maxTierOf,
   clampPassengers,
   computeShipAttributes,
   upgradeCost,
@@ -132,6 +133,14 @@ export default async function shipRoutes(fastify, opts) {
     if (ESSENTIAL_COMPONENTS.includes(componentType) && targetTier === 0) {
       return reply.code(400).send({
         error: `${componentType} is an essential component and cannot be unequipped (minimum tier is 1).`
+      });
+    }
+
+    if (targetTier > maxTierOf(componentType)) {
+      return reply.code(400).send({
+        error: `${componentType} has no tier ${targetTier} (maximum tier is ${maxTierOf(componentType)}).`,
+        code: 'tier_above_component_max',
+        maxTier: maxTierOf(componentType)
       });
     }
 

@@ -20,7 +20,8 @@ import {
   totalSubsystemPoints,
   upgradeCost,
   TIER_UPGRADE_COST,
-  LANDER_TIER_UPGRADE_COST
+  LANDER_TIER_UPGRADE_COST,
+  maxTierOf
 } from '../src/config/components.js';
 
 describe('computeShipAttributes', () => {
@@ -47,7 +48,7 @@ describe('computeShipAttributes', () => {
   });
 
   test('computes Tier 5 values for every component', () => {
-    const a = computeShipAttributes(COMPONENT_TYPES.map((type) => ({ type, tier: 5 })));
+    const a = computeShipAttributes(COMPONENT_TYPES.map((type) => ({ type, tier: maxTierOf(type) })));
     assert.deepEqual(a, {
       max_hull_hp: 2000, dry_mass_kg: 4000, hull_tier: 5,
       max_shield_hp: 1000, shield_regen_rate: 50,
@@ -58,7 +59,7 @@ describe('computeShipAttributes', () => {
       comms_range_m: 25000, max_speed_mps: 343,
       passenger_capacity: 50,
       sensor_range_m: 7500, sensor_cooldown_mult: 0.4, sensor_tier: 5,
-      lander_capacity: 6, lander_tier: 5,
+      lander_capacity: 6, lander_tier: 3,
       docking_time_mult: 1, extraction_rate_mult: 1, tuning_tolerance_hz: 100,
       ion_fog_shield_resist: 0, node_interference_resist: 0, crew_capability_flags: 0, covert_exposure_mult: 1,
       customs_evasion_mult: 1, bribe_cost_mult: 1,
@@ -115,7 +116,7 @@ describe('computeShipAttributes', () => {
   });
 
   test('maps every lander tier to its away-team capacity and tier', () => {
-    const capacity = [2, 4, 6, 6, 6];
+    const capacity = [2, 4, 6];
     capacity.forEach((expected, i) => {
       const a = computeShipAttributes([{ type: 'LANDER', tier: i + 1 }]);
       assert.equal(a.lander_capacity, expected);
@@ -130,13 +131,20 @@ describe('computeShipAttributes', () => {
     assert.deepEqual(pick(computeShipAttributes(defaultComponents())), none);
     assert.deepEqual(pick(computeShipAttributes([])), none);
     assert.deepEqual(pick(computeShipAttributes([{ type: 'LANDER', tier: 0 }])), none);
-    for (const tier of [6, -1, 2.5, null, undefined, 'x']) {
+    for (const tier of [4, 5, 6, -1, 2.5, null, undefined, 'x']) {
       assert.deepEqual(pick(computeShipAttributes([{ type: 'LANDER', tier }])), none, `${tier}`);
     }
   });
 
-  test('lander capacity is clamped at 6 above Tier 3 and is not scaled by quality, health or crew', () => {
-    for (const tier of [3, 4, 5]) assert.equal(computeShipAttributes([{ type: 'LANDER', tier }]).lander_capacity, 6);
+  test('the lander has three tiers: a stored tier above 3 is no lander, and capacity is not scaled by quality or health', () => {
+    assert.equal(maxTierOf('LANDER'), 3);
+    assert.equal(maxTierOf('RADAR'), 5);
+    assert.equal(computeShipAttributes([{ type: 'LANDER', tier: 3 }]).lander_capacity, 6);
+    for (const tier of [4, 5]) {
+      const a = computeShipAttributes([{ type: 'LANDER', tier }]);
+      assert.equal(a.lander_capacity, 0, `${tier}`);
+      assert.equal(a.lander_tier, 0, `${tier}`);
+    }
     const base = computeShipAttributes([{ type: 'LANDER', tier: 2 }]);
     for (const quality of ['CHEAP', 'ARTISAN']) {
       const a = computeShipAttributes([{ type: 'LANDER', tier: 2, quality, healthPct: 40 }]);
@@ -214,10 +222,9 @@ describe('hullBudget', () => {
     assert.equal(totalSubsystemPoints(defaultComponents()), 6);
     assert.equal(totalSubsystemPoints(withLander(1)), 7);
     assert.equal(totalSubsystemPoints(withLander(3)), 9);
-    // The default Tier 1 loadout fills the Tier 1 hull, so even a Tier 1 lander exceeds it; a Tier 2 hull fits up to Tier 4.
+    // The default Tier 1 loadout fills the Tier 1 hull, so even a Tier 1 lander exceeds it; a Tier 2 hull fits a Tier 3 one.
     assert.ok(totalSubsystemPoints(withLander(1)) > hullBudget(1));
-    assert.ok(totalSubsystemPoints(withLander(4)) <= hullBudget(2));
-    assert.ok(totalSubsystemPoints(withLander(5)) > hullBudget(2));
+    assert.ok(totalSubsystemPoints(withLander(3)) <= hullBudget(2));
     assert.equal(totalSubsystemPoints([{ type: 'LANDER', tier: 0 }]), 0);
   });
 });
@@ -236,7 +243,10 @@ describe('upgradeCost', () => {
     assert.equal(upgradeCost(1, 2, 'LANDER'), 2000);
     assert.equal(upgradeCost(2, 3, 'LANDER'), 6000);
     assert.equal(upgradeCost(0, 3, 'LANDER'), 8500);
-    assert.equal(upgradeCost(0, 5, 'LANDER'), Object.values(LANDER_TIER_UPGRADE_COST).reduce((a, b) => a + b, 0));
+    assert.deepEqual(Object.keys(LANDER_TIER_UPGRADE_COST), ['1', '2', '3']);
+    // There is no price for a tier the lander does not have.
+    assert.throws(() => upgradeCost(3, 4, 'LANDER'), RangeError);
+    assert.throws(() => upgradeCost(0, 5, 'LANDER'), RangeError);
     // Other components keep the flat table, with or without a type.
     assert.equal(upgradeCost(0, 1, 'RADAR'), TIER_UPGRADE_COST[1]);
     assert.equal(upgradeCost(0, 3), TIER_UPGRADE_COST[1] + TIER_UPGRADE_COST[2] + TIER_UPGRADE_COST[3]);
@@ -288,10 +298,28 @@ describe('ship components over HTTP', () => {
     assert.equal(signed.lander_tier, 2);
     assert.equal(tierOf(await loadout(pilot), 'LANDER'), 2);
 
-    // 6 + 2 = 8 of the Tier 2 hull's 10 points: Tier 4 is the last that fits.
-    const over = await upgrade(pilot, 'LANDER', 5);
-    assert.equal(over.statusCode, 400);
-    assert.match(json(over).error, /exceeds Hull Tier 2 budget of 10 points \(requested: 11\)/);
+    // Tier 3 is the last tier: 6 + 3 = 9 of the Tier 2 hull's 10 points, for 6000 credits.
+    const top = await upgrade(pilot, 'LANDER', 3);
+    assert.equal(top.statusCode, 200);
+    assert.equal(json(top).cost, 6000);
+    assert.equal(json(top).ship_attributes.lander_capacity, 6);
+    assert.equal(json(top).ship_attributes.lander_tier, 3);
+
+    // There is no lander tier 4 or 5: refused before anything is charged or changed.
+    const balance = await credits(pilot);
+    for (const tier of [4, 5]) {
+      const past = await upgrade(pilot, 'LANDER', tier);
+      assert.equal(past.statusCode, 400, `${tier}`);
+      assert.equal(json(past).code, 'tier_above_component_max');
+      assert.equal(json(past).maxTier, 3);
+    }
+    assert.equal(await credits(pilot), balance);
+    assert.equal(tierOf(await loadout(pilot), 'LANDER'), 3);
+    const again = await upgrade(pilot, 'LANDER', 3);
+    assert.equal(again.statusCode, 400);
+    assert.match(json(again).error, /already at tier 3/);
+    // The other components keep their five tiers.
+    assert.equal((await upgrade(pilot, 'HULL', 5)).statusCode, 200);
   });
 
   test('a ship with no lander row cannot buy a lander past the hull budget', async () => {

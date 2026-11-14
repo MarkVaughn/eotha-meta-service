@@ -29,15 +29,25 @@ export const MAX_TIER = 5;
 // Design assumption: a single flat table, not per-component pricing.
 export const TIER_UPGRADE_COST = { 1: 250, 2: 750, 3: 2000, 4: 5000, 5: 12000 };
 
-// The Planetary Lander is priced on its own table for the tiers it defines (1-3: 500, 2000, 6000); its tiers
-// 4 and 5 are not priced separately and use the flat table above.
-export const LANDER_TIER_UPGRADE_COST = { ...TIER_UPGRADE_COST, 1: 500, 2: 2000, 3: 6000 };
+// The Planetary Lander has three tiers and is priced on its own table: 500, 2000 and 6000 credits.
+export const LANDER_TIER_UPGRADE_COST = { 1: 500, 2: 2000, 3: 6000 };
+
+// The highest tier of a component type that has fewer than MAX_TIER tiers (the lander stops at 3).
+const MAX_TIER_BY_TYPE = { LANDER: 3 };
+
+export function maxTierOf(componentType) {
+  return MAX_TIER_BY_TYPE[componentType] ?? MAX_TIER;
+}
 
 // Credits to take `componentType` from `fromTier` to `toTier`; a type without its own table uses the flat one.
+// A tier the component does not have is a programming error, never a price.
 export function upgradeCost(fromTier, toTier, componentType) {
   const table = componentType === 'LANDER' ? LANDER_TIER_UPGRADE_COST : TIER_UPGRADE_COST;
   let cost = 0;
-  for (let tier = fromTier + 1; tier <= toTier; tier++) cost += table[tier];
+  for (let tier = fromTier + 1; tier <= toTier; tier++) {
+    if (table[tier] === undefined) throw new RangeError(`${componentType ?? 'component'} has no tier ${tier}`);
+    cost += table[tier];
+  }
   return cost;
 }
 
@@ -91,8 +101,8 @@ const TIER_TABLE = {
   // Away-team members the lander carries and its tier (eotha-contracts ShipAttributes fields 31 and 32); 0 on the
   // wire means no lander, which is what Tier 0 (unequipped) yields.
   LANDER: {
-    lander_capacity: [2, 4, 6, 6, 6],
-    lander_tier: [1, 2, 3, 4, 5]
+    lander_capacity: [2, 4, 6],
+    lander_tier: [1, 2, 3]
   }
 };
 
@@ -186,7 +196,7 @@ export function computeShipAttributes(components = [], passengersAboard = 0, tra
   for (const type of COMPONENT_TYPES) {
     const floor = OPTIONAL_COMPONENTS.includes(type) ? 0 : MIN_TIER;
     const raw = tiers[type];
-    const storedTier = Number.isInteger(raw) && raw >= floor && raw <= MAX_TIER ? raw : (ABSENT_BY_DEFAULT.includes(type) ? 0 : MIN_TIER);
+    const storedTier = Number.isInteger(raw) && raw >= floor && raw <= maxTierOf(type) ? raw : (ABSENT_BY_DEFAULT.includes(type) ? 0 : MIN_TIER);
     // An absent/unequipped optional component never materializes through an Engineer's effect.
     const tier = storedTier > 0 && overdrive.has(type) ? Math.min(storedTier + 1, MAX_TIER) : storedTier;
     for (const [attr, values] of Object.entries(TIER_TABLE[type])) {
