@@ -31,6 +31,9 @@ import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
 // `dockedReceipt` is optional here on purpose: the route answers its absence with the coded 403
 // `docked_receipt_required` rather than a generic schema 400.
+// The lowest hull tier that may fit a planetary lander.
+const LANDER_MIN_HULL_TIER = 2;
+
 const upgradeSchema = {
   body: {
     type: 'object',
@@ -148,10 +151,19 @@ export default async function shipRoutes(fastify, opts) {
     const outcome = await withActiveShip(request, async (tx, ship) => {
       // Guests cannot upgrade the hull until they link an account. Decided from the identity
       // record, never from the token or the request.
-      if (componentType === 'HULL') {
+      if (componentType === 'HULL' || componentType === 'LANDER') {
         const player = await tx.player.findUnique({ where: { id: playerId }, select: { isAnonymous: true } });
-        if (player?.isAnonymous) {
+        if (componentType === 'HULL' && player?.isAnonymous) {
           return fail(403, 'Hull upgrades are locked until you link an account.', { code: 'guest_hull_locked' });
+        }
+        // A lander is for registered pilots on a Tier 2+ hull: guests and Tier 1 hulls are refused.
+        if (componentType === 'LANDER') {
+          const hullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
+          if (player?.isAnonymous || hullTier < LANDER_MIN_HULL_TIER) {
+            return fail(403, 'Planetary landers need a linked account and a Tier 2 or better hull.', {
+              code: 'lander_restricted_guest_or_t1'
+            });
+          }
         }
       }
 
