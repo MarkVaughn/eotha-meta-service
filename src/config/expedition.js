@@ -26,3 +26,11 @@ export const EXPEDITION_MAX_PURITY_BP = 10_000;
 // Sponsor and rival reputation deltas are held to the width of the standing scale: a delta beyond it would only ever
 // clamp. The contracts do not bound the deltas more tightly than that.
 export const EXPEDITION_MAX_REPUTATION_DELTA = 2 * MAX_STANDING;
+
+// How long a crew member who suffered severe medical trauma on an expedition stays incapacitated, from the moment
+// the claim is settled (design: 30 to 60 minutes, or until treated at an infirmary).
+export const EXPEDITION_TRAUMA_DURATION_MS = 45 * 60_000;
+
+// A claim may be dated this far ahead of this service's clock (the engine's and ours may disagree) and no further:
+// a future `completedAtMs` is refused rather than stored.
+export const EXPEDITION_MAX_FUTURE_SKEW_MS = 60_000;
