@@ -638,7 +638,9 @@ Every candidate and `CrewMember` carries an integer loyalty `{ alpha, beta, gamm
 
 ### Planetary expeditions (schema, claim verifier and settlement)
 
-The planetary away-team work so far: the schema, the claim verifier and the settle route. Station initiator missions and landers are not built yet.
+The planetary away-team work so far: the schema, the claim verifier, the settle route and the lander component. Station initiator missions are not built yet.
+
+**Planetary Lander (`LANDER`, `src/config/components.js`).** An optional ship component (Tier 0 unequipped, the default for every ship, so existing ships need no migration) that carries the away team. It has three tiers (`maxTierOf`): Tier 1 to 3 sign `lander_capacity` `2, 4, 6` and `lander_tier` `1..3` (`ShipAttributes` fields 31 and 32, eotha-contracts 1.11.0); an absent, Tier 0 or invalid lander (including a stored tier above 3) signs `0` for both, which the engine reads as no lander. Capacity is structural: it does not scale with quality or health. Its tier points count against the hull budget like any other subsystem. It is bought at its own prices, 500 / 2000 / 6000 credits to reach Tier 1 / 2 / 3 (`LANDER_TIER_UPGRADE_COST`). `POST /ship/upgrade` refuses a target above Tier 3 with `400 tier_above_component_max` (`maxTier: 3`) before anything is charged. The guest and Tier 1 hull gate and the station stock rules are not built yet, so `POST /ship/upgrade` does not yet restrict it.
 
 **Schema.** `CrewMember.traumaUntil` / `traumaType` (nullable: severe medical trauma incapacitates a member until then, never removes them) and the `ExpeditionRecord` table (one row per settled claim, replay key `nonceHex`, `onDelete: Cascade` from the player). Additions only; `prisma/migrations/20261110000000_expeditions/migration.sql` is the same change as idempotent SQL.
 

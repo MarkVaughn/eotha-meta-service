@@ -140,7 +140,7 @@ describe('dev login', () => {
       assert.equal(body.gateway_ws_url, 'ws://localhost:8080/session');
       assert.equal(body.player.callsign, callsign);
       assert.equal(body.player.dev, true);
-      assert.equal(body.player.ship.components.length, 11);
+      assert.equal(body.player.ship.components.length, 12);
       assert.deepEqual(body.player.spawn_point, { latitude: 37.7749, longitude: -122.4194, h3_index: '8828308281fffff' });
 
       assert.equal(decodeHeader(body.token).alg, 'EdDSA');

@@ -3,6 +3,7 @@ import {
   ESSENTIAL_COMPONENTS,
   MIN_TIER,
   MAX_TIER,
+  maxTierOf,
   clampPassengers,
   computeShipAttributes,
   upgradeCost,
@@ -135,6 +136,14 @@ export default async function shipRoutes(fastify, opts) {
       });
     }
 
+    if (targetTier > maxTierOf(componentType)) {
+      return reply.code(400).send({
+        error: `${componentType} has no tier ${targetTier} (maximum tier is ${maxTierOf(componentType)}).`,
+        code: 'tier_above_component_max',
+        maxTier: maxTierOf(componentType)
+      });
+    }
+
     // Every check, the credit deduction and the tier change commit or roll back together.
     const outcome = await withActiveShip(request, async (tx, ship) => {
       // Guests cannot upgrade the hull until they link an account. Decided from the identity
@@ -168,7 +177,7 @@ export default async function shipRoutes(fastify, opts) {
       }
 
       const currentHullTier = ship.components.find((c) => c.type === 'HULL')?.tier ?? MIN_TIER;
-      const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? MIN_TIER;
+      const currentComponentTier = ship.components.find((c) => c.type === componentType)?.tier ?? (ESSENTIAL_COMPONENTS.includes(componentType) ? MIN_TIER : 0);
       const currentPoints = totalSubsystemPoints(ship.components);
 
       if (componentType === 'HULL') {
@@ -208,7 +217,7 @@ export default async function shipRoutes(fastify, opts) {
       const cost = quoteOutfit({
         from: { tier: fromTier, quality: fromQuality },
         to: { tier: targetTier, quality: qualityGrade },
-        tierCost: upgradeCost,
+        tierCost: (from, to) => upgradeCost(from, to, componentType),
         starter,
         discount,
         hostileMult
