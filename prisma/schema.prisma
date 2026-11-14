@@ -46,6 +46,7 @@ model Player {
   miningPermitRedemptions MiningPermitRedemption[]
   miningViolations MiningViolation[]
   undockRecords UndockRecord[]
+  expeditions  ExpeditionRecord[]
   authorityProjections AuthorityProjection[]
   // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
   // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
@@ -163,6 +164,10 @@ model CrewMember {
   // Held by customs until then (a tier 4 armed boarding, 30 minutes): the member stays on the roster but
   // its class effects, capabilities and perks are off. Null when never detained; additive.
   detainedUntil        DateTime?
+  // Severe medical trauma from a planetary expedition (a signed AwayTeamClaim): the member stays on the roster but
+  // is incapacitated until then, never lost. Both null when never traumatized; additive.
+  traumaUntil          DateTime?
+  traumaType           String?    // RADIATION_BURNS, HYPOTHERMIA, CONCUSSION, ...
   // A stipend deferred while a morale-zero member awaits explicit shore-leave consent.
   pendingStipendCredits Int       @default(0)
   // Dock-configured Engineer overdrive; operation only, never persisted component upgrades.
@@ -672,4 +677,31 @@ model UndockRecord {
 
   @@unique([playerId, nonce])
   @@index([playerId, undockedAtMs])
+}
+
+// A settled planetary expedition: one row per RTSE-signed AwayTeamClaim, applied once per nonce (`nonceHex`, the hex of
+// the claim's 16 nonce bytes), so a replay is answered with the first result. `grossCredits` is the claim's
+// reward_credits before the crew wage share; `netCredits` is what the pilot was paid after it.
+model ExpeditionRecord {
+  id                   String   @id @default(uuid()) @db.Uuid
+  playerId             String   @db.Uuid
+  player               Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  spaceshipId          String   @db.Uuid
+  systemH3             String
+  planetId             String
+  siteNodeH3           String
+  missionId            String?  // null for a free-roam discovery
+  outcomeTier          Int      // 1 critical success, 2 standard success, 3 costly success, 4 aborted failure, 5 disaster
+  grossCredits         Int
+  crewWageShareCredits Int
+  netCredits           Int
+  captainXp            Int
+  sponsorRepChange     Int      @default(0)
+  rivalRepChange       Int      @default(0)
+  nonceHex             String   @unique
+  completedAt          DateTime
+  createdAt            DateTime @default(now())
+
+  @@index([playerId, createdAt])
+  @@index([systemH3, planetId])
 }
