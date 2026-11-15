@@ -208,6 +208,15 @@ npx prisma migrate deploy
 
 Never edit an applied migration; add a new one with `npx prisma migrate dev`.
 
+### Release image
+Pushing a release (checkpoint) tag, CalVer `YYYYMMDD` or `YYYYMMDD.N` such as `20261115` or `20261115.1`, runs `.github/workflows/release-image.yml`. It builds the `Dockerfile` for `linux/arm64` (the Hetzner demo server; built under QEMU) and `linux/amd64`, and pushes the **private** image `ghcr.io/markvaughn/eotha-meta-service:<tag>`, tagged with exactly the release tag and never `latest`, so the tag of the code is the tag of the running image. It runs only on tag pushes (and a manual run that names an existing tag), authenticates with the repository's `GITHUB_TOKEN` (`packages: write`), and needs no personal access token. Keep the package private (the first publish creates it that way) and let the demo server pull it with a token that has `read:packages`.
+
+The image has no private key: the workflow builds with `GENERATE_KEYS=0` (a plain `docker build` still generates a throwaway pair). Mount a directory holding `private.pem` and `public.pem` over `/app/keys` (or set `KEYS_DIR`), so the login key survives upgrades. The service refuses to start without it. The image does not migrate on start; it ships the Prisma CLI and `prisma/migrations`, so run a one-shot step against the same `DATABASE_URL` before starting a new release (after reading [Database migrations](#database-migrations) for a database built with `db push`):
+```bash
+docker run --rm -e DATABASE_URL ghcr.io/markvaughn/eotha-meta-service:<tag> npx prisma migrate deploy
+```
+The build fails if the Prisma query engine for the platform (`linux-arm64-openssl-3.0.x` on arm64) is missing.
+
 ---
 
 ## API Endpoints
