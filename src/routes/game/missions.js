@@ -31,7 +31,7 @@ import { recordCrewDock } from '../../lib/crew-docking.js';
 import { accruedPenalty, basePenalty, disembarkPlace, hostageMinutes, hostageState } from '../../lib/hostage.js';
 import { verifyClaimSignature } from '../../lib/mission-claim.js';
 import {
-  MISSION_ARCHETYPES, MISSION_TYPES, MISSION_VISIBILITIES, isCovert, isLegacyRow, missionOfferVersion, verifyMissionOffer
+  MISSION_ARCHETYPES, MISSION_TYPES, MISSION_VISIBILITIES, isClassified, isCovert, isLegacyRow, missionOfferVersion, verifyMissionOffer
 } from '../../lib/mission-offer.js';
 import { fromStoredOffer, toActiveMission } from '../../lib/active-mission.js';
 import { withColorsBonus } from '../../config/factions.js';
@@ -104,7 +104,11 @@ const offerSchema = {
     opposed_reputation_change: int32,
     clandestine_bonus_credits: { type: 'integer', minimum: 0, maximum: MAX_REWARD_CREDITS },
     carries_contraband_or_operative: { type: 'boolean' },
-    required_flying_colors_faction_id: { type: 'string', maxLength: 256 }
+    required_flying_colors_faction_id: { type: 'string', maxLength: 256 },
+    // A classified offer, issued for a mission unlock voucher (see POST /game/intel/gather): both or neither, and the
+    // signature covers them. The route redeems the voucher with them.
+    unlock_voucher_nonce: { type: 'string', pattern: '^([A-Za-z0-9+/]{22}==)?$' },
+    intel_lead_id: { type: 'string', maxLength: 256 }
   }
 };
 
@@ -330,6 +334,16 @@ export default async function missionsRoutes(fastify) {
       if (held.some((row) => row.missionId === offer.mission_id)) {
         return fail(409, 'This mission is already active.', { code: 'mission_already_active' });
       }
+      // A classified offer is redeemed once, with the unexpired voucher the pilot gathered it with (POST /game/intel/gather).
+      let unlock = null;
+      if (isClassified(offer)) {
+        unlock = await tx.playerMissionUnlock.findUnique({ where: { playerId_missionId: { playerId, missionId: offer.mission_id } } });
+        if (!unlock || unlock.intelId !== offer.intel_lead_id || !Buffer.from(unlock.voucherNonce).equals(Buffer.from(offer.unlock_voucher_nonce, 'base64'))) {
+          return fail(403, 'You hold no intel unlock for this classified mission.', { code: 'intel_unlock_required' });
+        }
+        if (unlock.isAccepted) return fail(409, 'This intel unlock has already been used.', { code: 'intel_unlock_used' });
+        if (unlock.expiresAt.getTime() <= nowMs) return fail(410, 'This intel unlock has expired.', { code: 'intel_unlock_expired' });
+      }
       if (isCovert(offer) && held.some((row) => isCovert(row.offer))) {
         return fail(409, 'At most one covert mission can be held at once. Complete or abandon it first.', {
           code: 'covert_mission_limit_reached', limit: 1
@@ -379,6 +393,7 @@ export default async function missionsRoutes(fastify) {
           acceptedAt
         }
       });
+      if (unlock) await tx.playerMissionUnlock.update({ where: { id: unlock.id }, data: { isAccepted: true } });
       const passengersAboard = attributes.passengers_aboard + offer.required_berths;
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       // The crew as it now stands: a covert contract costs the By-the-Book their morale, and a Loyalist

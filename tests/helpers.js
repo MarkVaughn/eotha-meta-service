@@ -37,6 +37,15 @@ export const INTERNAL_RTSE_CREDENTIAL = 'test-only-rtse-workload-credential-0123
 process.env.INTERNAL_RTSE_CREDENTIAL = INTERNAL_RTSE_CREDENTIAL;
 export const internalRtseHeaders = { 'x-eotha-workload-credential': INTERNAL_RTSE_CREDENTIAL };
 
+// The meta-service's own voucher key (Station Intel): a separate pair again, the public half is what the engine holds.
+const voucherPair = generateKeyPairSync('ed25519');
+const voucherKeyFile = join(keysDir, 'voucher.pem');
+writeFileSync(voucherKeyFile, voucherPair.privateKey.export({ format: 'pem', type: 'pkcs8' }));
+process.env.INTEL_VOUCHER_PRIVATE_KEY_FILE = voucherKeyFile;
+process.env.INTEL_VOUCHER_KEY_ID = 'test-voucher-key';
+export const voucherPublicKey = voucherPair.publicKey;
+export const VOUCHER_KEY_ID = 'test-voucher-key';
+
 export { keysDir };
 // Stands in for the RTSE, which signs the claims and chart keys the meta service verifies.
 export const rtseKey = claimPair.privateKey;
@@ -270,7 +279,9 @@ export function signedOffer(pilot, overrides = {}, signer = rtseKey) {
       u32(visibility), u32(archetype), str(offer.opposed_faction_id ?? ''), i32(offer.opposed_reputation_change ?? 0),
       u64(offer.clandestine_bonus_credits ?? 0), Buffer.from([offer.carries_contraband_or_operative ? 1 : 0]),
       str(offer.required_flying_colors_faction_id ?? '')
-    ] : [])
+    ] : []),
+    // A classified offer signs its lead id and the 16 nonce bytes last.
+    ...(offer.intel_lead_id ? [str(offer.intel_lead_id), Buffer.from(offer.unlock_voucher_nonce, 'base64')] : [])
   ]);
   return { ...offer, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }

@@ -47,6 +47,8 @@ model Player {
   miningViolations MiningViolation[]
   undockRecords UndockRecord[]
   expeditions  ExpeditionRecord[]
+  intelBudgets PlayerIntelBudget[]
+  missionUnlocks PlayerMissionUnlock[]
   authorityProjections AuthorityProjection[]
   // A mining violation notice (POST /game/factions/mining-violation) flags the pilot's transponder for a mandatory
   // customs inspection at `customsFlaggedFactionId`'s stations until `customsFlaggedUntil`, an hour after the notice
@@ -704,4 +706,60 @@ model ExpeditionRecord {
 
   @@index([playerId, createdAt])
   @@index([systemH3, planetId])
+}
+
+// Station Intel (src/routes/game/intel.js). One row per (pilot, clock hour): `hourEpoch` is floor(unix ms / 3_600_000)
+// and the account-wide hourly gathering budget is spent against it, so moving between docks inside the hour neither
+// resets nor multiplies it. `gatheredCount` is the budget points spent (a perk may waive one, so it can lag
+// `unlockedIntelIds`); `unlockedIntelIds` are the intel ids gathered in the hour, which the pool shows unredacted.
+model PlayerIntelBudget {
+  id               String   @id @default(uuid()) @db.Uuid
+  playerId         String   @db.Uuid
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  hourEpoch        BigInt
+  gatheredCount    Int      @default(0)
+  unlockedIntelIds String[] @default([])
+
+  @@unique([playerId, hourEpoch])
+}
+
+// The unlock a gathered mission lead or faction recruitment call leaves: the voucher's nonce and expiry (four hours from
+// the gather) plus what is needed to issue the same voucher again (`intelId`, `category`, `systemH3`, `issuedAt`).
+// POST /game/missions/accept redeems it once for the classified offer that carries the same nonce and intel id,
+// setting `isAccepted`. One row per (pilot, mission): a mission cannot be unlocked twice.
+model PlayerMissionUnlock {
+  id              String   @id @default(uuid()) @db.Uuid
+  playerId        String   @db.Uuid
+  player          Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  missionId       String
+  stationEntityId String   // the dock the lead was gathered at, a lowercase hyphenated UUID
+  intelId         String
+  category        Int      // IntelCategory: 2 mission lead or 3 faction recruitment
+  systemH3        String   @db.VarChar(15)
+  voucherNonce    Bytes    // 16 random bytes
+  issuedAt        DateTime
+  expiresAt       DateTime
+  isAccepted      Boolean  @default(false)
+
+  @@unique([playerId, missionId])
+  @@index([playerId, expiresAt])
+}
+
+// The ring buffer behind the pool's player ship sightings: the last departures logged at each station, written when
+// POST /game/ship/undock first applies a signed undock receipt. Only the newest STATION_SIGHTING_CAP rows per station
+// are kept, and none older than the sighting window; both are pruned as a new row is written. Holds in-game names
+// and coarse ship tiers only, never an account identity.
+model StationSightingRecord {
+  id              String   @id @default(uuid()) @db.Uuid
+  stationEntityId String   // lowercase hyphenated UUID
+  shipName        String
+  captainName     String
+  hullTier        Int
+  weaponTier      Int
+  shieldTier      Int
+  flyingColors    String?
+  isStealthed     Boolean  @default(false)
+  undockedAt      DateTime @default(now())
+
+  @@index([stationEntityId, undockedAt])
 }

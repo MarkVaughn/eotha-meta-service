@@ -35,6 +35,23 @@ export function missionOfferVersion(offer) {
   return 1;
 }
 
+// Fields 37 and 38 of a classified offer (issued for a mission unlock voucher, see src/lib/intel-voucher.js): its
+// `intel_lead_id` and the 16-byte `unlock_voucher_nonce`, which proto-JSON gives as base64. A public offer has neither.
+// An offer with a nonce and no lead was never signed, and a lead without a 16-byte nonce cannot be.
+export function classifiedSuffix(offer) {
+  const lead = offer.intel_lead_id ?? '';
+  const nonce = offer.unlock_voucher_nonce ?? '';
+  if (lead === '') {
+    if (nonce !== '') throw new Error('A voucher nonce requires an intel lead id.');
+    return [];
+  }
+  const bytes = Buffer.from(nonce, 'base64');
+  if (bytes.length !== 16) throw new Error('A classified offer needs a 16-byte voucher nonce.');
+  return [lenPrefixed(lead), bytes];
+}
+
+export const isClassified = (offer) => (offer.intel_lead_id ?? '') !== '';
+
 export const isCovert = (offer) => missionEnum(offer.visibility, MISSION_VISIBILITIES) === 2;
 
 function lenPrefixed(value) {
@@ -123,7 +140,8 @@ export function canonicalMissionOfferPayload(offer) {
     Buffer.from([offer.carries_contraband_or_operative ? 1 : 0]),
     lenPrefixed(offer.required_flying_colors_faction_id ?? '')
   ] : [];
-  return Buffer.concat([...v1, ...gather, ...v2]);
+  // The classified suffix comes last, after the gather and V2 suffixes, and signs the offer's domain unchanged.
+  return Buffer.concat([...v1, ...gather, ...v2, ...classifiedSuffix(offer)]);
 }
 
 // `offer.signature` is the base64-encoded 64-byte Ed25519 signature. Never throws.
