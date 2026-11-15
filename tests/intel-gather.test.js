@@ -41,7 +41,10 @@ describe('POST /game/intel/gather: budget and price', () => {
     assert.equal(body.item.station_entity_id, receipt.dockedEntityId);
     assert.equal(body.item.signature, signed.signature);
     assert.equal(body.item.is_gathered, true);
-    assert.ok(!('voucher' in body));
+    // Every gathered item comes with the voucher the client presents to the engine for its detail, free or not.
+    assert.equal(body.voucher.intel_id, signed.intelId);
+    assert.equal(body.voucher.category, CATEGORY.TIP);
+    assert.equal(voucherVerifies(body.voucher), true);
     assert.equal(await credits(pilot), 1000);
     assert.equal((await budgetRow(pilot)).gatheredCount, 1);
 
@@ -344,16 +347,36 @@ describe('POST /game/intel/gather: vouchers for mission leads', () => {
     assert.deepEqual(again.voucher, voucher);
   });
 
-  test('issues no voucher for a tip or a site, and one for a faction call', async () => {
-    const pilot = await richPilot(2000);
+  test('issues a voucher for every category: tip, lead, faction call, site and sighting', async () => {
+    const pilot = await richPilot(5000);
+    await addCrew(pilot, { crewClass: 'COMMS_OFFICER', rank: 'MASTER' });
     await setStanding(pilot, 'alpha', 600);
     const receipt = dockedReceipt(pilot, { controllingFactionId: 'alpha' });
-    assert.ok(!('voucher' in json(await gather(pilot, receipt, 2, 100))));
-    assert.ok(!('voucher' in json(await gather(pilot, receipt, 7, 250))));
-    const call3 = json(await gather(pilot, receipt, 6, 500));
-    assert.equal(call3.voucher.category, CATEGORY.RECRUIT);
-    assert.equal(voucherVerifies(call3.voucher), true);
-    assert.equal(await app.prisma.playerMissionUnlock.count({ where: { playerId: pilot.id } }), 1);
+    const wanted = [[2, 100, CATEGORY.TIP], [4, 250, CATEGORY.LEAD], [6, 500, CATEGORY.RECRUIT], [7, 250, CATEGORY.SITE], [8, 250, CATEGORY.SIGHTING]];
+    for (const [slot, price, category] of wanted) {
+      const { voucher, item } = json(await gather(pilot, receipt, slot, price));
+      assert.equal(voucher.category, category, `slot ${slot}`);
+      assert.equal(voucher.intel_id, item.intel_id);
+      assert.equal(voucher.mission_id, '', 'no category names a mission');
+      assert.equal(voucherVerifies(voucher), true, `slot ${slot}`);
+    }
+    assert.equal(await app.prisma.playerMissionUnlock.count({ where: { playerId: pilot.id } }), 5);
+    // Gathering again repeats the same voucher for every category.
+    const tip = json(await gather(pilot, receipt, 2, 100));
+    assert.equal(tip.result, 'GATHER_INTEL_ITEM_RESULT_ALREADY_GATHERED');
+    assert.equal(voucherVerifies(tip.voucher), true);
+  });
+
+  test('gives a voucher for free to a pilot who paid for an item before every gather left an unlock', async () => {
+    const pilot = await richPilot(1000);
+    const receipt = dockedReceipt(pilot);
+    const intelId = intelIdOf(receipt.dockedEntityId, 2);
+    await app.prisma.playerIntelBudget.create({ data: { playerId: pilot.id, hourEpoch: BigInt(currentHour()), gatheredCount: 1, unlockedIntelIds: [intelId] } });
+    const res = json(await gather(pilot, receipt, 2, 100));
+    assert.equal(res.result, 'GATHER_INTEL_ITEM_RESULT_ALREADY_GATHERED');
+    assert.equal(res.credits_charged, 0);
+    assert.equal(voucherVerifies(res.voucher), true);
+    assert.equal(await credits(pilot), 1000);
   });
 
   test('holds a live or used unlock against a second gather of the same intel id, and renews an expired one', async () => {
@@ -395,8 +418,9 @@ describe('POST /game/intel/gather: vouchers for mission leads', () => {
       assert.equal(json(res).code, 'intel_voucher_key_not_configured');
       assert.equal(await credits(pilot), 1000);
       assert.equal(await budgetRow(pilot), null);
-      // Items that issue no voucher are unaffected.
-      assert.equal((await gather(pilot, receipt, 2, 100)).statusCode, 200);
+      // A tip comes with a voucher too, so it is refused the same way.
+      assert.equal((await gather(pilot, receipt, 2, 100)).statusCode, 503);
+      assert.equal(await credits(pilot), 1000);
     } finally {
       app.intelVoucherKey = key;
     }

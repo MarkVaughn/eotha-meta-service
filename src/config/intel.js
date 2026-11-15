@@ -41,7 +41,11 @@ export const INTEL_CATEGORIES = Object.freeze({
   INTEL_CATEGORY_PLAYER_SIGHTING: 5
 });
 export const INTEL_CATEGORY_NAMES = Object.freeze(Object.fromEntries(Object.entries(INTEL_CATEGORIES).map(([name, value]) => [value, name])));
-export const VOUCHER_CATEGORIES = Object.freeze([INTEL_CATEGORIES.INTEL_CATEGORY_MISSION_LEAD, INTEL_CATEGORIES.INTEL_CATEGORY_FACTION_RECRUITMENT]);
+// Gathering any item returns a MissionUnlockVoucher bound to the pilot and the intel id (contracts 1.14.0): the engine
+// unredacts the item's detail for it (IntelDetailRequest), the only place a paid item's detail comes from. Only a mission
+// lead or a faction recruitment call also unlocks a classified mission offer, which POST /game/missions/accept redeems once.
+export const VOUCHER_CATEGORIES = Object.freeze(Object.values(INTEL_CATEGORIES));
+export const MISSION_UNLOCK_CATEGORIES = Object.freeze([INTEL_CATEGORIES.INTEL_CATEGORY_MISSION_LEAD, INTEL_CATEGORIES.INTEL_CATEGORY_FACTION_RECRUITMENT]);
 
 // The standing bands of `IntelClearance` and what each terminal shows (report 2.3). `categories` are the kinds of intel
 // the band may read at all; gathering a kind a band cannot read is refused. `maxOutfitterTier` is the highest component

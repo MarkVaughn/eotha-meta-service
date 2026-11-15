@@ -2,7 +2,7 @@ import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { addCrew, app, call, closeApp, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
-import { HOUR_MS, currentHour, gatherBody, intelIdOf, poolUrl, setStanding, voucherVerifies } from './intel-helpers.js';
+import { CATEGORY, HOUR_MS, currentHour, gatherBody, intelIdOf, poolUrl, setStanding, voucherVerifies } from './intel-helpers.js';
 import { stationServices } from '../src/lib/outfitting-station.js';
 
 after(closeApp);
@@ -75,9 +75,10 @@ describe('GET /game/intel/pool: the pilot\'s side of the terminal', () => {
     const body = json(await pool(pilot, dockB));
     assert.equal(body.budget_remaining, 1);
     assert.deepEqual([...body.gathered_intel_ids].sort(), [intelIdOf(dockA.dockedEntityId, 2), intelIdOf(dockA.dockedEntityId, 4)].sort());
-    assert.equal(body.unlocks.length, 1);
-    const [unlock] = body.unlocks;
-    assert.equal(unlock.intel_id, lead.voucher.intel_id);
+    // Every gathered item leaves a voucher, a tip's as well as a lead's.
+    assert.equal(body.unlocks.length, 2);
+    const unlock = body.unlocks.find((candidate) => candidate.intel_id === lead.voucher.intel_id);
+    assert.equal(unlock.category, CATEGORY.LEAD);
     assert.equal(unlock.station_entity_id, dockA.dockedEntityId);
     assert.equal(unlock.is_accepted, false);
     assert.equal(unlock.unlock_expires_at_ms, lead.voucher.expires_at_ms);

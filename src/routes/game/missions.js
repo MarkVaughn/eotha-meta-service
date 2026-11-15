@@ -9,6 +9,7 @@ import {
   underMissionLimit
 } from '../../config/missions.js';
 import { CARGO_MAX_LOTS } from '../../config/cargo.js';
+import { MISSION_UNLOCK_CATEGORIES } from '../../config/intel.js';
 import { missionXp } from '../../config/captain.js';
 import { BRIBE_SAVED_REP_MULTIPLIER, MAX_SEIZURE_FUTURE_SKEW_MS } from '../../config/customs.js';
 import { H3_PATTERN, UUID_PATTERN } from '../../config/patterns.js';
@@ -339,7 +340,7 @@ export default async function missionsRoutes(fastify) {
       if (isClassified(offer)) {
         // Gathering never learns the mission (the engine redacts the lead), so the unlock is the one for the offer's lead.
         unlock = await tx.playerMissionUnlock.findUnique({ where: { playerId_intelId: { playerId, intelId: offer.intel_lead_id } } });
-        if (!unlock || !Buffer.from(unlock.voucherNonce).equals(Buffer.from(offer.unlock_voucher_nonce, 'base64'))) {
+        if (!unlock || !MISSION_UNLOCK_CATEGORIES.includes(unlock.category) || !Buffer.from(unlock.voucherNonce).equals(Buffer.from(offer.unlock_voucher_nonce, 'base64'))) {
           return fail(403, 'You hold no intel unlock for this classified mission.', { code: 'intel_unlock_required' });
         }
         if (unlock.isAccepted) return fail(409, 'This intel unlock has already been used.', { code: 'intel_unlock_used' });

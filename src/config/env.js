@@ -36,7 +36,7 @@ const envSchema = z.object({
   // Identifies the public key RTSE has provisioned to verify signed enforcement projections.
   ENFORCEMENT_ISSUER_KEY_ID: z.string().min(1).default('eotha-meta-service-v1'),
   // This service's own Ed25519 key (PEM file) for MissionUnlockVoucher signatures, and the id the engine knows its public
-  // half by. Never the login or claim key; unset, mission leads cannot be gathered.
+  // half by. Never the login or claim key; unset, no intel can be gathered.
   INTEL_VOUCHER_PRIVATE_KEY_FILE: optionalString(z.string().min(1)),
   INTEL_VOUCHER_KEY_ID: z.string().min(1).default('eotha-meta-service-voucher-v1'),
   // Credits a development-login pilot receives once, on its first dev login (never in production).

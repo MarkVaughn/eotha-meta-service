@@ -108,6 +108,17 @@ describe('POST /game/missions/accept: classified offers', () => {
     assert.equal((await unlockRow(pilot, voucher.intel_id)).isAccepted, false);
   });
 
+  test('refuses the unlock of a tip, which no classified offer can redeem', async () => {
+    const { pilot } = await leadFor();
+    const receipt = dockedReceipt(pilot);
+    const tip = json(await call(pilot, 'POST', '/game/intel/gather', gatherBody(receipt, 2, 100))).voucher;
+    const offer = signedOffer(pilot, { mission_id: randomUUID(), intel_lead_id: tip.intel_id, unlock_voucher_nonce: tip.nonce });
+    const res = await accept(pilot, offer);
+    assert.equal(res.statusCode, 403);
+    assert.equal(json(res).code, 'intel_unlock_required');
+    assert.equal((await unlockRow(pilot, tip.intel_id)).isAccepted, false);
+  });
+
   test('redeems a mission through one unlock only, however many leads the pilot gathered for it', async () => {
     const first = await leadFor();
     assert.equal((await accept(first.pilot, first.offer)).statusCode, 200);

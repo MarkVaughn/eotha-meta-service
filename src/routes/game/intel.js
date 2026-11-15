@@ -1,7 +1,6 @@
 import {
   CLEARANCES,
   DOSSIER_LIFETIME_MS,
-  VOUCHER_CATEGORIES,
   hourEpochOf
 } from '../../config/intel.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
@@ -185,9 +184,9 @@ export default async function intelRoutes(fastify) {
     const { intelId } = item;
     const currentHour = item.hourEpoch;
     const unknown = () => reply.code(404).send({ error: 'No such intel at this station this hour.', code: 'unknown_intel_item' });
-    const voucherKind = VOUCHER_CATEGORIES.includes(item.category);
-    if (voucherKind && !fastify.intelVoucherKey) {
-      return reply.code(503).send({ error: 'This service cannot issue mission vouchers.', code: 'intel_voucher_key_not_configured' });
+    // Every gather returns a voucher, whatever the category, so a service without the key sells nothing.
+    if (!fastify.intelVoucherKey) {
+      return reply.code(503).send({ error: 'This service cannot issue intel vouchers.', code: 'intel_voucher_key_not_configured' });
     }
 
     // The pilot's rules, the budget, the charge and the unlock commit or roll back together.
@@ -202,20 +201,32 @@ export default async function intelRoutes(fastify) {
       const total = budgetTotalFor(crew);
       const budget = await budgetOf(tx, playerId, currentHour);
       const view = () => itemView(item, { clearance, standings });
-      const row = voucherKind ? await tx.playerMissionUnlock.findUnique({ where: { playerId_intelId: { playerId, intelId } } }) : null;
-      const voucherOf = (unlock) => (unlock ? issueVoucher(fastify.intelVoucherKey, { playerId, unlock }) : undefined);
+      const row = await tx.playerMissionUnlock.findUnique({ where: { playerId_intelId: { playerId, intelId } } });
+      const voucherOf = (unlock) => issueVoucher(fastify.intelVoucherKey, { playerId, unlock });
 
-      // Gathered before: the same voucher again, and nothing is charged or spent.
+      const unlockFields = () => ({
+        stationEntityId: receipt.dockedEntityId,
+        category: item.category,
+        systemH3: item.systemH3,
+        voucherNonce: newVoucherNonce(),
+        issuedAt: new Date(nowMs),
+        expiresAt: unlockExpiryOf(nowMs),
+        isAccepted: false
+      });
+
+      // Gathered before: the same voucher again, and nothing is charged or spent. A pilot who paid before every gather left
+      // an unlock (a tip or a site once did not) is given one now, still for nothing.
       if (budget.gatheredIds.has(intelId)) {
+        const held = row ?? await tx.playerMissionUnlock.create({ data: { playerId, intelId, ...unlockFields() } });
         return {
           body: {
             result: 'GATHER_INTEL_ITEM_RESULT_ALREADY_GATHERED',
             item: view(),
-            ...(row && { voucher: voucherOf(row) }),
+            voucher: voucherOf(held),
             credits_charged: 0,
             budget_remaining: Math.max(0, total - budget.spent),
             budget_total: total,
-            unlock_expires_at_ms: row ? row.expiresAt.getTime() : nextRefreshAtMs(currentHour)
+            unlock_expires_at_ms: held.expiresAt.getTime()
           }
         };
       }
@@ -250,27 +261,15 @@ export default async function intelRoutes(fastify) {
       }
       const spent = await spendBudget(tx, playerId, currentHour, intelId, budgetCost);
 
-      let unlock = null;
-      if (voucherKind) {
-        const fields = {
-          stationEntityId: receipt.dockedEntityId,
-          category: item.category,
-          systemH3: item.systemH3,
-          voucherNonce: newVoucherNonce(),
-          issuedAt: new Date(nowMs),
-          expiresAt: unlockExpiryOf(nowMs),
-          isAccepted: false
-        };
-        unlock = row
-          ? await tx.playerMissionUnlock.update({ where: { id: row.id }, data: fields })
-          : await tx.playerMissionUnlock.create({ data: { playerId, intelId, ...fields } });
-      }
+      const unlock = row
+        ? await tx.playerMissionUnlock.update({ where: { id: row.id }, data: unlockFields() })
+        : await tx.playerMissionUnlock.create({ data: { playerId, intelId, ...unlockFields() } });
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
       return {
         body: {
           result: 'GATHER_INTEL_ITEM_RESULT_SUCCESS',
           item: view(),
-          ...(unlock && { voucher: voucherOf(unlock) }),
+          voucher: voucherOf(unlock),
           credits_charged: cost,
           credits: player.credits,
           budget_remaining: Math.max(0, total - spent),
