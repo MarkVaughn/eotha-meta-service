@@ -4,6 +4,7 @@ import env from './config/env.js';
 import prismaPlugin from './plugins/prisma.js';
 import securityPlugin from './plugins/security.js';
 import claimKeyPlugin from './plugins/claim-key.js';
+import intelPlugin from './plugins/intel.js';
 import attestationPlugin from './plugins/attestation.js';
 import identityPlugin from './plugins/identity.js';
 import internalWorkloadPlugin from './plugins/internal-workload.js';
@@ -20,6 +21,7 @@ import captainRetirementRoutes from './routes/game/captain-retirement.js';
 import factionsRoutes from './routes/game/factions.js';
 import undockRoutes from './routes/game/undock.js';
 import expeditionRoutes from './routes/game/expeditions.js';
+import intelRoutes from './routes/game/intel.js';
 import shipRoutes from './routes/ship/index.js';
 import rtseInternalRoutes from './routes/internal/rtse.js';
 
@@ -42,6 +44,7 @@ await fastify.register(prismaPlugin);
 await fastify.register(securityPlugin);
 await fastify.register(claimKeyPlugin);
 await fastify.register(internalWorkloadPlugin);
+await fastify.register(intelPlugin);
 await fastify.register(attestationPlugin);
 await fastify.register(identityPlugin);
 
@@ -59,6 +62,7 @@ await fastify.register(crewRoutes, { prefix: '/game' });
 await fastify.register(factionsRoutes, { prefix: '/game' });
 await fastify.register(undockRoutes, { prefix: '/game' });
 await fastify.register(expeditionRoutes, { prefix: '/game' });
+await fastify.register(intelRoutes, { prefix: '/game' });
 await fastify.register(shipRoutes, { prefix: '/ship' });
 await fastify.register(rtseInternalRoutes, { prefix: '/internal/v1/rtse' });
 

@@ -1,4 +1,5 @@
 import { recordFlakyDeparture } from '../../lib/crew-docking.js';
+import { logDeparture } from '../../lib/sightings.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 import { isUndockReceiptFresh, undockReceiptNonceKey, undockReceiptSchema, verifyUndockReceipt } from '../../lib/undock-receipt.js';
 
@@ -57,6 +58,8 @@ export default async function undockRoutes(fastify) {
           departedCrewIds: flaky.departed
         }
       });
+      // The dock's sighting log, a ring buffer other pilots' Station Intel reads; a replay above never reaches it.
+      await logDeparture(tx, { ship: flaky.ship, stationId: receipt.stationEntityId, undockedAtMs: receipt.undockedAtMs, nowMs });
       return { ship: flaky.ship, departed: flaky.departed, undockedAtMs: receipt.undockedAtMs, replayed: false };
     });
 

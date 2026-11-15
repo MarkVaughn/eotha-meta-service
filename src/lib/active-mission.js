@@ -43,6 +43,8 @@ export async function activeMissionClaim(db, playerId) {
     type: MISSION_TYPES[offer.type],
     visibility: missionEnum(offer.visibility, MISSION_VISIBILITIES),
     archetype: missionEnum(offer.archetype, MISSION_ARCHETYPES),
-    signature: [...Buffer.from(offer.signature, 'base64')]
+    signature: [...Buffer.from(offer.signature, 'base64')],
+    // Bytes like the signature, on a classified offer only.
+    ...(offer.unlock_voucher_nonce && { unlock_voucher_nonce: [...Buffer.from(offer.unlock_voucher_nonce, 'base64')] })
   }, row.acceptedAt);
 }

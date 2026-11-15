@@ -45,6 +45,7 @@ eotha-meta-service/
 │   │   ├── env.js              # Environment validation via Zod
 │   │   ├── expedition.js       # Away-team expedition claim bounds: outcome tiers, away-team size, morale, lot and reputation limits
 │   │   ├── factions.js         # Faction ids, standing caps (clampStandingsWithCaps), Flying Colors rules
+│   │   ├── intel.js            # Station Intel: hour epoch, budget, price list, clearance bands, redaction field whitelists, sighting ring constants
 │   │   ├── missions.js         # Mission player rules (per-type limits, cooldown, abandon terms, late cutoff, payout cap, offer clock skew)
 │   │   └── patterns.js         # Shapes of engine identifiers (H3 cells, station ids, UUIDs)
 │   ├── lib/
@@ -60,16 +61,22 @@ eotha-meta-service/
 │   │   ├── expedition.js       # Verifies the engine's signed away-team expedition claims (EOTHA_AWAY_TEAM_CLAIM_V1) and bounds-checks their fields
 │   │   ├── hostage.js          # Hostage state of an abandoned passage: accrued penalty, drop-off place, base penalty
 │   │   ├── identity.js         # Guest -> linked player conversion
+│   │   ├── intel.js            # Station Intel clearance, hourly budget and redacted item view
+│   │   ├── intel-engine.js     # Thin, swappable client for the engine's per-dock pool (provisional wire)
+│   │   ├── intel-offer.js      # Verifies and validates the engine's signed intel pool (EOTHA_INTEL_OFFER_V1)
+│   │   ├── intel-voucher.js    # Signs mission unlock vouchers (EOTHA_MISSION_VOUCHER_V1) with the service's voucher key
 │   │   ├── mission-claim.js    # Verifies the engine's signed mission completion claims
 │   │   ├── mission-offer.js    # Verifies the engine's signed mission offers
 │   │   ├── undock-receipt.js   # Verifies the engine's signed undock receipts (EOTHA_UNDOCK_RECEIPT_V1) and their freshness
 │   │   ├── refresh-tokens.js   # Refresh rotation with reuse detection
 │   │   ├── reputation.js       # Standings under the caps, the reputation ledger, the factions claim
+│   │   ├── sightings.js        # Per-station departure ring buffer and the engine's hour-start snapshot of it
 │   │   └── ship.js             # Active ship under the player lock, loadout, token reissue
 │   ├── plugins/
 │   │   ├── attestation.js      # requireAttestation preHandler
 │   │   ├── claim-key.js        # Decorates the claim verification key, requireClaimKey preHandler
 │   │   ├── identity.js         # Wires Better Auth and refresh tokens into Fastify
+│   │   ├── intel.js            # Decorates the intel engine seam and the voucher signing key
 │   │   ├── prisma.js           # Prisma client lifecycle plugin
 │   │   └── security.js         # JWT plugin (Ed25519 / EdDSA), JWKS, key derivation
 │   ├── routes/
@@ -84,6 +91,7 @@ eotha-meta-service/
 │   │       ├── crew.js         # Crew roster, hiring board, hire, dismiss, standby and activate
 │   │       ├── factions.js     # Docked Flying Colors toggle and Paragon renouncement
 │   │       ├── index.js        # Game session allocation routes
+│   │       ├── intel.js        # Station Intel pool and gather routes
 │   │       └── schema.js       # Session route schemas
 │   └── app.js                  # Fastify server entry point
 ├── tests/
@@ -135,6 +143,11 @@ HOST="0.0.0.0"
 # INTERNAL_RTSE_MTLS_FINGERPRINTS=
 # Key id RTSE's enforcement-projection key ring associates with keys/public.pem
 # ENFORCEMENT_ISSUER_KEY_ID=eotha-meta-service-v1
+# Station Intel (see "Station Intel"): the engine's pool endpoint and the key that signs mission unlock vouchers
+# INTEL_ENGINE_URL=
+# INTEL_ENGINE_CREDENTIAL=
+# INTEL_VOUCHER_PRIVATE_KEY_FILE=  # PEM Ed25519 private key; not the login key and not the claim key
+# INTEL_VOUCHER_KEY_ID=eotha-meta-service-voucher-v1
 ```
 
 ### 4. Generate Asymmetric Cryptographic Keys
@@ -267,7 +280,7 @@ All Protected. See [Mission offers](#mission-offers).
 - `GET /game/missions/cooldown?originId=<dock uuid>`
   - `{ active, remaining_ms, available_at_ms }`: whether the pilot's per-origin cooldown after a completion or abandon at that dock is still running. The board itself comes from the engine (`ClientFrame.mission_board_request`); this service builds none.
 - `POST /game/missions/accept`
-  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers (plus `crew_morale` when a covert contract cost the [By-the-Book](#morale-seniority-and-crew-capabilities-phase-3) crew morale). Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_already_active` (this mission is already held), `409 covert_mission_limit_reached` (one covert mission is already held, `limit: 1`), `409 mission_limit_reached` (with `type` and `limit`), `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed`, `409 mission_abandoned` (the pilot abandoned this mission before) and `400 insufficient_berths` (with `available_berths`). `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
+  - Body `{ offer, dockedReceipt }`: an engine-signed `MissionOffer` and a docked receipt at its origin. Returns `{ active, token }`, the `ActiveMission` and a re-signed token whose `passengers_aboard` includes the boarded passengers (plus `crew_morale` when a covert contract cost the [By-the-Book](#morale-seniority-and-crew-capabilities-phase-3) crew morale). Refusals, in the order they are checked: `403 mission_offer_invalid` (bad signature, or issued to another pilot), `410 mission_offer_expired`, `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` (as for upgrades), `403 not_docked_at_origin`, then `409 mission_already_active` (this mission is already held), `409 covert_mission_limit_reached` (one covert mission is already held, `limit: 1`), `409 mission_limit_reached` (with `type` and `limit`), `409 origin_on_cooldown` (with `remaining_ms`), `409 mission_already_completed`, `409 mission_abandoned` (the pilot abandoned this mission before) and `400 insufficient_berths` (with `available_berths`). A classified offer (one carrying `intel_lead_id` and `unlock_voucher_nonce`) also needs the pilot's unspent, unexpired [Station Intel](#station-intel) unlock for that mission and nonce: `403 intel_unlock_required`, `409 intel_unlock_used`, `410 intel_unlock_expired`, checked after `mission_already_active`. `503 CLAIM_KEY_NOT_CONFIGURED` when no claim public key is configured. See [Mission offers](#mission-offers).
 - `GET /game/missions/active`
   - `{ missions, limits, active, standings }`: every `ActiveMission` the pilot holds, oldest first; the most of each type a pilot may hold (`MISSION_LIMITS`, see [Missions held per type](#missions-held-per-type)); `active`, the oldest mission or `null`, kept for clients that hold one mission; and `standings`, the pilot's reputation by faction (see [Late completion, abandon and reputation](#late-completion-abandon-and-reputation)). `hostages` (present only while there are any) lists the passengers of abandoned passages still aboard, each the contract's `HostageState` (`mission_id`, `hostage_started_at_ms`, `accrued_penalty` as of `as_of_ms`, `required_berths`). A mission stored before offers were engine-signed (legacy id, no exact destination, or no signature) can never be claimed, so it is deleted on first read and listed in `cancelled_missions: [{ mission_id, reason: "format_changed", message }]` (the first also as `cancelled_mission`); nothing was charged.
 - `POST /game/missions/abandon`
@@ -281,6 +294,13 @@ All Protected. See [Mission offers](#mission-offers).
   - Body `{ claim }`: the engine-signed `CustomsSeizureClaim`; see [Customs](#customs). Returns the capture's consequences and a re-signed `token`; a replay answers the first result with `replayed: true`.
 - `GET /game/missions/lockouts`
   - `{ lockouts: [{ station_id, tier, until_ms, remaining_ms }] }`: the customs lockouts still running. `GET /game/missions/cooldown` also reports `locked_out: true` for a locked-out origin.
+
+### Station Intel
+All Protected. See [Station Intel](#station-intel).
+- `GET /game/intel/pool?receipt=<url-encoded docked receipt JSON>&stationId=<optional>`
+  - The dock's pool for the current hour, redacted: `{ station_entity_id, hour_epoch, clearance, clearance_banner, budget_remaining, budget_total, items, next_refresh_at_ms }`. Each item carries its identity and terms (`intel_id`, `category`, `slot_index`, `is_free_ambient`, `cost_credits`, `budget_cost`, `required_standing`, `is_locked`, `is_gathered`, `expires_at_ms`, `signature`), its coarse `headline`/`body`, and `veracity` only for a Master Comms Officer; the detail (`outfitter_tip`, `mission_lead`, `faction_recruitment`, `away_team_site`, `player_sighting`) appears only once gathered, with `is_redacted: false`. `403 docked_receipt_required` / `docked_receipt_invalid` / `docked_receipt_expired` / `docked_receipt_station_mismatch` / `station_locked_out`, `403 intel_access_refused` (Nemesis, or Syndicate Tap standing at a dock that is not low-sec), `502 intel_pool_invalid`, `503 intel_engine_unavailable`.
+- `POST /game/intel/gather`
+  - Body `{ intelId, hourEpoch, expectedCostCredits, dockedReceipt, stationId? }`. Spends one budget point and the item's price and returns `{ result, item, voucher?, credits_charged, credits, budget_remaining, budget_total, unlock_expires_at_ms? }`, `result` `GATHER_INTEL_ITEM_RESULT_SUCCESS` or `..._ALREADY_GATHERED` (nothing charged; a lead's voucher is returned again). Mission leads and faction calls return a signed `voucher`. Refusals change nothing: `409 intel_pool_expired` (a past hour), `404 unknown_intel_item` (also for an item the terminal does not show this pilot), `403 clearance_too_low` (with `required_standing`), `409 price_changed` (with `cost_credits`), `409 budget_exhausted`, `409 mission_already_unlocked`, `402 insufficient_credits`, `503 intel_voucher_key_not_configured`, plus the receipt refusals above.
 
 ### Captain
 All Protected. See [Captain progression](#captain-progression).
@@ -660,6 +680,19 @@ The planetary away-team work so far: the schema, the claim verifier, the settle 
 - **Record.** One `ExpeditionRecord` row keeps the claim's gross, the crew share, the net, the XP the captain was awarded and the signed deltas.
 
 Returns `{ expedition_id, outcome_tier, gross_credits, crew_share_credits, net_credits, captain_xp, settled_at, credits, crew_payouts, xp_awarded, captain_level, crew, reputation, recovered_lots, lots, replayed, token }`, the token carrying the crew and standings as they now stand.
+
+## Station Intel
+
+The meta-service half of the unified Station Intel and Mission Pool (eotha-contracts 1.12.0 `common/v1/intel.proto`). The engine builds and signs each dock's pool, 8 to 12 items per dock per hour; this service decides who may see what, charges for it and remembers what was gathered.
+
+- **The pool.** `hour_epoch` is `floor(ms / 3 600 000)`. The pool is fetched through the `fastify.intelEngine` seam and validated before anything is shown: 8 to 12 items, distinct ids and slots, exactly two free ambient items (free if and only if the list price is 0), prices from the list 0/100/250/500, every item for this dock and hour and expiring when the hour ends, each carrying the engine's Ed25519 signature (`EOTHA_INTEL_OFFER_V1`) under `CLAIM_PUBLIC_KEY`. A pool that fails any of this is never shown (`502`).
+- **The engine seam.** `src/lib/intel-engine.js` is a thin client (`POST {INTEL_ENGINE_URL}/v1/intel/pool` with `station_entity_id`, `system_h3`, `controlling_faction_id`, `hour_epoch` and the sightings snapshot, answered with `{ items }`); tests replace it with `app.intelEngine.use(...)`. That wire is provisional until the engine's pool endpoint lands, and the only place to change when it does.
+- **Redaction.** Until an item is gathered the response holds only its signed identity and terms plus a coarse headline and body; the detail, with every target in it, is never sent. Fields the contract does not list are dropped from a detail.
+- **Clearance.** The pilot's standing with the dock's controlling faction picks a band: Syndicate Tap (low-sec docks only, tips and leads), Probationary (tips up to tier 3, +25% on prices), Civilian (tips up to tier 3, leads, sites, sightings), Registered Operative, Security Level 3 and Admiralty (all categories); Nemesis standing is refused. Flying Colors of that faction at standing 500 or more reads as Admiralty. An item the band cannot read is `404` to gather; one the band reads but whose own `required_standing` is unmet is shown `is_locked` and answers `403 clearance_too_low`.
+- **Budget.** 3 gathers per pilot per hour, account-wide (not per dock), plus 1 for an Adept and 2 for a Master Comms Officer, at most 6. Free ambient items cost a point too, never credits; the 2 free items per dock make the rumor tier free. An already gathered item can be read again for nothing, within its hour.
+- **Vouchers.** Gathering a mission lead or faction call records a `PlayerMissionUnlock` (4 hours; an expired unspent one is renewed with a new nonce) and returns a voucher signed with the service's own voucher key (`EOTHA_MISSION_VOUCHER_V1`, `INTEL_VOUCHER_PRIVATE_KEY_FILE`), never the login or claim key. The engine then signs a classified `MissionOffer` whose `intel_lead_id` and 16-byte `unlock_voucher_nonce` are the last signed fields, and `POST /game/missions/accept` spends the unlock.
+- **Sightings.** `POST /game/ship/undock` logs each departure in a per-station ring buffer (`StationSightingRecord`, newest 10, at most 4 hours old): ship name, captain name, hull/weapon/shield tier and Flying Colors; never an account id. A ship with stealth rating 0.4 or more is logged masked and one with 0.8 (a tier 5 cloak) not at all. The engine is given the departures that were 15 minutes to 4 hours old when the hour began, so a pool is stable for its whole hour.
+- **Deviations to know about.** The proof of docking is the usual 5-minute docked receipt, not the 30 seconds the proto comment suggests, and it travels as JSON in the `receipt` query parameter of the GET. `is_locked` is an additive field. `PlayerMissionUnlock` also keeps the intel id, category, system, nonce and expiry the voucher needs. A voucher's expiry is not cut at the weekly sector reset. Captain traits and crew quirks that change intel (design §5) are not wired yet.
 
 ## Customs
 
