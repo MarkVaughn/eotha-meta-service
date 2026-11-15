@@ -726,12 +726,14 @@ model PlayerIntelBudget {
 // The unlock a gathered mission lead or faction recruitment call leaves: the voucher's nonce and expiry (four hours from
 // the gather) plus what is needed to issue the same voucher again (`intelId`, `category`, `systemH3`, `issuedAt`).
 // POST /game/missions/accept redeems it once for the classified offer that carries the same nonce and intel id,
-// setting `isAccepted`. One row per (pilot, mission): a mission cannot be unlocked twice.
+// setting `isAccepted` and `missionId`, the mission of the offer: gathering never learns it (the engine redacts the
+// lead and a relayed detail is not trusted), so it is null until then. One row per (pilot, intel item), and per
+// (pilot, mission) once accepted: a mission cannot be redeemed twice.
 model PlayerMissionUnlock {
   id              String   @id @default(uuid()) @db.Uuid
   playerId        String   @db.Uuid
   player          Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
-  missionId       String
+  missionId       String?
   stationEntityId String   // the dock the lead was gathered at, a lowercase hyphenated UUID
   intelId         String
   category        Int      // IntelCategory: 2 mission lead or 3 faction recruitment
@@ -742,6 +744,7 @@ model PlayerMissionUnlock {
   isAccepted      Boolean  @default(false)
 
   @@unique([playerId, missionId])
+  @@unique([playerId, intelId])
   @@index([playerId, expiresAt])
 }
 

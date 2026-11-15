@@ -4,18 +4,13 @@ import {
   CLEARANCES,
   CLEARANCE_BANDS,
   COMMS_OFFICER_BUDGET_BONUS,
-  DETAIL_KEYS,
   FLYING_COLORS_CLEARANCE_STANDING,
-  INTEL_CATEGORIES,
   INTEL_CATEGORY_NAMES,
   INTEL_HOUR_MS,
-  INTEL_VERACITY_NAMES,
   MAX_INTEL_BUDGET,
   PROBATIONARY,
   PROBATIONARY_SURCHARGE_PCT,
-  REDACTED_HEADLINES,
-  SYNDICATE_TAP,
-  VERACITY_REVEAL_RANK
+  SYNDICATE_TAP
 } from '../config/intel.js';
 
 // A crew member who is actually at work: not mutinous and not held.
@@ -46,10 +41,6 @@ export function budgetTotalFor(crew) {
   return Math.min(MAX_INTEL_BUDGET, BASE_INTEL_BUDGET + bonus);
 }
 
-// Whether the pilot's crew flags stale and planted rumors for them: a working Master Comms Officer.
-export const revealsVeracity = (crew) =>
-  crew.some((member) => working(member) && member.crewClass === 'COMMS_OFFICER' && member.rank === VERACITY_REVEAL_RANK);
-
 // The points gathering `item` spends; every item costs one.
 export const budgetCostOf = () => 1;
 
@@ -64,30 +55,21 @@ export function costOf(item, clearance) {
     : item.baseCostCredits;
 }
 
-// Whether the pilot's clearance shows `item` at all: its category is one the band reads and, for an outfitter tip, its tier
-// is one the band is shown.
-export function visibleAt(item, clearance) {
-  const band = CLEARANCES[clearance];
-  if (!band.categories.includes(item.category)) return false;
-  if (item.category === INTEL_CATEGORIES.INTEL_CATEGORY_OUTFITTER_TIP) return (item.detail.tier ?? 0) <= band.maxOutfitterTier;
-  return true;
-}
+// Whether the pilot's clearance reads `item`'s category at all. The tier an outfitter tip is shown at (see
+// CLEARANCES[...].maxOutfitterTier) is not checked: it is in the engine's unsigned detail, which a relayed item cannot vouch for.
+export const visibleAt = (item, clearance) => CLEARANCES[clearance].categories.includes(item.category);
 
 // Whether the pilot's `standings` meet the item's own requirement; an item with no gating faction is open to any.
 export const meetsRequirement = (item, standings) =>
   !item.requiredStandingFactionId || (standings[item.requiredStandingFactionId] ?? 0) >= item.requiredStanding;
 
 /**
- * `item` as one pilot's response carries it (the proto-JSON of `IntelItem`, snake_case, the station as its UUID and the
- * signature as base64). The engine's signed fields never change; what follows them is this service's, and it is the
- * redaction: a paid item the pilot has not gathered gets its category's generic headline and no body or detail, a free one
- * keeps the engine's coarse rumor, and the detail, with the exact targets and cells in it, is sent only once the item is
- * gathered. `veracity` is sent only on a card that is not redacted, and only when the crew reveals it.
+ * `item` (a relayed item the engine signed, see validateRelayedItem) as a gather response carries it, snake_case, the
+ * station as its UUID and the signature as base64: the engine's signed fields as they came, and the pilot's terms for
+ * it. There is deliberately no headline, body, veracity or detail: this service holds none it can trust, the engine
+ * unredacts a gathered item itself when the client presents the voucher over the game connection.
  */
-export function itemView(item, { gathered, clearance, standings, crew }) {
-  const redacted = !gathered && !item.isFreeAmbient;
-  const open = gathered || item.isFreeAmbient;
-  const detailWire = DETAIL_KEYS[item.category].wire;
+export function itemView(item, { clearance, standings }) {
   return {
     intel_id: item.intelId,
     category: INTEL_CATEGORY_NAMES[item.category],
@@ -102,15 +84,10 @@ export function itemView(item, { gathered, clearance, standings, crew }) {
     issued_at_ms: item.issuedAtMs,
     expires_at_ms: item.expiresAtMs,
     signature: item.signature,
-    is_redacted: redacted,
-    headline: redacted ? REDACTED_HEADLINES[item.category] : item.headline,
-    body: redacted ? '' : item.body,
-    veracity: INTEL_VERACITY_NAMES[open && revealsVeracity(crew) ? item.veracity : 0] ?? INTEL_VERACITY_NAMES[0],
     cost_credits: costOf(item, clearance),
     budget_cost: budgetCostOf(item),
-    is_gathered: gathered,
-    is_locked: !meetsRequirement(item, standings),
-    ...(gathered && { [detailWire]: item.detail })
+    is_gathered: true,
+    is_locked: !meetsRequirement(item, standings)
   };
 }
 

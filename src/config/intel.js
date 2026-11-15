@@ -11,13 +11,10 @@ export const MAX_INTEL_BUDGET = 6;
 // A Comms Officer adds a point at Adept and two at Master (report 5.2). The captain traits and crew quirks of report 5
 // are not wired yet: their catalog text (src/config/captain.js, src/config/crew.js) describes other effects.
 export const COMMS_OFFICER_BUDGET_BONUS = Object.freeze({ NOVICE: 0, ADEPT: 1, MASTER: 2 });
-// A Master Comms Officer flags stale and planted rumors; everyone else sees UNSPECIFIED, "not revealed".
-export const VERACITY_REVEAL_RANK = 'MASTER';
 
-// A pool is 8 to 12 items, exactly 2 of them free ambient items (OQ-5), at one of these list prices.
-export const POOL_MIN_ITEMS = 8;
+// A pool is 8 to 12 items (so a slot is 0 to 11), exactly 2 of them free ambient items (OQ-5), at one of these list prices.
+// This service sees one relayed item at a time, never the pool, so it checks the slot and the price, not the counts.
 export const POOL_MAX_ITEMS = 12;
-export const FREE_AMBIENT_COUNT = 2;
 export const BASE_COSTS_CREDITS = Object.freeze([0, 100, 250, 500]);
 
 // A gathered item, and the voucher it may carry, lasts 4 hours (OQ-4).
@@ -44,20 +41,16 @@ export const INTEL_CATEGORIES = Object.freeze({
   INTEL_CATEGORY_PLAYER_SIGHTING: 5
 });
 export const INTEL_CATEGORY_NAMES = Object.freeze(Object.fromEntries(Object.entries(INTEL_CATEGORIES).map(([name, value]) => [value, name])));
-export const VOUCHER_CATEGORIES = Object.freeze([INTEL_CATEGORIES.INTEL_CATEGORY_MISSION_LEAD, INTEL_CATEGORIES.INTEL_CATEGORY_FACTION_RECRUITMENT]);
-
-// `IntelVeracity` numbers.
-export const INTEL_VERACITY_NAMES = Object.freeze({
-  0: 'INTEL_VERACITY_UNSPECIFIED',
-  1: 'INTEL_VERACITY_VERIFIED_TRUE',
-  2: 'INTEL_VERACITY_STALE_OUTDATE',
-  3: 'INTEL_VERACITY_EXAGGERATED',
-  4: 'INTEL_VERACITY_DECEPTIVE_FALSE'
-});
+// Gathering any item returns a MissionUnlockVoucher bound to the pilot and the intel id (contracts 1.14.0): the engine
+// unredacts the item's detail for it (IntelDetailRequest), the only place a paid item's detail comes from. Only a mission
+// lead or a faction recruitment call also unlocks a classified mission offer, which POST /game/missions/accept redeems once.
+export const VOUCHER_CATEGORIES = Object.freeze(Object.values(INTEL_CATEGORIES));
+export const MISSION_UNLOCK_CATEGORIES = Object.freeze([INTEL_CATEGORIES.INTEL_CATEGORY_MISSION_LEAD, INTEL_CATEGORIES.INTEL_CATEGORY_FACTION_RECRUITMENT]);
 
 // The standing bands of `IntelClearance` and what each terminal shows (report 2.3). `categories` are the kinds of intel
-// the band may see at all; a kind a band cannot see is left out of its pool, redacted or not. `maxOutfitterTier` is the
-// highest component tier of an outfitter tip it is shown.
+// the band may read at all; gathering a kind a band cannot read is refused. `maxOutfitterTier` is the highest component
+// tier of an outfitter tip it is shown. It is not enforced yet: a tip's tier is in the engine's unsigned detail, which this
+// service never receives from a trustworthy source (the engine redacts paid items and a relayed detail is never trusted).
 const ALL = Object.values(INTEL_CATEGORIES);
 const { INTEL_CATEGORY_OUTFITTER_TIP: TIP, INTEL_CATEGORY_MISSION_LEAD: LEAD, INTEL_CATEGORY_AWAY_TEAM_SITE: SITE, INTEL_CATEGORY_PLAYER_SIGHTING: SIGHTING } = INTEL_CATEGORIES;
 export const CLEARANCES = Object.freeze({
@@ -77,42 +70,3 @@ export const FLYING_COLORS_CLEARANCE_STANDING = 500;
 export const SYNDICATE_TAP = 'INTEL_CLEARANCE_SYNDICATE_TAP';
 export const ACCESS_REFUSED = 'INTEL_CLEARANCE_ACCESS_REFUSED';
 export const PROBATIONARY = 'INTEL_CLEARANCE_PROBATIONARY';
-
-// What a redacted card says: the category's generic headline, never the item's own.
-export const REDACTED_HEADLINES = Object.freeze({
-  [INTEL_CATEGORIES.INTEL_CATEGORY_OUTFITTER_TIP]: '[ENCRYPTED OUTFITTER DOSSIER]',
-  [INTEL_CATEGORIES.INTEL_CATEGORY_MISSION_LEAD]: '[ENCRYPTED MISSION DOSSIER]',
-  [INTEL_CATEGORIES.INTEL_CATEGORY_FACTION_RECRUITMENT]: '[ENCRYPTED RECRUITMENT DOSSIER]',
-  [INTEL_CATEGORIES.INTEL_CATEGORY_AWAY_TEAM_SITE]: '[CLASSIFIED AWAY-TEAM SITE TELEMETRY]',
-  [INTEL_CATEGORIES.INTEL_CATEGORY_PLAYER_SIGHTING]: '[RESTRICTED NAVAL TELEMETRY]'
-});
-
-// The fields of each category's `detail` message (contracts `common/v1/intel.proto`), in snake_case. The engine's detail
-// is cut to these, so nothing it adds can reach a client.
-export const DETAIL_KEYS = Object.freeze({
-  [INTEL_CATEGORIES.INTEL_CATEGORY_OUTFITTER_TIP]: Object.freeze({
-    wire: 'outfitter_tip',
-    fields: Object.freeze(['target_station_id', 'target_station_name', 'target_system_h3', 'distance_hexes', 'component_type', 'tier',
-      'quality_grade', 'price_condition_pct', 'required_standing_faction_id', 'required_standing_score'])
-  }),
-  [INTEL_CATEGORIES.INTEL_CATEGORY_MISSION_LEAD]: Object.freeze({
-    wire: 'mission_lead',
-    fields: Object.freeze(['mission_id', 'base_mission_type', 'archetype', 'title', 'narrative', 'destination_system_h3', 'distance_hexes',
-      'reward_credits', 'reputation_change', 'sponsoring_faction_id', 'prerequisite_traits', 'required_crew_classes', 'required_hull_tier'])
-  }),
-  [INTEL_CATEGORIES.INTEL_CATEGORY_FACTION_RECRUITMENT]: Object.freeze({
-    wire: 'faction_recruitment',
-    fields: Object.freeze(['mission_id', 'faction_id', 'call_sign', 'minimum_standing', 'mission_headline', 'operational_theater_h3',
-      'operational_role', 'mobilization_bonus_credits', 'bonus_reputation'])
-  }),
-  [INTEL_CATEGORIES.INTEL_CATEGORY_AWAY_TEAM_SITE]: Object.freeze({
-    wire: 'away_team_site',
-    fields: Object.freeze(['site_id', 'planet_id', 'planet_name', 'system_h3', 'site_node_h3', 'biome', 'hazard_rating',
-      'encounter_archetype', 'recommended_lead_class', 'expected_loot'])
-  }),
-  [INTEL_CATEGORIES.INTEL_CATEGORY_PLAYER_SIGHTING]: Object.freeze({
-    wire: 'player_sighting',
-    fields: Object.freeze(['sighting_id', 'ship_name', 'captain_name', 'hull_class', 'weapon_bracket', 'shield_bracket',
-      'transponder_faction_id', 'customs_flagged', 'minutes_since_departure', 'is_masked', 'conduct_note'])
-  })
-});

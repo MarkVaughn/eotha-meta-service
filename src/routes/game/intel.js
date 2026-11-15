@@ -1,7 +1,6 @@
 import {
   CLEARANCES,
   DOSSIER_LIFETIME_MS,
-  VOUCHER_CATEGORIES,
   hourEpochOf
 } from '../../config/intel.js';
 import { DOCKED_ENTITY_ID_PATTERN, dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
@@ -10,8 +9,7 @@ import { activeCrewOf } from '../../lib/crew.js';
 import { stationServices } from '../../lib/outfitting-station.js';
 import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip } from '../../lib/ship.js';
-import { IntelEngineUnavailable } from '../../lib/intel-engine.js';
-import { IntelPoolError, validatePool } from '../../lib/intel-offer.js';
+import { IntelItemError, validateRelayedItem } from '../../lib/intel-offer.js';
 import { issueVoucher, newVoucherNonce, unlockExpiryOf } from '../../lib/intel-voucher.js';
 import { sightingsForPool } from '../../lib/sightings.js';
 import {
@@ -30,7 +28,7 @@ import {
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 
-// The pool is a GET, so the docked receipt travels in the query as the JSON of the same object every other route takes
+// The pilot's side of the terminal is a GET, so the docked receipt travels in the query as the JSON of the same object every other route takes
 // in its body (`receipt`). It is optional in the schema so that its absence is answered with the coded 403, as elsewhere.
 const poolSchema = {
   querystring: {
@@ -47,10 +45,11 @@ const gatherSchema = {
   body: {
     type: 'object',
     additionalProperties: false,
-    required: ['intelId', 'hourEpoch', 'expectedCostCredits'],
+    required: ['item', 'expectedCostCredits'],
     properties: {
-      intelId: { type: 'string', minLength: 1, maxLength: 256 },
-      hourEpoch: uint,
+      // The IntelItem the engine sent over the game connection (ServerFrame.intel_pool_response), as proto-JSON. Only its
+      // signed fields are read; whatever else it carries is ignored, never stored and never trusted.
+      item: { type: 'object' },
       expectedCostCredits: uint,
       stationId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
       dockedReceipt: dockedReceiptSchema
@@ -96,32 +95,6 @@ export default async function intelRoutes(fastify) {
     return receipt.dockedEntityId;
   }
 
-  // The pool of `receipt`'s dock for `hourEpoch`, validated, or null once the reply has been sent with why not.
-  async function poolOf(request, reply, receipt, hourEpoch) {
-    const stationEntityId = receipt.dockedEntityId;
-    try {
-      const raw = await fastify.intelEngine.getPool({
-        stationEntityId,
-        systemH3: receipt.systemH3,
-        controllingFactionId: receipt.controllingFactionId,
-        hourEpoch,
-        sightings: await sightingsForPool(prisma, stationEntityId, hourEpoch)
-      });
-      return validatePool(raw, { stationEntityId, systemH3: receipt.systemH3, hourEpoch }, fastify.claimKey.key);
-    } catch (err) {
-      if (err instanceof IntelEngineUnavailable) {
-        request.log.warn({ err }, 'Intel engine unavailable.');
-        reply.code(503).send({ error: 'The station intel network is unavailable. Try again shortly.', code: 'intel_engine_unavailable' });
-      } else if (err instanceof IntelPoolError) {
-        request.log.error({ err }, 'The engine sent an invalid intel pool.');
-        reply.code(502).send({ error: 'The station intel network sent an invalid pool.', code: 'intel_pool_invalid' });
-      } else {
-        throw err;
-      }
-      return null;
-    }
-  }
-
   // What decides the terminal for `receipt`'s pilot: their standing with the governing faction, whether they fly its
   // colors, whether the dock is low-security, and the band these give. `db` is the client or an open transaction.
   async function clearanceOf(db, playerId, receipt) {
@@ -147,6 +120,9 @@ export default async function intelRoutes(fastify) {
     }
   }
 
+  // What the terminal says about the pilot, never about the pool: the engine builds and signs the pool and the client
+  // fetches it over the game connection (ClientFrame.intel_pool_request). This is the meta-service's half, the pilot's
+  // clearance and budget, the dock's sighting log the engine builds the sightings from, and what the pilot already holds.
   fastify.get('/intel/pool', { schema: poolSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
     const nowMs = Date.now();
@@ -156,15 +132,14 @@ export default async function intelRoutes(fastify) {
     if (!(await dockedAt(request, reply, receipt, request.query.stationId, nowMs))) return reply;
     const hourEpoch = hourEpochOf(nowMs);
 
-    const { clearance, standings } = await clearanceOf(prisma, playerId, receipt);
+    const { clearance } = await clearanceOf(prisma, playerId, receipt);
     if (isAccessRefused(clearance)) return reply.code(403).send(ACCESS_REFUSED_BODY(clearance));
 
-    const pool = await poolOf(request, reply, receipt, hourEpoch);
-    if (!pool) return reply;
     const ship = await prisma.spaceship.findFirst({ where: { playerId, active: true }, orderBy: { createdAt: 'asc' }, select: { id: true } });
     const crew = ship ? await activeCrewOf(prisma, ship.id) : [];
     const budget = await budgetOf(prisma, playerId, hourEpoch);
     const total = budgetTotalFor(crew);
+    const unlocks = await prisma.playerMissionUnlock.findMany({ where: { playerId, expiresAt: { gt: new Date(nowMs) } }, orderBy: { issuedAt: 'asc' } });
 
     return {
       station_entity_id: receipt.dockedEntityId,
@@ -173,31 +148,45 @@ export default async function intelRoutes(fastify) {
       clearance_banner: CLEARANCES[clearance].banner,
       budget_remaining: Math.max(0, total - budget.spent),
       budget_total: total,
-      items: pool.filter((item) => visibleAt(item, clearance))
-        .map((item) => itemView(item, { gathered: budget.gatheredIds.has(item.intelId), clearance, standings, crew })),
+      gathered_intel_ids: [...budget.gatheredIds],
+      // The vouchers the pilot still holds, from any dock: each is what the engine redeems for the classified offer.
+      unlocks: unlocks.map((unlock) => ({
+        intel_id: unlock.intelId,
+        category: unlock.category,
+        station_entity_id: unlock.stationEntityId,
+        is_accepted: unlock.isAccepted,
+        unlock_expires_at_ms: unlock.expiresAt.getTime(),
+        ...(fastify.intelVoucherKey && { voucher: issueVoucher(fastify.intelVoucherKey, { playerId, unlock }) })
+      })),
+      sightings: await sightingsForPool(prisma, receipt.dockedEntityId, hourEpoch),
       next_refresh_at_ms: nextRefreshAtMs(hourEpoch)
     };
   });
 
   fastify.post('/intel/gather', { schema: gatherSchema, preHandler: fastify.requireClaimKey }, async (request, reply) => {
     const playerId = request.user.sub;
-    const { intelId, hourEpoch, expectedCostCredits, stationId, dockedReceipt: receipt } = request.body;
+    const { item: relayed, expectedCostCredits, stationId, dockedReceipt: receipt } = request.body;
     const nowMs = Date.now();
 
     // Stateless checks first, so a refusal changes nothing.
     if (!(await dockedAt(request, reply, receipt, stationId, nowMs))) return reply;
-    const currentHour = hourEpochOf(nowMs);
-    if (hourEpoch !== currentHour) {
-      return reply.code(409).send({ error: 'That pool has rotated. Reload the terminal.', code: 'intel_pool_expired', hour_epoch: currentHour });
+    let item;
+    try {
+      item = validateRelayedItem(relayed, { stationEntityId: receipt.dockedEntityId, systemH3: receipt.systemH3, nowMs }, fastify.claimKey.key);
+    } catch (err) {
+      if (!(err instanceof IntelItemError)) throw err;
+      if (err.code === 'intel_pool_expired') {
+        return reply.code(409).send({ error: 'That pool has rotated. Reload the terminal.', code: 'intel_pool_expired', hour_epoch: hourEpochOf(nowMs) });
+      }
+      request.log.warn({ err }, 'Refused a relayed intel item.');
+      return reply.code(403).send({ error: 'That intel item is not one the engine signed for this station.', code: err.code });
     }
-    const pool = await poolOf(request, reply, receipt, currentHour);
-    if (!pool) return reply;
-    const item = pool.find((candidate) => candidate.intelId === intelId);
+    const { intelId } = item;
+    const currentHour = item.hourEpoch;
     const unknown = () => reply.code(404).send({ error: 'No such intel at this station this hour.', code: 'unknown_intel_item' });
-    if (!item) return unknown();
-    const voucherKind = VOUCHER_CATEGORIES.includes(item.category);
-    if (voucherKind && !fastify.intelVoucherKey) {
-      return reply.code(503).send({ error: 'This service cannot issue mission vouchers.', code: 'intel_voucher_key_not_configured' });
+    // Every gather returns a voucher, whatever the category, so a service without the key sells nothing.
+    if (!fastify.intelVoucherKey) {
+      return reply.code(503).send({ error: 'This service cannot issue intel vouchers.', code: 'intel_voucher_key_not_configured' });
     }
 
     // The pilot's rules, the budget, the charge and the unlock commit or roll back together.
@@ -205,27 +194,39 @@ export default async function intelRoutes(fastify) {
       const ship = await lockActiveShip(tx, request.user);
       const { clearance, standings } = await clearanceOf(tx, playerId, receipt);
       if (isAccessRefused(clearance)) return fail(403, ACCESS_REFUSED_BODY(clearance));
-      // An item the pilot's terminal does not show does not exist for them.
+      // An item the pilot's terminal does not read does not exist for them.
       if (!visibleAt(item, clearance)) return { unknown: true };
 
       const crew = ship.crew;
       const total = budgetTotalFor(crew);
       const budget = await budgetOf(tx, playerId, currentHour);
-      const view = (gathered) => itemView(item, { gathered, clearance, standings, crew });
-      const row = voucherKind ? await tx.playerMissionUnlock.findFirst({ where: { playerId, intelId } }) : null;
-      const voucherOf = (unlock) => (unlock ? issueVoucher(fastify.intelVoucherKey, { playerId, unlock }) : undefined);
+      const view = () => itemView(item, { clearance, standings });
+      const row = await tx.playerMissionUnlock.findUnique({ where: { playerId_intelId: { playerId, intelId } } });
+      const voucherOf = (unlock) => issueVoucher(fastify.intelVoucherKey, { playerId, unlock });
 
-      // Gathered before: the same item and voucher again, and nothing is charged or spent.
+      const unlockFields = () => ({
+        stationEntityId: receipt.dockedEntityId,
+        category: item.category,
+        systemH3: item.systemH3,
+        voucherNonce: newVoucherNonce(),
+        issuedAt: new Date(nowMs),
+        expiresAt: unlockExpiryOf(nowMs),
+        isAccepted: false
+      });
+
+      // Gathered before: the same voucher again, and nothing is charged or spent. A pilot who paid before every gather left
+      // an unlock (a tip or a site once did not) is given one now, still for nothing.
       if (budget.gatheredIds.has(intelId)) {
+        const held = row ?? await tx.playerMissionUnlock.create({ data: { playerId, intelId, ...unlockFields() } });
         return {
           body: {
             result: 'GATHER_INTEL_ITEM_RESULT_ALREADY_GATHERED',
-            item: view(true),
-            ...(row && { voucher: voucherOf(row) }),
+            item: view(),
+            voucher: voucherOf(held),
             credits_charged: 0,
             budget_remaining: Math.max(0, total - budget.spent),
             budget_total: total,
-            unlock_expires_at_ms: row ? row.expiresAt.getTime() : nextRefreshAtMs(currentHour)
+            unlock_expires_at_ms: held.expiresAt.getTime()
           }
         };
       }
@@ -246,12 +247,9 @@ export default async function intelRoutes(fastify) {
       if (total - budget.spent < budgetCost) {
         return fail(409, { error: 'You have no intel budget left this hour.', code: 'budget_exhausted', budget_remaining: Math.max(0, total - budget.spent), budget_total: total });
       }
-      // A mission is unlocked once: a live or used unlock stands, an expired unused one is renewed below.
-      const previous = voucherKind
-        ? await tx.playerMissionUnlock.findUnique({ where: { playerId_missionId: { playerId, missionId: item.detail.mission_id } } })
-        : null;
-      if (previous && (previous.isAccepted || previous.expiresAt.getTime() > nowMs)) {
-        return fail(409, { error: 'You already hold the unlock for this mission.', code: 'mission_already_unlocked' });
+      // An item is unlocked once: a live or used unlock stands, an expired unused one is renewed below.
+      if (row && (row.isAccepted || row.expiresAt.getTime() > nowMs)) {
+        return fail(409, { error: 'You already hold the unlock for this intel.', code: 'intel_already_unlocked' });
       }
 
       if (cost > 0) {
@@ -263,28 +261,15 @@ export default async function intelRoutes(fastify) {
       }
       const spent = await spendBudget(tx, playerId, currentHour, intelId, budgetCost);
 
-      let unlock = null;
-      if (voucherKind) {
-        const fields = {
-          stationEntityId: receipt.dockedEntityId,
-          intelId,
-          category: item.category,
-          systemH3: item.systemH3,
-          voucherNonce: newVoucherNonce(),
-          issuedAt: new Date(nowMs),
-          expiresAt: unlockExpiryOf(nowMs),
-          isAccepted: false
-        };
-        unlock = previous
-          ? await tx.playerMissionUnlock.update({ where: { id: previous.id }, data: fields })
-          : await tx.playerMissionUnlock.create({ data: { playerId, missionId: item.detail.mission_id, ...fields } });
-      }
+      const unlock = row
+        ? await tx.playerMissionUnlock.update({ where: { id: row.id }, data: unlockFields() })
+        : await tx.playerMissionUnlock.create({ data: { playerId, intelId, ...unlockFields() } });
       const player = await tx.player.findUnique({ where: { id: playerId }, select: { credits: true } });
       return {
         body: {
           result: 'GATHER_INTEL_ITEM_RESULT_SUCCESS',
-          item: view(true),
-          ...(unlock && { voucher: voucherOf(unlock) }),
+          item: view(),
+          voucher: voucherOf(unlock),
           credits_charged: cost,
           credits: player.credits,
           budget_remaining: Math.max(0, total - spent),

@@ -1,6 +1,7 @@
-// Station Intel test doubles: an engine that signs pool items the way the engine does (eotha-contracts `IntelItem`,
-// domain EOTHA_INTEL_OFFER_V1) with the bytes assembled here rather than with src/lib/intel-offer.js, and a verifier for
-// the vouchers the service signs, also written independently of src/lib/intel-voucher.js.
+// Station Intel test doubles: pool items signed the way the engine does (eotha-contracts `IntelItem`, domain
+// EOTHA_INTEL_OFFER_V1) with the bytes assembled here rather than with src/lib/intel-offer.js, as the client relays them to
+// POST /game/intel/gather, and a verifier for the vouchers the service signs, also written independently of
+// src/lib/intel-voucher.js.
 import { randomUUID, verify, sign } from 'node:crypto';
 import { app, rtseKey, voucherPublicKey } from './helpers.js';
 
@@ -32,11 +33,11 @@ const u64 = (value) => {
   return buf;
 };
 
-/** The unsigned secrets an item carries in its detail: none of them may reach a pilot who has not gathered it. */
-export const secretOf = (slot) => `SECRET-${slot}`;
+/** What a client might attach to a relayed item unsigned, a forged detail included: none of it may ever be read or sent back. */
+export const forgedOf = (slot) => `FORGED-${slot}`;
 
 function detailFor(category, slot, missionId) {
-  const secret = secretOf(slot);
+  const secret = forgedOf(slot);
   switch (category) {
     case CATEGORY.TIP:
       return { outfitterTip: { targetStationId: randomUUID(), targetStationName: secret, targetSystemH3: '88283082a9fffff', distanceHexes: 2, componentType: 'SHIELDS', tier: slot === 3 ? 5 : 2, qualityGrade: 'BASIC', priceConditionPct: 85 } };
@@ -110,24 +111,17 @@ export function signedPool({ stationEntityId, systemH3 = '8828308281fffff', hour
   });
 }
 
-/** Points the service's engine seam at `pool` (an array, or a function of the request) and records each request. */
-export function useEngine(pool) {
-  const requests = [];
-  app.intelEngine.use({
-    async getPool(request) {
-      requests.push(request);
-      return typeof pool === 'function' ? pool(request) : pool;
-    }
-  });
-  return requests;
+/** The signed item of `slot` in the pool the engine would build for the dock `receipt` names, as a client relays it. */
+export function poolItem(receipt, slot, options = {}) {
+  return signedPool({ stationEntityId: receipt.dockedEntityId, systemH3: receipt.systemH3, ...options })[slot];
 }
 
-/** An engine that serves a correct pool for whatever dock and hour is asked about. */
-export function useStationEngine(options = {}) {
-  return useEngine((request) => signedPool({ stationEntityId: request.stationEntityId, systemH3: request.systemH3, hourEpoch: request.hourEpoch, ...options }));
-}
+/** The body of POST /game/intel/gather for `slot` of the dock's pool; `extra` replaces any field of it. */
+export const gatherBody = (receipt, slot, expectedCostCredits, extra = {}) => ({
+  item: poolItem(receipt, slot), expectedCostCredits, dockedReceipt: receipt, ...extra
+});
 
-/** The pool item of `slot` for a dock/hour, as an engine pool built the same way names it. */
+/** The id of the pool item of `slot` for a dock/hour, as a pool built by signedPool names it. */
 export const intelIdOf = (stationEntityId, slot, hourEpoch = currentHour()) => `intel-${stationEntityId}-${hourEpoch}-${slot}`;
 
 const lengthPrefixed = str;

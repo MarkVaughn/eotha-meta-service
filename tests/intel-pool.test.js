@@ -1,21 +1,16 @@
-import { test, describe, after, afterEach } from 'node:test';
+import { test, describe, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { addCrew, app, call, closeApp, dockedReceipt, json, newPilot } from './helpers.js';
-import {
-  CATEGORY, HOUR_MS, currentHour, poolUrl, secretOf, setStanding, signedIntelItem, signedPool, useEngine, useStationEngine
-} from './intel-helpers.js';
+import { addCrew, app, call, closeApp, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
+import { CATEGORY, HOUR_MS, currentHour, gatherBody, intelIdOf, poolUrl, setStanding, voucherVerifies } from './intel-helpers.js';
 import { stationServices } from '../src/lib/outfitting-station.js';
 
 after(closeApp);
-afterEach(() => app.intelEngine.reset());
 
 const pool = (pilot, receipt, extra) => call(pilot, 'GET', poolUrl(receipt, extra));
-const categories = (body) => body.items.map((item) => item.category);
 
 describe('GET /game/intel/pool: the docked receipt', () => {
   test('refuses a request without a receipt, with a forged or another pilot\'s, and with an expired one', async () => {
-    useStationEngine();
     const pilot = await newPilot('Intel');
     const other = await newPilot('Other');
     const noReceipt = await call(pilot, 'GET', '/game/intel/pool');
@@ -33,7 +28,6 @@ describe('GET /game/intel/pool: the docked receipt', () => {
   });
 
   test('refuses a stationId that is not the receipt\'s dock, and a customs lockout there', async () => {
-    useStationEngine();
     const pilot = await newPilot('Intel');
     const receipt = dockedReceipt(pilot);
     const mismatch = await pool(pilot, receipt, `&stationId=${randomUUID()}`);
@@ -48,9 +42,8 @@ describe('GET /game/intel/pool: the docked receipt', () => {
   });
 });
 
-describe('GET /game/intel/pool: the pool and its redaction', () => {
-  test('shows the station\'s ten items for this hour with a full hourly budget', async () => {
-    const requests = useStationEngine();
+describe('GET /game/intel/pool: the pilot\'s side of the terminal', () => {
+  test('answers with this hour, a full budget and the clearance, and holds no pool of its own', async () => {
     const pilot = await newPilot('Intel');
     const receipt = dockedReceipt(pilot, { controllingFactionId: '' });
     const res = await pool(pilot, receipt);
@@ -63,84 +56,62 @@ describe('GET /game/intel/pool: the pool and its redaction', () => {
     assert.equal(body.budget_remaining, 3);
     assert.equal(body.clearance, 'INTEL_CLEARANCE_CIVILIAN');
     assert.equal(body.clearance_banner, '[CIVILIAN TIER GUEST TERMINAL]');
-    // An independent civilian terminal reads no faction recruitment calls and no tier 5 tip.
-    assert.equal(body.items.length, 8);
-    assert.ok(!categories(body).includes('INTEL_CATEGORY_FACTION_RECRUITMENT'));
-    assert.equal(body.items.filter((item) => item.is_free_ambient).length, 2);
-    // The engine is asked about this dock and hour, with no pilot identity.
-    assert.equal(requests.length, 1);
-    assert.deepEqual({ ...requests[0], sightings: undefined }, {
-      stationEntityId: receipt.dockedEntityId, systemH3: receipt.systemH3, controllingFactionId: '', hourEpoch: currentHour(), sightings: undefined
-    });
-    assert.ok(!JSON.stringify(requests[0]).includes(pilot.id));
+    assert.deepEqual(body.gathered_intel_ids, []);
+    assert.deepEqual(body.unlocks, []);
+    assert.deepEqual(body.sightings, []);
+    // The engine's pool reaches the client over the game connection, never through this service.
+    assert.ok(!('items' in body));
+    assert.ok(!res.body.includes(pilot.id));
   });
 
-  test('sends a paid item redacted until it is gathered: a generic headline, no body, no detail, no target anywhere', async () => {
-    useStationEngine();
+  test('reports what the pilot gathered this hour and the vouchers they still hold, at any dock', async () => {
     const pilot = await newPilot('Intel');
-    const res = await pool(pilot, dockedReceipt(pilot));
-    const body = json(res);
-    const paid = body.items.filter((item) => !item.is_free_ambient);
-    assert.ok(paid.length > 0);
-    for (const item of paid) {
-      assert.equal(item.is_redacted, true, item.intel_id);
-      assert.match(item.headline, /^\[(ENCRYPTED|CLASSIFIED|RESTRICTED)/);
-      assert.equal(item.body, '');
-      assert.equal(item.is_gathered, false);
-      for (const key of ['outfitter_tip', 'mission_lead', 'faction_recruitment', 'away_team_site', 'player_sighting']) assert.ok(!(key in item), key);
-      assert.ok(item.cost_credits > 0);
-      assert.equal(item.budget_cost, 1);
-      assert.equal(item.veracity, 'INTEL_VERACITY_UNSPECIFIED');
-    }
-    // Nothing the engine knows about a target is on the wire for a card the pilot has not gathered, free or paid.
-    for (let slot = 0; slot < 10; slot++) assert.ok(!res.body.includes(secretOf(slot)), `slot ${slot} leaked`);
-    assert.ok(!res.body.includes('somethingTheEngineAdded'));
+    await setCredits(pilot, 2000);
+    const dockA = dockedReceipt(pilot);
+    const dockB = dockedReceipt(pilot);
+    assert.equal((await call(pilot, 'POST', '/game/intel/gather', gatherBody(dockA, 2, 100))).statusCode, 200);
+    const lead = json(await call(pilot, 'POST', '/game/intel/gather', gatherBody(dockA, 4, 250)));
+
+    const body = json(await pool(pilot, dockB));
+    assert.equal(body.budget_remaining, 1);
+    assert.deepEqual([...body.gathered_intel_ids].sort(), [intelIdOf(dockA.dockedEntityId, 2), intelIdOf(dockA.dockedEntityId, 4)].sort());
+    // Every gathered item leaves a voucher, a tip's as well as a lead's.
+    assert.equal(body.unlocks.length, 2);
+    const unlock = body.unlocks.find((candidate) => candidate.intel_id === lead.voucher.intel_id);
+    assert.equal(unlock.category, CATEGORY.LEAD);
+    assert.equal(unlock.station_entity_id, dockA.dockedEntityId);
+    assert.equal(unlock.is_accepted, false);
+    assert.equal(unlock.unlock_expires_at_ms, lead.voucher.expires_at_ms);
+    assert.deepEqual(unlock.voucher, lead.voucher);
+    assert.equal(voucherVerifies(unlock.voucher), true);
+
+    // An expired unlock is no longer listed.
+    await app.prisma.playerMissionUnlock.updateMany({ where: { playerId: pilot.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    assert.deepEqual(json(await pool(pilot, dockB)).unlocks, []);
   });
 
-  test('sends a free ambient item as a coarse rumor at no credit cost, its exact detail withheld until it is gathered', async () => {
-    useStationEngine();
+  test('does not list another pilot\'s gathers', async () => {
     const pilot = await newPilot('Intel');
-    const body = json(await pool(pilot, dockedReceipt(pilot)));
-    const free = body.items.filter((item) => item.is_free_ambient);
-    assert.equal(free.length, 2);
-    for (const item of free) {
-      assert.equal(item.is_redacted, false);
-      assert.match(item.body, /^Coarse rumor/);
-      assert.equal(item.cost_credits, 0);
-      assert.equal(item.is_gathered, false);
-      assert.ok(!('outfitter_tip' in item) && !('away_team_site' in item));
-    }
-  });
-
-  test('is the same pool for the whole hour, and a different one for another dock', async () => {
-    const requests = useStationEngine();
-    const pilot = await newPilot('Intel');
+    await setCredits(pilot, 1000);
     const receipt = dockedReceipt(pilot);
-    const first = json(await pool(pilot, receipt));
-    const second = json(await pool(pilot, dockedReceipt(pilot, { dockedEntityId: receipt.dockedEntityId })));
-    assert.deepEqual(second.items.map((item) => item.intel_id), first.items.map((item) => item.intel_id));
-    const elsewhere = json(await pool(pilot, dockedReceipt(pilot)));
-    assert.notDeepEqual(elsewhere.items.map((item) => item.intel_id), first.items.map((item) => item.intel_id));
-    assert.deepEqual(requests.map((request) => request.hourEpoch), [currentHour(), currentHour(), currentHour()]);
+    await call(pilot, 'POST', '/game/intel/gather', gatherBody(receipt, 4, 250));
+    const other = await newPilot('Other');
+    const body = json(await pool(other, dockedReceipt(other, { dockedEntityId: receipt.dockedEntityId })));
+    assert.equal(body.budget_remaining, 3);
+    assert.deepEqual([body.gathered_intel_ids, body.unlocks], [[], []]);
   });
 
-  test('reports the unlocked state of an item whose standing the pilot does not meet', async () => {
-    useStationEngine();
+  test('refuses a Nemesis the terminal', async () => {
     const pilot = await newPilot('Intel');
-    const receipt = dockedReceipt(pilot, { controllingFactionId: 'alpha' });
-    await setStanding(pilot, 'alpha', 200);
-    const low = json(await pool(pilot, receipt));
-    const call3 = low.items.find((item) => item.category === 'INTEL_CATEGORY_FACTION_RECRUITMENT');
-    assert.equal(call3.is_locked, true);
-    await setStanding(pilot, 'alpha', 450);
-    const high = json(await pool(pilot, receipt));
-    assert.equal(high.items.find((item) => item.category === 'INTEL_CATEGORY_FACTION_RECRUITMENT').is_locked, false);
+    await setStanding(pilot, 'beta', -900);
+    const res = await pool(pilot, dockedReceipt(pilot, { controllingFactionId: 'beta' }));
+    assert.equal(res.statusCode, 403);
+    assert.equal(json(res).code, 'intel_access_refused');
   });
 });
 
-describe('GET /game/intel/pool: standing gates what the terminal shows', () => {
+describe('GET /game/intel/pool: standing sets the clearance band', () => {
   const atFaction = async (standing, { colors = false, factionId = 'alpha' } = {}) => {
-    useStationEngine();
     const pilot = await newPilot('Intel');
     await setStanding(pilot, factionId, standing);
     if (colors) await app.prisma.player.update({ where: { id: pilot.id }, data: { activeColorsFactionId: factionId } });
@@ -168,50 +139,31 @@ describe('GET /game/intel/pool: standing gates what the terminal shows', () => {
       assert.equal(res.statusCode, 200);
       assert.equal(body.clearance, 'INTEL_CLEARANCE_SYNDICATE_TAP');
       assert.equal(body.clearance_banner, '[UNREGISTERED SYNDICATE TAP]');
-      assert.deepEqual([...new Set(categories(body))].sort(), ['INTEL_CATEGORY_MISSION_LEAD', 'INTEL_CATEGORY_OUTFITTER_TIP']);
     } finally {
       stationServices.isLowSecDock = original;
     }
   });
 
-  test('shows an Unfriendly pilot outfitter tips only, up to tier 3, and charges paid dossiers 25% more', async () => {
-    const { body } = await atFaction(-300);
-    assert.equal(body.clearance, 'INTEL_CLEARANCE_PROBATIONARY');
-    assert.deepEqual([...new Set(categories(body))], ['INTEL_CATEGORY_OUTFITTER_TIP']);
-    // The tier 5 tip (slot 3) is above the band; the tier 2 tip (slot 2) costs its 100 plus 25%.
-    assert.deepEqual(body.items.map((item) => item.slot_index), [0, 2]);
-    assert.equal(body.items.find((item) => item.slot_index === 2).cost_credits, 125);
-    assert.equal(body.items.find((item) => item.slot_index === 0).cost_credits, 0);
+  test('bands each standing: Unfriendly, Neutral, Friendly, Trusted and Paragon', async () => {
+    const expected = [
+      [-300, 'INTEL_CLEARANCE_PROBATIONARY', '[PROBATIONARY MONITORING ACTIVE]'],
+      [0, 'INTEL_CLEARANCE_CIVILIAN', '[CIVILIAN TIER GUEST TERMINAL]'],
+      [200, 'INTEL_CLEARANCE_REGISTERED_OPERATIVE', '[CLEARANCE: REGISTERED OPERATIVE]'],
+      [450, 'INTEL_CLEARANCE_SECURITY_LEVEL_3', '[SECURITY CLEARANCE: LEVEL 3 AUTHORIZED]'],
+      [800, 'INTEL_CLEARANCE_ADMIRALTY', '[CLEARED: ADMIRALTY PRIVILEGED ACCESS]']
+    ];
+    for (const [standing, clearance, banner] of expected) {
+      const { body } = await atFaction(standing);
+      assert.deepEqual([body.clearance, body.clearance_banner], [clearance, banner], `standing ${standing}`);
+    }
   });
 
-  test('shows a Neutral pilot the civilian market, a Friendly one faction calls too, and a Trusted one tier 5 tips', async () => {
-    const neutral = (await atFaction(0)).body;
-    assert.equal(neutral.clearance, 'INTEL_CLEARANCE_CIVILIAN');
-    assert.ok(!categories(neutral).includes('INTEL_CATEGORY_FACTION_RECRUITMENT'));
-    assert.ok(!neutral.items.some((item) => item.slot_index === 3), 'a tier 5 tip is above a civilian terminal');
-
-    const friendly = (await atFaction(200)).body;
-    assert.equal(friendly.clearance, 'INTEL_CLEARANCE_REGISTERED_OPERATIVE');
-    assert.equal(friendly.clearance_banner, '[CLEARANCE: REGISTERED OPERATIVE]');
-    assert.ok(categories(friendly).includes('INTEL_CATEGORY_FACTION_RECRUITMENT'));
-    assert.ok(!friendly.items.some((item) => item.slot_index === 3), 'a tier 5 tip is above a registered operative');
-
-    const trusted = (await atFaction(450)).body;
-    assert.equal(trusted.clearance, 'INTEL_CLEARANCE_SECURITY_LEVEL_3');
-    assert.equal(trusted.items.length, 10);
-  });
-
-  test('gives a Paragon, and a pilot flying the faction\'s colors, admiralty access', async () => {
-    const paragon = (await atFaction(800)).body;
-    assert.equal(paragon.clearance, 'INTEL_CLEARANCE_ADMIRALTY');
-    assert.equal(paragon.clearance_banner, '[CLEARED: ADMIRALTY PRIVILEGED ACCESS]');
-    const colors = (await atFaction(500, { colors: true })).body;
-    assert.equal(colors.clearance, 'INTEL_CLEARANCE_ADMIRALTY');
+  test('gives a pilot flying the faction\'s colors admiralty access at 500, and only security level 3 without them', async () => {
+    assert.equal((await atFaction(500, { colors: true })).body.clearance, 'INTEL_CLEARANCE_ADMIRALTY');
     assert.equal((await atFaction(500)).body.clearance, 'INTEL_CLEARANCE_SECURITY_LEVEL_3');
   });
 
   test('bands by the governing faction\'s standing only: an independent dock is always civilian', async () => {
-    useStationEngine();
     const pilot = await newPilot('Intel');
     await setStanding(pilot, 'alpha', -900);
     const body = json(await pool(pilot, dockedReceipt(pilot, { controllingFactionId: '' })));
@@ -221,7 +173,6 @@ describe('GET /game/intel/pool: standing gates what the terminal shows', () => {
 
 describe('GET /game/intel/pool: the hourly budget', () => {
   test('is 3 for a pilot with no Comms Officer, and a Comms Officer raises it by rank, never past 6', async () => {
-    useStationEngine();
     const read = async (pilot) => json(await pool(pilot, dockedReceipt(pilot)));
     const bare = await newPilot('Intel');
     assert.equal((await read(bare)).budget_total, 3);
@@ -236,55 +187,15 @@ describe('GET /game/intel/pool: the hourly budget', () => {
     assert.ok((await read(master)).budget_total <= 6);
   });
 
-  test('reveals a rumor\'s veracity only to a Master Comms Officer, and only on a card that is not redacted', async () => {
-    useStationEngine();
-    const master = await newPilot('Intel');
-    await addCrew(master, { crewClass: 'COMMS_OFFICER', rank: 'MASTER' });
-    const body = json(await pool(master, dockedReceipt(master)));
-    for (const item of body.items) {
-      assert.equal(item.veracity, item.is_redacted ? 'INTEL_VERACITY_UNSPECIFIED' : 'INTEL_VERACITY_EXAGGERATED', item.intel_id);
-    }
-  });
-
   test('does not count a mutinous Comms Officer', async () => {
-    useStationEngine();
     const pilot = await newPilot('Intel');
     await addCrew(pilot, { crewClass: 'COMMS_OFFICER', rank: 'MASTER', morale: 0 });
     assert.equal(json(await pool(pilot, dockedReceipt(pilot))).budget_total, 3);
   });
 });
 
-describe('GET /game/intel/pool: the engine', () => {
-  test('answers 503 when no engine is reachable, and 502 when the pool it sends is not valid', async () => {
-    const pilot = await newPilot('Intel');
-    const receipt = dockedReceipt(pilot);
-    // No engine configured in the test environment.
-    const none = await pool(pilot, receipt);
-    assert.equal(none.statusCode, 503);
-    assert.equal(json(none).code, 'intel_engine_unavailable');
-
-    const bad = async (build) => {
-      useEngine((request) => build(signedPool({ stationEntityId: request.stationEntityId, systemH3: request.systemH3, hourEpoch: request.hourEpoch }), request));
-      const res = await pool(pilot, receipt);
-      assert.equal(res.statusCode, 502);
-      assert.equal(json(res).code, 'intel_pool_invalid');
-    };
-    const resign = (item, patch, key) => signedIntelItem({ ...item, ...patch, signature: undefined }, key);
-    const at = (index, change) => (items) => items.map((item, i) => (i === index ? change(item) : item));
-    await bad((items) => items.slice(0, 7));
-    await bad((items) => [...items, items[2]]);
-    await bad(at(4, (item) => ({ ...item, signature: Buffer.alloc(64).toString('base64') })));
-    await bad(at(4, (item) => resign(item, { baseCostCredits: 1 })));
-    await bad(at(4, (item) => resign(item, { isFreeAmbient: true, baseCostCredits: 0 })));
-    await bad(at(4, (item) => resign(item, { stationEntityId: randomUUID() })));
-    await bad(at(4, (item) => resign(item, { hourEpoch: item.hourEpoch - 1, expiresAtMs: item.expiresAtMs - HOUR_MS })));
-    await bad(at(4, (item) => ({ ...item, detail: undefined })));
-    // Signed by a key that is not the engine's claim key.
-    await bad((items) => items.map((item) => resign(item, {}, generateKeyPairSync('ed25519').privateKey)));
-  });
-
-  test('passes the engine the dock\'s departures as the hour began, 15 minutes to 4 hours old, newest first', async () => {
-    const requests = useStationEngine();
+describe('GET /game/intel/pool: the dock\'s sightings', () => {
+  test('lists the dock\'s departures as the hour began, 15 minutes to 4 hours old, newest first', async () => {
     const pilot = await newPilot('Intel');
     const receipt = dockedReceipt(pilot);
     const hourStart = currentHour() * HOUR_MS;
@@ -298,11 +209,12 @@ describe('GET /game/intel/pool: the engine', () => {
         { ...at(minutes(30)), stationEntityId: randomUUID() } // another dock
       ]
     });
-    await pool(pilot, receipt);
-    assert.deepEqual(requests[0].sightings.map((s) => s.ship_name), [`Ship-${minutes(20)}`, `Ship-${minutes(120)}`]);
-    assert.deepEqual(Object.keys(requests[0].sightings[0]).sort(), [
+    const { sightings } = json(await pool(pilot, receipt));
+    assert.deepEqual(sightings.map((s) => s.ship_name), [`Ship-${minutes(20)}`, `Ship-${minutes(120)}`]);
+    assert.deepEqual(Object.keys(sightings[0]).sort(), [
       'captain_name', 'flying_colors', 'hull_tier', 'is_stealthed', 'shield_tier', 'ship_name', 'sighting_id', 'undocked_at_ms', 'weapon_tier'
     ]);
+    assert.ok(!JSON.stringify(sightings).includes(pilot.id));
     await app.prisma.stationSightingRecord.deleteMany({ where: { stationEntityId: receipt.dockedEntityId } });
   });
 });
