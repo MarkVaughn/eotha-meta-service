@@ -1,27 +1,14 @@
 import fp from 'fastify-plugin';
 import env from '../config/env.js';
-import { createHttpIntelEngine, unconfiguredIntelEngine } from '../lib/intel-engine.js';
 import { loadVoucherKey } from '../lib/intel-voucher.js';
 
 /**
- * Station Intel's two outside dependencies.
- * - `fastify.intelEngine`: the engine's pool generator behind a swappable seam (`getPool`); `intelEngine.use(impl)` replaces
- *   it (tests), `intelEngine.reset()` restores the configured one. Without INTEL_ENGINE_URL the pool answers
- *   503 intel_engine_unavailable.
- * - `fastify.intelVoucherKey`: `{ keyId, privateKey }`, this service's own voucher signing key, or null when
- *   INTEL_VOUCHER_PRIVATE_KEY_FILE is unset, in which case gathering a mission lead is refused 503 before anything is charged.
+ * Station Intel's one outside dependency: `fastify.intelVoucherKey`, `{ keyId, privateKey }`, this service's own voucher
+ * signing key, or null when INTEL_VOUCHER_PRIVATE_KEY_FILE is unset, in which case gathering a mission lead is refused
+ * 503 before anything is charged. The pool itself needs nothing from here: the engine builds it and the client relays each
+ * signed item it wants to gather (verified against the claim key, `fastify.claimKey`).
  */
 async function intelPlugin(fastify, opts) {
-  const configured = opts.engine ?? (env.INTEL_ENGINE_URL
-    ? createHttpIntelEngine({ baseUrl: env.INTEL_ENGINE_URL, credential: env.INTEL_ENGINE_CREDENTIAL })
-    : unconfiguredIntelEngine);
-  let current = configured;
-  fastify.decorate('intelEngine', {
-    getPool: (request) => current.getPool(request),
-    use(impl) { current = impl; },
-    reset() { current = configured; }
-  });
-
   const voucherKey = opts.voucherKey !== undefined ? opts.voucherKey
     : loadVoucherKey({ keyFile: env.INTEL_VOUCHER_PRIVATE_KEY_FILE, keyId: env.INTEL_VOUCHER_KEY_ID });
   if (!voucherKey) {

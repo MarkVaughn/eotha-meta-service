@@ -22,7 +22,7 @@ const u64 = (value) => {
 };
 
 // Mirrors `MissionUnlockVoucher.signature` in eotha-contracts `common/v1/intel.proto`. `voucher` carries
-// { issuerKeyId, pilotId, missionId, intelId, category, stationEntityId (lowercase hyphenated UUID), systemH3,
+// { issuerKeyId, pilotId, missionId (empty: see issueVoucher), intelId, category, stationEntityId (lowercase hyphenated UUID), systemH3,
 // issuedAtMs, expiresAtMs, nonce (16 bytes) }.
 export function canonicalVoucherPayload(voucher) {
   const station = Buffer.from(voucher.stationEntityId.replaceAll('-', ''), 'hex');
@@ -50,13 +50,16 @@ export const newVoucherNonce = () => randomBytes(16);
 /**
  * The voucher for an unlock row, signed with `voucherKey` (`{ keyId, privateKey }`). It lives until `expiresAt`,
  * four hours after the gather (DOSSIER_LIFETIME_MS), and is rebuilt identically from the row each time it is asked for.
+ * `mission_id` is signed as the empty string: the pilot gathered an item whose detail this service never sees (the engine
+ * redacts it and a relayed detail is not trusted), so the voucher binds the pilot to the item, `intel_id`, which the engine
+ * resolves to the mission itself when it is presented and echoes as the classified offer's `intel_lead_id`.
  * The wire form: bytes as base64, the station as its UUID, like every other id this service sends.
  */
 export function issueVoucher(voucherKey, { playerId, unlock }) {
   const fields = {
     issuerKeyId: voucherKey.keyId,
     pilotId: playerId,
-    missionId: unlock.missionId,
+    missionId: '',
     intelId: unlock.intelId,
     category: unlock.category,
     stationEntityId: unlock.stationEntityId,

@@ -35,10 +35,6 @@ const envSchema = z.object({
   INTERNAL_RTSE_MTLS_FINGERPRINTS: optionalString(z.string().min(1)),
   // Identifies the public key RTSE has provisioned to verify signed enforcement projections.
   ENFORCEMENT_ISSUER_KEY_ID: z.string().min(1).default('eotha-meta-service-v1'),
-  // Base URL of the engine's Station Intel pool generator (src/lib/intel-engine.js) and the credential sent to it.
-  // Unset, the intel pool is unavailable (503).
-  INTEL_ENGINE_URL: optionalString(z.string().url()),
-  INTEL_ENGINE_CREDENTIAL: optionalString(z.string().min(32)),
   // This service's own Ed25519 key (PEM file) for MissionUnlockVoucher signatures, and the id the engine knows its public
   // half by. Never the login or claim key; unset, mission leads cannot be gathered.
   INTEL_VOUCHER_PRIVATE_KEY_FILE: optionalString(z.string().min(1)),

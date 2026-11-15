@@ -1,17 +1,14 @@
 import { verify } from 'node:crypto';
 import {
   BASE_COSTS_CREDITS,
-  DETAIL_KEYS,
-  FREE_AMBIENT_COUNT,
   INTEL_CATEGORIES,
   INTEL_HOUR_MS,
-  VOUCHER_CATEGORIES,
   POOL_MAX_ITEMS,
-  POOL_MIN_ITEMS
+  hourEpochOf
 } from '../config/intel.js';
 import { FACTION_IDS } from '../config/factions.js';
 import { DOCKED_ENTITY_ID_PATTERN } from './docked-receipt.js';
-import { H3_PATTERN, UUID_PATTERN } from '../config/patterns.js';
+import { H3_PATTERN } from '../config/patterns.js';
 
 export const INTEL_OFFER_DOMAIN = Buffer.from('EOTHA_INTEL_OFFER_V1', 'utf8'); // 20 bytes
 
@@ -43,7 +40,7 @@ const u64 = (value) => {
 
 // Mirrors `IntelItem.signature` in eotha-contracts `common/v1/intel.proto`: the domain, then the item's identity and
 // base terms, little-endian, strings length-prefixed, the station as its 16 raw bytes. Never the detail, so a redacted
-// copy verifies as the full one. `item` is a normalized item (see normalizeEngineItem). Throws on a malformed field;
+// copy verifies as the full one. `item` is a normalized item (see normalizeRelayedItem). Throws on a malformed field;
 // `verifyIntelItem` is the caller that never does.
 export function canonicalIntelItemPayload(item) {
   const station = Buffer.from(item.stationEntityId.replaceAll('-', ''), 'hex');
@@ -77,7 +74,12 @@ export function verifyIntelItem(item, publicKey) {
   }
 }
 
-const snake = (key) => key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+// The clock skew tolerated between the engine's `issued_at_ms` and this service's clock.
+export const ISSUED_AT_SKEW_MS = 60_000;
+
+// A field of a proto-JSON message as camelCase (the engine's own JSON) or snake_case (this service's wire) names it.
+const camel = (key) => key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+const field = (raw, snakeKey) => raw[snakeKey] ?? raw[camel(snakeKey)];
 
 // An unsigned 64-bit field as proto-JSON gives it, a number or a decimal string, as a safe integer; else null.
 function uint(value) {
@@ -96,96 +98,80 @@ export function categoryOf(value) {
   return INTEL_CATEGORIES[value] ?? 0;
 }
 
-// The detail the engine sent for `category`, snake_cased and cut to the category's own fields; null when it sent none.
-function detailOf(raw, category) {
-  const spec = DETAIL_KEYS[category];
-  const source = raw?.[snake(spec.wire)] ?? raw?.[spec.wire] ?? raw?.[spec.wire.replace(/_([a-z])/g, (_, c) => c.toUpperCase())];
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
-  const detail = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (spec.fields.includes(snake(key))) detail[snake(key)] = value;
-  }
-  return detail;
+// The station as a lowercase hyphenated UUID, from that or from the base64 of its 16 bytes (proto-JSON of a `bytes` field).
+function stationIdOf(value) {
+  if (typeof value !== 'string') return null;
+  if (ENTITY_ID.test(value)) return value.toLowerCase();
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.length !== 16 || bytes.toString('base64') !== value) return null;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 /**
- * One item of the engine's pool (the proto-JSON of `IntelItem`, camelCase, `detail` as `{ missionLead: {...} }` and so
- * on) as the service handles it, or null when a field is missing or out of range. Fields 1 to 12 are what the engine
- * signed; `headline`, `body`, `veracity` and `detail` are its unsigned text, which this service decides whether to send.
+ * The signed part of an `IntelItem` a client relayed (proto-JSON, camelCase or snake_case) as the service handles it, or
+ * null when a signed field is missing or out of range. Fields 1 to 12 and the signature are all it keeps: the engine
+ * signed those. Everything else a client sends with it (headline, body, veracity, the detail) is unsigned and a client
+ * is never believed about it, so it is dropped here and nothing downstream can read it.
  */
-export function normalizeEngineItem(raw) {
-  if (!raw || typeof raw !== 'object') return null;
+export function normalizeRelayedItem(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const category = categoryOf(raw.category);
   if (!category) return null;
   const item = {
-    intelId: raw.intelId,
+    intelId: field(raw, 'intel_id'),
     category,
-    stationEntityId: typeof raw.stationEntityId === 'string' ? raw.stationEntityId.toLowerCase() : raw.stationEntityId,
-    systemH3: raw.systemH3,
-    hourEpoch: uint(raw.hourEpoch),
-    slotIndex: uint32(raw.slotIndex),
-    isFreeAmbient: raw.isFreeAmbient === true,
-    baseCostCredits: uint(raw.baseCostCredits),
-    requiredStanding: int32(raw.requiredStanding ?? 0),
-    requiredStandingFactionId: raw.requiredStandingFactionId ?? '',
-    issuedAtMs: uint(raw.issuedAtMs),
-    expiresAtMs: uint(raw.expiresAtMs),
-    signature: raw.signature,
-    headline: typeof raw.headline === 'string' ? raw.headline : '',
-    body: typeof raw.body === 'string' ? raw.body : '',
-    veracity: Number.isInteger(raw.veracity) ? raw.veracity : 0,
-    detail: detailOf(raw.detail, category)
+    stationEntityId: stationIdOf(field(raw, 'station_entity_id')),
+    systemH3: field(raw, 'system_h3'),
+    hourEpoch: uint(field(raw, 'hour_epoch')),
+    slotIndex: uint32(field(raw, 'slot_index')),
+    isFreeAmbient: field(raw, 'is_free_ambient') === true,
+    baseCostCredits: uint(field(raw, 'base_cost_credits')),
+    requiredStanding: int32(field(raw, 'required_standing') ?? 0),
+    requiredStandingFactionId: field(raw, 'required_standing_faction_id') ?? '',
+    issuedAtMs: uint(field(raw, 'issued_at_ms')),
+    expiresAtMs: uint(field(raw, 'expires_at_ms')),
+    signature: raw.signature
   };
   const numbers = [item.hourEpoch, item.slotIndex, item.baseCostCredits, item.requiredStanding, item.issuedAtMs, item.expiresAtMs];
   if (numbers.some((n) => n === null)) return null;
   if (typeof item.intelId !== 'string' || item.intelId.length < 1 || item.intelId.length > 256) return null;
-  if (typeof item.stationEntityId !== 'string' || !ENTITY_ID.test(item.stationEntityId)) return null;
+  if (!item.stationEntityId) return null;
   if (typeof item.systemH3 !== 'string' || !SYSTEM_H3.test(item.systemH3)) return null;
   if (typeof item.requiredStandingFactionId !== 'string' || (item.requiredStandingFactionId && !FACTION_IDS.includes(item.requiredStandingFactionId))) return null;
-  if (typeof item.signature !== 'string' || !item.detail) return null;
+  if (typeof item.signature !== 'string') return null;
   return item;
 }
 
-export class IntelPoolError extends Error {}
+export class IntelItemError extends Error {
+  constructor(message, code = 'intel_item_invalid') {
+    super(message);
+    this.code = code;
+  }
+}
 
 /**
- * The engine's `items` for the dock of `receipt` in `hourEpoch` as normalized items in slot order, or an IntelPoolError
- * naming what is wrong: a pool is 8 to 12 items with distinct ids and slots, exactly 2 free ambient items (free if and
- * only if the list price is 0), every one for this dock and this hour, expiring when the hour ends, and signed by the
- * engine. A pool that is not is never shown, so a misbehaving engine cannot mint prices or leak another dock's intel.
+ * The relayed `raw` item as a normalized item, once it is proven to be one the engine signed for the dock the pilot is
+ * docked at and still current at `nowMs`; else an IntelItemError. In the order checked: the signed fields are well formed
+ * and the signature (EOTHA_INTEL_OFFER_V1) verifies under `publicKey`, the engine's claim key; the item is for this
+ * `stationEntityId` and `systemH3`; its list price is one the engine sells and its free flag matches (free if and only
+ * if the price is 0); and its hour is the current one, ending when the hour ends, with an issue time that is not in the
+ * future. A stale or future hour is the `intel_pool_expired` code, anything else `intel_item_invalid`. A relayed item that is
+ * not proven this way is never charged for.
  */
-export function validatePool(rawItems, { stationEntityId, systemH3, hourEpoch }, publicKey) {
-  if (!Array.isArray(rawItems) || rawItems.length < POOL_MIN_ITEMS || rawItems.length > POOL_MAX_ITEMS) {
-    throw new IntelPoolError(`The pool must hold ${POOL_MIN_ITEMS} to ${POOL_MAX_ITEMS} items.`);
+export function validateRelayedItem(raw, { stationEntityId, systemH3, nowMs }, publicKey) {
+  const item = normalizeRelayedItem(raw);
+  if (!item) throw new IntelItemError('The intel item is malformed.');
+  if (!verifyIntelItem(item, publicKey)) throw new IntelItemError('The intel item is not signed by the engine.');
+  if (item.stationEntityId !== stationEntityId || item.systemH3 !== systemH3) {
+    throw new IntelItemError('The intel item is for another station.');
   }
-  const items = rawItems.map(normalizeEngineItem);
-  const seenIds = new Set();
-  const seenSlots = new Set();
-  for (const item of items) {
-    if (!item) throw new IntelPoolError('An item of the pool is malformed.');
-    if (item.stationEntityId !== stationEntityId || item.systemH3 !== systemH3 || item.hourEpoch !== hourEpoch) {
-      throw new IntelPoolError('An item of the pool is for another dock or hour.');
-    }
-    if (item.slotIndex >= POOL_MAX_ITEMS || item.expiresAtMs !== (hourEpoch + 1) * INTEL_HOUR_MS) {
-      throw new IntelPoolError('An item of the pool has a slot or expiry outside its hour.');
-    }
-    if (!BASE_COSTS_CREDITS.includes(item.baseCostCredits) || item.isFreeAmbient !== (item.baseCostCredits === 0)) {
-      throw new IntelPoolError('An item of the pool has a list price its free flag does not match.');
-    }
-    if (seenIds.has(item.intelId) || seenSlots.has(item.slotIndex)) throw new IntelPoolError('The pool repeats an item.');
-    seenIds.add(item.intelId);
-    seenSlots.add(item.slotIndex);
-    // The unsigned detail the service acts on must be usable: a lead's mission id (what its voucher unlocks), a tip's tier.
-    if (VOUCHER_CATEGORIES.includes(item.category) && !(typeof item.detail.mission_id === 'string' && UUID_PATTERN.test(item.detail.mission_id))) {
-      throw new IntelPoolError('A lead of the pool names no mission.');
-    }
-    if (item.category === INTEL_CATEGORIES.INTEL_CATEGORY_OUTFITTER_TIP && !(Number.isInteger(item.detail.tier) && item.detail.tier >= 1 && item.detail.tier <= 5)) {
-      throw new IntelPoolError('An outfitter tip of the pool has no tier.');
-    }
-    if (!verifyIntelItem(item, publicKey)) throw new IntelPoolError('An item of the pool is not signed by the engine.');
+  if (item.slotIndex >= POOL_MAX_ITEMS || !BASE_COSTS_CREDITS.includes(item.baseCostCredits) || item.isFreeAmbient !== (item.baseCostCredits === 0)) {
+    throw new IntelItemError('The intel item has terms the engine does not issue.');
   }
-  if (items.filter((item) => item.isFreeAmbient).length !== FREE_AMBIENT_COUNT) {
-    throw new IntelPoolError(`The pool must hold exactly ${FREE_AMBIENT_COUNT} free ambient items.`);
+  if (item.hourEpoch !== hourEpochOf(nowMs)) throw new IntelItemError('That pool has rotated.', 'intel_pool_expired');
+  if (item.expiresAtMs !== (item.hourEpoch + 1) * INTEL_HOUR_MS || item.issuedAtMs > nowMs + ISSUED_AT_SKEW_MS) {
+    throw new IntelItemError('The intel item has a time outside its hour.');
   }
-  return items.sort((a, b) => a.slotIndex - b.slotIndex);
+  return item;
 }

@@ -337,12 +337,17 @@ export default async function missionsRoutes(fastify) {
       // A classified offer is redeemed once, with the unexpired voucher the pilot gathered it with (POST /game/intel/gather).
       let unlock = null;
       if (isClassified(offer)) {
-        unlock = await tx.playerMissionUnlock.findUnique({ where: { playerId_missionId: { playerId, missionId: offer.mission_id } } });
-        if (!unlock || unlock.intelId !== offer.intel_lead_id || !Buffer.from(unlock.voucherNonce).equals(Buffer.from(offer.unlock_voucher_nonce, 'base64'))) {
+        // Gathering never learns the mission (the engine redacts the lead), so the unlock is the one for the offer's lead.
+        unlock = await tx.playerMissionUnlock.findUnique({ where: { playerId_intelId: { playerId, intelId: offer.intel_lead_id } } });
+        if (!unlock || !Buffer.from(unlock.voucherNonce).equals(Buffer.from(offer.unlock_voucher_nonce, 'base64'))) {
           return fail(403, 'You hold no intel unlock for this classified mission.', { code: 'intel_unlock_required' });
         }
         if (unlock.isAccepted) return fail(409, 'This intel unlock has already been used.', { code: 'intel_unlock_used' });
         if (unlock.expiresAt.getTime() <= nowMs) return fail(410, 'This intel unlock has expired.', { code: 'intel_unlock_expired' });
+        // A mission is redeemed through one unlock only, however many leads the pilot gathered for it.
+        if (await tx.playerMissionUnlock.findFirst({ where: { playerId, missionId: offer.mission_id }, select: { id: true } })) {
+          return fail(409, 'You have already redeemed an intel unlock for this mission.', { code: 'mission_already_unlocked' });
+        }
       }
       if (isCovert(offer) && held.some((row) => isCovert(row.offer))) {
         return fail(409, 'At most one covert mission can be held at once. Complete or abandon it first.', {
@@ -393,7 +398,7 @@ export default async function missionsRoutes(fastify) {
           acceptedAt
         }
       });
-      if (unlock) await tx.playerMissionUnlock.update({ where: { id: unlock.id }, data: { isAccepted: true } });
+      if (unlock) await tx.playerMissionUnlock.update({ where: { id: unlock.id }, data: { isAccepted: true, missionId: offer.mission_id } });
       const passengersAboard = attributes.passengers_aboard + offer.required_berths;
       await tx.spaceship.update({ where: { id: ship.id }, data: { passengersAboard } });
       // The crew as it now stands: a covert contract costs the By-the-Book their morale, and a Loyalist
