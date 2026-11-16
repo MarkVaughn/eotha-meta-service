@@ -5,9 +5,9 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 ## Architecture & Features
 
 - **Asymmetric Authentication (Ed25519 / EdDSA)**: Mints cryptographic JWT tokens signed by a private key. The public key is shared out-of-band with the Rust RTSE cluster for zero-latency local verification without database queries.
-- **Better Auth identity layer**: [Better Auth](https://better-auth.com) owns users, sessions, linked accounts and the anonymous-guest flow inside this Fastify app and database. Its `user` is the existing `Player` model, so the player id stays the one stable identity across guest, email and (later) Apple/Google accounts. See [Authentication model](#authentication-model).
+- **Better Auth identity layer**: [Better Auth](https://better-auth.com) owns users, sessions, linked accounts and the anonymous-guest flow inside this Fastify app and database. Its `user` is the existing `Player` model, so the player id stays the one stable identity across guest, email and Google (Apple later) accounts. See [Authentication model](#authentication-model).
 - **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing. A pilot created by dev login (and an existing dev pilot that has never been granted, holds 0 credits and has no upgraded components) receives `DEV_STARTING_CREDITS` (default 20,000) exactly once, recorded in `Player.devCreditsGrantedAt`, so ship upgrades can be bought; later logins never add more, and guests, linked and registered accounts never get it.
-- **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`.
+- **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`. `production` turns the dev login and `POST /ship/dev/passengers` off; see [Running the demo with `NODE_ENV=production`](#running-the-demo-with-node_envproduction).
 - **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
 - **Separate engine claim key**: Engine-signed claims (mission offers and completion, planet and system charts, docked receipts, cargo manifests and sale records) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
 - **Password Hashing**: argon2id. Legacy unsalted SHA-256 hashes still verify and are upgraded to argon2id on the next successful login.
@@ -129,7 +129,13 @@ HOST="0.0.0.0"
 # REFRESH_TOKEN_TTL_DAYS=30
 # SESSION_TTL_DAYS=90
 # DEV_STARTING_CREDITS=20000  # one-time credits for a new /auth/dev-login pilot (development only)
-# BETTER_AUTH_URL=https://meta.example.com
+# Public base URL of the service as browsers reach it, including a proxy path prefix (see "Sign in with Google")
+# BETTER_AUTH_URL=https://demo.eotha.com/api
+# Sign in with Google: on only when both are set (see "Sign in with Google")
+# GOOGLE_CLIENT_ID=
+# GOOGLE_CLIENT_SECRET=
+# Lets guest and password sign-in run without device attestation outside development (a browser demo)
+# ALLOW_UNATTESTED_SIGNIN=true
 # BETTER_AUTH_SECRET=  # defaults to a key derived from keys/private.pem
 # Public key that engine-signed claims verify against (see "Engine claim key")
 # CLAIM_PUBLIC_KEY=    # 64 hex characters, the raw Ed25519 public key
@@ -240,6 +246,8 @@ The build fails if the Prisma query engine for the platform (`linux-arm64-openss
   - Body `{ refreshToken }`. Ends that login.
 - `POST /auth/link/email` (Protected, guests only)
   - Body `{ email, password, callsign? }`. Links an email and password to the calling guest, keeping the player id, so nothing is lost and guest-only restrictions lift (see [Guest hull lock](#guest-hull-lock)). Returns a fresh access token.
+- `POST /auth/google/start`, `GET /auth/callback/google`, `POST /auth/google/exchange` (only when Google is configured)
+  - Sign in with Google for a browser client; see [Sign in with Google](#sign-in-with-google).
 - `GET /.well-known/jwks.json`
   - The Ed25519 public key as a JWK Set (`kid` is the RFC 7638 thumbprint, also set in every token header).
 
@@ -797,11 +805,51 @@ Every response that changes state (retire, doctrine, captain jury-rig) carries `
 - *Refresh token*: opaque, single-use, stored hashed. Every login creates a Better Auth session; that session's refresh tokens form the token family. Each refresh consumes the presented token and issues its successor. Presenting a consumed token means a copy exists, so the family is revoked and the Better Auth session deleted. A refresh also fails once the session expires (`SESSION_TTL_DAYS`, default 90) or is logged out. Better Auth has no built-in rotation or reuse detection, so this is implemented in `src/lib/refresh-tokens.js`.
 - `/auth/dev-login` keeps minting its 24-hour token, because the dev client has no refresh flow.
 
-**Linking.** `POST /auth/link/email` converts a guest in place (same id, `isAnonymous` becomes false). The conversion is a single guarded update, so concurrent link attempts cannot both win.
+**Linking.** `POST /auth/link/email` and Google (below) convert a guest in place (same id, `isAnonymous` becomes false). The conversion is a single guarded update (`convertGuest` in `src/lib/identity.js`), so concurrent link attempts cannot both win.
+
+### Sign in with Google
+
+Google is a Better Auth social provider (`src/lib/auth.js`), **on only when both `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are set**. With neither set the provider is off, the three routes below do not exist (`404`), and nothing else changes, so development and tests are unaffected. Setting only one of them stops startup, as does enabling Google in production without `BETTER_AUTH_URL`.
+
+**One public base URL.** `BETTER_AUTH_URL` is the service's public address as browsers reach it, *including* the path a reverse proxy adds. The demo serves the single-page client and the API from one origin and the proxy strips an `/api` prefix, so it is `https://demo.eotha.com/api` while this service sees plain `/auth/...`. Everything derives from it: Better Auth's base is `<BETTER_AUTH_URL>/auth`, Google's redirect URI is `<BETTER_AUTH_URL>/auth/callback/google`, and the browser is returned to the client at the URL's origin (`https://demo.eotha.com`). Unset, it is `http://localhost:<PORT>`.
+
+**Register this redirect URI in Google Cloud** (OAuth client of type *Web application*, under *Authorized redirect URIs*), and nothing else:
+
+```
+https://demo.eotha.com/api/auth/callback/google
+```
+
+(For local development with `BETTER_AUTH_URL=http://localhost:3000`, add `http://localhost:3000/auth/callback/google`.) No JavaScript origin is needed: the token exchange is server to server.
+
+**The browser flow** (the client is on the same origin as the API, so `/api/...` below is `/...` on this service):
+
+1. `POST /api/auth/google/start` with body `{}` (optionally `{ returnTo: "/path?query" }`, a same-origin path, default `/`; anything else is `400 invalid_return_to`). Anonymous: signs in or signs up. With the guest's `Authorization: Bearer <access token>` (or `X-Eotha-Token`): links Google to that guest instead; a player that is not a guest gets `409 already_linked`. Answers `{ url }` and sets Better Auth's state cookie; call it with a same-origin `fetch` (so the cookie is kept) and then set `window.location = url`.
+2. Google sends the browser to `GET /api/auth/callback/google`. This service finishes the sign-in or link and redirects the browser to `<origin><returnTo>#eotha_auth_code=<code>`, or `#eotha_auth_error=<error>` on failure (`access_denied` when the user cancels at Google, `state_mismatch` when the browser lacks the start cookie, `account_already_linked_to_different_user` when that Google account belongs to another player, and so on). Better Auth's own session is never given to the browser.
+3. The client reads the fragment, clears it (`history.replaceState`), and calls `POST /api/auth/google/exchange` with `{ code }`. It gets the same body as guest, login and refresh: `{ token, refreshToken, expiresIn, created, player: { id, callsign, anonymous } }` (`created` is true only for a brand-new account). An unknown, used or expired code is `401 invalid_code`.
+
+**Why a one-time code in the fragment.** The long-lived refresh token must not sit in a URL, where proxies, access logs, browser history and `Referer` headers keep it. The fragment is never sent to any server, and what it carries is only a 256-bit random code that is valid for 60 seconds, single use (an atomic delete, so concurrent exchanges cannot both win) and stored only as a SHA-256 in `auth_verification`. The access and refresh tokens come back in the exchange response body, which is not cached (`Cache-Control: no-store`). The callback answers with `Referrer-Policy: no-referrer`.
+
+**Players.** A new Google user becomes a player with a generated `Pilot-xxxxxxxxxxxx` callsign (never the Google profile name, which is not unique or safe to publish), their Google email and no password. A returning Google user resolves to the same player through the linked `google` account row, from any browser. Google never attaches itself to an existing email/password player just because the emails match (`disableImplicitLinking`); that is refused with an error in the fragment.
+
+**Linking a guest in place.** The guest's start call carries its access token; Better Auth links the Google account to that player and the `account.create.after` hook runs the same guarded `convertGuest` update as `POST /auth/link/email`. The player id, ship, credits and every other row are untouched, `isAnonymous` becomes false, the guest hull lock lifts, and the exchange returns a session for the same player id. The guest's device binding stays, so `POST /auth/guest` from that device answers `409 device_account_linked`: the client signs in with Google instead.
+
+The Google call itself is mocked in `tests/google-signin.test.js`; nothing in the test suite reaches Google.
+
+### Running the demo with `NODE_ENV=production`
+
+`NODE_ENV=production` (also the default when unset) switches off exactly two things: `GET /auth/dev-login` and `POST /ship/dev/passengers` (`404`). Also in production, [device attestation](#device-attestation) refuses guest and password sign-in until a verifier is registered, which a browser demo cannot satisfy. For the demo set **`ALLOW_UNATTESTED_SIGNIN=true`**: it lets `POST /auth/guest` and `POST /auth/login` run with no verifier registered, exactly as development does (a registered verifier is still enforced, and startup logs a warning). It is off by default.
+
+What a production guest or Google player still hits, because it was dev-login-only:
+
+- **No starting credits.** `DEV_STARTING_CREDITS` is granted only by dev login, so a guest or Google player starts with `0` credits and cannot buy upgrades until it earns credits.
+- **No harbor or spawn point.** Only dev login creates the pilot's `SpaceHarbor`; other players' tokens carry the default `home_h3` (`881f1d4887fffff`).
+- **Guest limits** (apply in every environment): guests cannot upgrade the `HULL` (`403 guest_hull_locked`) or buy a `LANDER` (`403 lander_restricted_guest_or_t1`); linking Google or an email lifts both, keeping the same player. Every upgrade also needs a docked receipt from the engine.
+- **No `gateway_ws_url`.** Only dev login returns it; guest, Google and refresh responses do not, so the client takes the gateway address from its own configuration.
+- **Dev client conveniences** (callsign choice, the 24-hour dev token without refresh) exist only for dev login.
 
 ### Guest hull lock
 
-Guests cannot upgrade the `HULL` component: `POST /ship/upgrade` refuses it with `403` and `{ "code": "guest_hull_locked" }`; nothing is charged or changed. Other components upgrade as usual. Whether a player is a guest is read server-side from the identity record (`Player.isAnonymous`) on every request, never from the token or the request body, and the access-token claims are unchanged, so the RTSE sees exactly what it did before. Linking an account (email today, Apple/Google later) keeps the same player id and lifts the lock immediately, even for tokens issued while the player was still a guest.
+Guests cannot upgrade the `HULL` component: `POST /ship/upgrade` refuses it with `403` and `{ "code": "guest_hull_locked" }`; nothing is charged or changed. Other components upgrade as usual. Whether a player is a guest is read server-side from the identity record (`Player.isAnonymous`) on every request, never from the token or the request body, and the access-token claims are unchanged, so the RTSE sees exactly what it did before. Linking an account (email or Google today, Apple later) keeps the same player id and lifts the lock immediately, even for tokens issued while the player was still a guest.
 
 ### Device attestation
 
@@ -811,12 +859,12 @@ Guests cannot upgrade the `HULL` component: `POST /ship/upgrade` refuses it with
 
 Verifiers implement `{ platform, verify({ token, deviceId }) => { ok } }` (`src/lib/attestation/index.js`) and are registered with `fastify.attestation.register(...)` or the plugin's `verifiers` option. `createPlayIntegrityVerifier` implements the Play Integrity verdict policy (package name, `PLAY_RECOGNIZED`, `MEETS_DEVICE_INTEGRITY`, freshness, nonce = base64url SHA-256 of the device id); the Google call that decodes the token is injected as `decode`. **No verifier is registered by default**, so a deployment must register one before clients can sign in. App Attest / DeviceCheck verifiers are not written yet.
 
-### Linking Apple and Google later
+### Linking Apple and native Google later
 
-Nothing for Apple or Google is configured or registered today. The wiring is in place:
+Browser Google sign-in exists (see [Sign in with Google](#sign-in-with-google)); Apple and the native Android Google ID-token flow do not. The wiring is in place:
 
 1. **Apple**: add `socialProviders: { apple: { clientId, clientSecret, appBundleIdentifier } }` to `createAuth` in `src/lib/auth.js` (credentials from env) and add an attested, authenticated route that calls `auth.api.linkSocialAccount` with the iOS `identityToken` for the calling player (`linkSocial`, not `signIn.social`, so the guest keeps its id; Better Auth's sign-in path would create a second user and delete the guest).
-2. **Google**: the same with `socialProviders.google` and the Android ID token.
+2. **Native Google**: the same with the Android ID token against the already configured `socialProviders.google` (its client id must then accept that token's audience).
 3. **Play Games**: Google's general ID token does not carry the Play Games `playerId`, so it needs a small Better Auth plugin that exchanges the `serverAuthCode`, reads `playerId` from `games/v1/players/me` and records an `account` with `providerId: 'play-games'` for the calling guest (rejecting an identity already linked to another player; the `(providerId, accountId)` unique key backs this up).
 
 Whichever way the account row is created, the `databaseHooks.account.create.after` hook in `src/lib/auth.js` calls `linkExternalAccount`, which promotes the guest, lifting the hull lock. A returning player on a new device signs in with the provider identity instead of linking.

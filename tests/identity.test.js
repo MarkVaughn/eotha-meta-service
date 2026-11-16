@@ -473,6 +473,28 @@ describe('device attestation', () => {
     await dev.close();
   });
 
+  test('ALLOW_UNATTESTED_SIGNIN lets an empty registry through outside development, but a registered verifier still applies', async () => {
+    const build = async (opts) => {
+      const server = Fastify();
+      await server.register(attestationPlugin, { development: undefined, ...opts });
+      server.post('/guarded', { preHandler: server.requireAttestation }, async () => ({ ok: true }));
+      await server.ready();
+      return server;
+    };
+    const strict = await build({ allowUnattested: false });
+    assert.equal((await strict.inject({ method: 'POST', url: '/guarded', payload: {} })).statusCode, 503);
+    await strict.close();
+
+    const open = await build({ allowUnattested: true });
+    assert.equal((await open.inject({ method: 'POST', url: '/guarded', payload: {} })).statusCode, 200);
+    await open.close();
+
+    const verified = await build({ allowUnattested: true, verifiers: [attestationDouble] });
+    assert.equal((await verified.inject({ method: 'POST', url: '/guarded', payload: {} })).statusCode, 403);
+    assert.equal((await verified.inject({ method: 'POST', url: '/guarded', headers: attestationHeaders, payload: {} })).statusCode, 200);
+    await verified.close();
+  });
+
   test('registering an unknown platform or a verifier without verify() is rejected', async () => {
     const server = Fastify();
     await server.register(attestationPlugin, { development: false });

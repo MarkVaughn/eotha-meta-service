@@ -68,6 +68,25 @@ export const guestSchema = {
   response: { 200: sessionResponse }
 };
 
+export const googleStartSchema = {
+  body: {
+    type: ['object', 'null'],
+    properties: { returnTo: { type: 'string', maxLength: 512 } }
+  },
+  response: {
+    200: { type: 'object', properties: { url: { type: 'string' } } }
+  }
+};
+
+export const googleExchangeSchema = {
+  body: {
+    type: 'object',
+    required: ['code'],
+    properties: { code: { type: 'string', minLength: 1, maxLength: 128 } }
+  },
+  response: { 200: sessionResponse }
+};
+
 export const refreshSchema = {
   body: {
     type: 'object',
