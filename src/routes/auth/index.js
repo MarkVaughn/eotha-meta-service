@@ -10,6 +10,7 @@ import { factionsClaim } from '../../lib/reputation.js';
 import { activeMissionClaim } from '../../lib/active-mission.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
 import { gatewayWsUrl } from '../../lib/gateway-url.js';
+import { ACCOUNT_STARTING_CREDITS } from '../../config/auth.js';
 import { DEFAULT_HARBOR } from '../../config/harbor.js';
 import { ensureHarbor, spawnPointOf } from '../../lib/harbor.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
@@ -85,6 +86,8 @@ export default async function authRoutes(fastify, opts) {
           email,
           passwordHash,
           callsign,
+          credits: ACCOUNT_STARTING_CREDITS,
+          accountCreditsGrantedAt: new Date(),
           harbor: {
             create: {
               latitude,

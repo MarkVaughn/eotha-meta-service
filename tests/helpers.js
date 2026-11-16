@@ -76,8 +76,12 @@ const created = [];
 /** Registers a player id created outside newPilot (e.g. a guest) for cleanup by closeApp. */
 export const track = (id) => created.push(id);
 
-/** Registers and logs in a fresh pilot through the public auth endpoints. */
-export async function newPilot(prefix = 'Pilot') {
+/**
+ * Registers and logs in a fresh pilot through the public auth endpoints. A registered account starts with
+ * ACCOUNT_STARTING_CREDITS; most tests want a blank balance to assert exact amounts against, so the
+ * balance is cleared unless `keepStartingCredits` is set.
+ */
+export async function newPilot(prefix = 'Pilot', { keepStartingCredits = false } = {}) {
   const suffix = randomBytes(5).toString('hex');
   const callsign = `${prefix}-${suffix}`;
   const email = `${callsign.toLowerCase()}@example.test`.replace(/[^a-z0-9@.+-]/g, '');
@@ -89,6 +93,7 @@ export async function newPilot(prefix = 'Pilot') {
   if (reg.statusCode !== 201) throw new Error(`register failed: ${reg.statusCode} ${reg.body}`);
   const { id } = json(reg);
   created.push(id);
+  if (!keepStartingCredits) await app.prisma.player.update({ where: { id }, data: { credits: 0 } });
   const login = await app.inject({
     method: 'POST',
     url: '/auth/login',

@@ -6,7 +6,7 @@ The **Eotha Meta-Game Service** (`eotha-meta-service`) is the core orchestration
 
 - **Asymmetric Authentication (Ed25519 / EdDSA)**: Mints cryptographic JWT tokens signed by a private key. The public key is shared out-of-band with the Rust RTSE cluster for zero-latency local verification without database queries.
 - **Better Auth identity layer**: [Better Auth](https://better-auth.com) owns users, sessions, linked accounts and the anonymous-guest flow inside this Fastify app and database. Its `user` is the existing `Player` model, so the player id stays the one stable identity across guest, email and Google (Apple later) accounts. See [Authentication model](#authentication-model).
-- **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing. A pilot created by dev login (and an existing dev pilot that has never been granted, holds 0 credits and has no upgraded components) receives `DEV_STARTING_CREDITS` (default 20,000) exactly once, recorded in `Player.devCreditsGrantedAt`, so ship upgrades can be bought; later logins never add more, and guests, linked and registered accounts never get it.
+- **Dev Login (`GET /auth/dev-login`)**: Development-only (`NODE_ENV=development`; not routed otherwise). Creates or reuses a persisted pilot with the given callsign and mints the same Ed25519 token a normal login would, for rapid CLI and integration testing. A pilot created by dev login (and an existing dev pilot that has never been granted, holds 0 credits and has no upgraded components) receives `DEV_STARTING_CREDITS` (default 20,000) exactly once, recorded in `Player.devCreditsGrantedAt`, so ship upgrades can be bought; later logins never add more, and guests, linked and registered accounts never get it (they have their own `ACCOUNT_STARTING_CREDITS`, see [Starting credits](#starting-credits)).
 - **`NODE_ENV`**: Defaults to `production` when unset. `npm run dev` and `.env.example` set it to `development`, the only value that enables `/auth/dev-login`. `production` turns the dev login and `POST /ship/dev/passengers` off; see [Running the demo with `NODE_ENV=production`](#running-the-demo-with-node_envproduction).
 - **Fail-Closed Signing Keys**: The service refuses to start if `keys/private.pem` or `keys/public.pem` is missing (there is no fallback secret). `KEYS_DIR` overrides the `keys/` directory.
 - **Separate engine claim key**: Engine-signed claims (mission offers and completion, planet and system charts, docked receipts, cargo manifests and sale records) are verified with a dedicated public key, `CLAIM_PUBLIC_KEY`, never with the login key in `keys/`. See [Engine claim key](#engine-claim-key).
@@ -36,7 +36,7 @@ eotha-meta-service/
 │   └── generate-keys.js        # Ed25519 keypair generation utility
 ├── src/
 │   ├── config/
-│   │   ├── auth.js             # Device-id length constants
+│   │   ├── auth.js             # Device-id length constants and the account starting credits
 │   │   ├── captain.js          # Captain leveling curve, XP table, trait catalog and prerequisites
 │   │   ├── crew.js             # Crew constants, class and rank tables, signing bonuses, wage shares, quirk catalog Q01-Q20
 │   │   ├── cargo.js            # Cargo lease rules (lot limit)
@@ -128,6 +128,7 @@ HOST="0.0.0.0"
 # ACCESS_TOKEN_TTL_SECONDS=900
 # REFRESH_TOKEN_TTL_DAYS=30
 # SESSION_TTL_DAYS=90
+# ACCOUNT_STARTING_CREDITS=500  # credits a new email or Google account starts with, and a guest receives once when it links an account
 # DEV_STARTING_CREDITS=20000  # one-time credits for a new /auth/dev-login pilot (development only)
 # Public base URL of the service as browsers reach it, including a proxy path prefix (see "Sign in with Google")
 # BETTER_AUTH_URL=https://demo.eotha.com/api
@@ -234,7 +235,7 @@ The build fails if the Prisma query engine for the platform (`linux-arm64-openss
   - Development only (`NODE_ENV=development`). Grants the one-time `DEV_STARTING_CREDITS` to a dev pilot (see above). Query parameters: `callsign` (default `DevPilot`), `latitude`, `longitude`, `h3` (default `8828308281fffff`).
   - Creates or reuses the pilot (and harbor) in the database; returns a signed Ed25519 JWT token, the WebSocket gateway URL (`gateway_ws_url`, see [Gateway address](#gateway-address)), and the pilot profile.
 - `POST /auth/register`
-  - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index.
+  - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index. The new account starts with `ACCOUNT_STARTING_CREDITS` (default 500; see [Starting credits](#starting-credits)).
 - `POST /auth/guest` (attested)
   - Body `{ deviceId }` (a client-generated random id, 16-128 chars, kept in the device keychain). The first call from a device creates an anonymous player; later calls resume it. Returns `{ token, refreshToken, expiresIn, gateway_ws_url, created, player }` (see [Session response](#session-response)). Once the guest has linked an account the device id is refused with `409 device_account_linked`; sign in with the account instead.
 - `POST /auth/login` (attested)
@@ -245,7 +246,7 @@ The build fails if the Prisma query engine for the platform (`linux-arm64-openss
 - `POST /auth/logout`
   - Body `{ refreshToken }`. Ends that login.
 - `POST /auth/link/email` (Protected, guests only)
-  - Body `{ email, password, callsign? }`. Links an email and password to the calling guest, keeping the player id, so nothing is lost and guest-only restrictions lift (see [Guest hull lock](#guest-hull-lock)). Returns a fresh access token.
+  - Body `{ email, password, callsign? }`. Links an email and password to the calling guest, keeping the player id, so nothing is lost and guest-only restrictions lift (see [Guest hull lock](#guest-hull-lock)). The guest receives `ACCOUNT_STARTING_CREDITS` once, with the conversion (see [Starting credits](#starting-credits)). Returns a fresh access token.
 - `POST /auth/google/start`, `GET /auth/callback/google`, `POST /auth/google/exchange` (only when Google is configured)
   - Sign in with Google for a browser client; see [Sign in with Google](#sign-in-with-google).
 - `GET /.well-known/jwks.json`
@@ -807,6 +808,14 @@ Every response that changes state (retire, doctrine, captain jury-rig) carries `
 
 **Linking.** `POST /auth/link/email` and Google (below) convert a guest in place (same id, `isAnonymous` becomes false). The conversion is a single guarded update (`convertGuest` in `src/lib/identity.js`), so concurrent link attempts cannot both win.
 
+### Starting credits
+
+Every account starts with `ACCOUNT_STARTING_CREDITS` (`src/config/auth.js`, env `ACCOUNT_STARTING_CREDITS`, default `500`); a guest starts with `0`.
+- A new email account (`POST /auth/register`) and a new Google player have the credits from creation, set in the insert itself (the Better Auth `user.create.before` hook in `src/lib/auth.js` for Google).
+- A guest receives them once when it links an account, `POST /auth/link/email` or Google. The credit increment is part of the same guarded `UPDATE` that sets `isAnonymous = false` (`convertGuest`), so it commits or fails with the conversion: a retry, a double click or a concurrent link finds the player already converted and grants nothing, and a rejected link (a taken email, say) grants nothing. Credits the guest already holds are kept and the grant is added to them.
+- The grant is recorded in `Player.accountCreditsGrantedAt` (null for a guest that has not linked, and for dev-login pilots), the counterpart of `devCreditsGrantedAt`. Dev login is unchanged: it grants only `DEV_STARTING_CREDITS`, never the account credits.
+- Existing accounts are not backfilled; only accounts created, and guests linked, from this change on are granted.
+
 ### Sign in with Google
 
 Google is a Better Auth social provider (`src/lib/auth.js`), **on only when both `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are set**. With neither set the provider is off, the three routes below do not exist (`404`), and nothing else changes, so development and tests are unaffected. Setting only one of them stops startup, as does enabling Google in production without `BETTER_AUTH_URL`.
@@ -850,7 +859,7 @@ The Google call itself is mocked in `tests/google-signin.test.js`; nothing in th
 
 Guests and Google players get a home harbor, a spawn point and the gateway address just as dev login pilots do (see [Session response](#session-response)). What a production guest or Google player still hits:
 
-- **No starting credits.** `DEV_STARTING_CREDITS` is granted only by dev login, so a guest or Google player starts with `0` credits and cannot buy upgrades until it earns credits.
+- **Starting credits.** A new Google player starts with `ACCOUNT_STARTING_CREDITS` (500); a guest starts with `0` and receives them when it links an account. `DEV_STARTING_CREDITS` is granted only by dev login. See [Starting credits](#starting-credits).
 - **Guest limits** (apply in every environment): guests cannot upgrade the `HULL` (`403 guest_hull_locked`) or buy a `LANDER` (`403 lander_restricted_guest_or_t1`); linking Google or an email lifts both, keeping the same player. Every upgrade also needs a docked receipt from the engine.
 - **Dev client conveniences** (callsign choice, the 24-hour dev token without refresh) exist only for dev login.
 

@@ -47,6 +47,8 @@ const envSchema = z.object({
   // half by. Never the login or claim key; unset, no intel can be gathered.
   INTEL_VOUCHER_PRIVATE_KEY_FILE: optionalString(z.string().min(1)),
   INTEL_VOUCHER_KEY_ID: z.string().min(1).default('eotha-meta-service-voucher-v1'),
+  // Credits every registered account starts with: a new email or Google account at creation, a guest once when it links one.
+  ACCOUNT_STARTING_CREDITS: z.coerce.number().int().min(0).default(500),
   // Credits a development-login pilot receives once, on its first dev login (never in production).
   DEV_STARTING_CREDITS: z.coerce.number().int().min(0).default(20_000),
   // Full WebSocket URL of the RTSE gateway handed to clients (a fixed staging host, say). Unset, it is
