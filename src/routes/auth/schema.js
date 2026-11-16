@@ -1,3 +1,4 @@
+import { DEFAULT_HARBOR } from '../../config/harbor.js';
 import { DEVICE_ID_MAX_LENGTH, DEVICE_ID_MIN_LENGTH } from '../../config/auth.js';
 
 export const registerSchema = {
@@ -24,6 +25,15 @@ export const registerSchema = {
   }
 };
 
+const spawnPointSchema = {
+  type: 'object',
+  properties: {
+    latitude: { type: 'number' },
+    longitude: { type: 'number' },
+    h3_index: { type: 'string' }
+  }
+};
+
 // Everything a sign-in, guest login or refresh hands back: a short-lived access JWT (the one the
 // RTSE verifies), the rotating refresh token, and the access token's lifetime in seconds.
 const sessionResponse = {
@@ -32,13 +42,15 @@ const sessionResponse = {
     token: { type: 'string' },
     refreshToken: { type: 'string' },
     expiresIn: { type: 'integer' },
+    gateway_ws_url: { type: 'string' },
     created: { type: 'boolean' },
     player: {
       type: 'object',
       properties: {
         id: { type: 'string' },
         callsign: { type: 'string' },
-        anonymous: { type: 'boolean' }
+        anonymous: { type: 'boolean' },
+        spawn_point: spawnPointSchema
       }
     }
   }
@@ -138,9 +150,9 @@ export const devLoginSchema = {
     type: 'object',
     properties: {
       callsign: { type: 'string', default: 'DevPilot', minLength: 1 },
-      latitude: { type: 'string', default: '37.7749', pattern: '^-?\\d+(\\.\\d+)?$' },
-      longitude: { type: 'string', default: '-122.4194', pattern: '^-?\\d+(\\.\\d+)?$' },
-      h3: { type: 'string', default: '8828308281fffff', maxLength: 15 }
+      latitude: { type: 'string', default: String(DEFAULT_HARBOR.latitude), pattern: '^-?\\d+(\\.\\d+)?$' },
+      longitude: { type: 'string', default: String(DEFAULT_HARBOR.longitude), pattern: '^-?\\d+(\\.\\d+)?$' },
+      h3: { type: 'string', default: DEFAULT_HARBOR.h3Index, maxLength: 15 }
     }
   },
   response: {
@@ -173,14 +185,7 @@ export const devLoginSchema = {
                 ship_attributes: { type: 'object', additionalProperties: { type: 'number' } }
               }
             },
-            spawn_point: {
-              type: 'object',
-              properties: {
-                latitude: { type: 'number' },
-                longitude: { type: 'number' },
-                h3_index: { type: 'string' }
-              }
-            }
+            spawn_point: spawnPointSchema
           }
         }
       }
