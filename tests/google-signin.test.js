@@ -84,6 +84,20 @@ const newGuest = async () => {
 };
 const bearer = (session) => ({ authorization: `Bearer ${session.token}` });
 
+describe('Sign in with Google: playable session', () => {
+  test('a new Google player gets the default home harbor, the gateway address and 0 credits', async () => {
+    const session = await signInWithGoogle(newProfile());
+    assert.equal(session.created, true);
+    assert.equal(session.gateway_ws_url, 'ws://localhost:8080/session');
+    assert.deepEqual(session.player.spawn_point, { latitude: 37.7749, longitude: -122.4194, h3_index: '8828308281fffff' });
+    assert.equal(app.jwt.verify(session.token).home_h3, '8828308281fffff');
+
+    const row = await app.prisma.player.findUnique({ where: { id: session.player.id }, include: { harbor: true } });
+    assert.equal(row.harbor.h3Index, '8828308281fffff');
+    assert.equal(row.credits, 0);
+  });
+});
+
 describe('Sign in with Google: start', () => {
   test('hands back the Google consent URL whose redirect URI is the public base URL plus /auth/callback/google', async () => {
     const res = await start();
@@ -120,7 +134,7 @@ describe('Sign in with Google: new and returning players', () => {
     const profile = newProfile();
     const session = await signInWithGoogle(profile);
 
-    assert.deepEqual(Object.keys(session).sort(), ['created', 'expiresIn', 'player', 'refreshToken', 'token']);
+    assert.deepEqual(Object.keys(session).sort(), ['created', 'expiresIn', 'gateway_ws_url', 'player', 'refreshToken', 'token']);
     assert.equal(session.created, true);
     assert.equal(session.player.anonymous, false);
     assert.match(session.player.callsign, /^Pilot-[0-9a-f]{12}$/, 'the callsign is never taken from the Google profile');

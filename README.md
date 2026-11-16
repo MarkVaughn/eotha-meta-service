@@ -236,12 +236,12 @@ The build fails if the Prisma query engine for the platform (`linux-arm64-openss
 - `POST /auth/register`
   - Registers a new player with an initial Space Harbor anchor coordinate and Uber H3 cell index.
 - `POST /auth/guest` (attested)
-  - Body `{ deviceId }` (a client-generated random id, 16-128 chars, kept in the device keychain). The first call from a device creates an anonymous player; later calls resume it. Returns `{ token, refreshToken, expiresIn, created, player }`. Once the guest has linked an account the device id is refused with `409 device_account_linked`; sign in with the account instead.
+  - Body `{ deviceId }` (a client-generated random id, 16-128 chars, kept in the device keychain). The first call from a device creates an anonymous player; later calls resume it. Returns `{ token, refreshToken, expiresIn, gateway_ws_url, created, player }` (see [Session response](#session-response)). Once the guest has linked an account the device id is refused with `409 device_account_linked`; sign in with the account instead.
 - `POST /auth/login` (attested)
   - Body `{ email, password, deviceId }`. `deviceId` (16-128 chars) is required because the attestation nonce is bound to it.
-  - Validates credentials and returns `{ token, refreshToken, expiresIn, player }`.
+  - Validates credentials and returns `{ token, refreshToken, expiresIn, gateway_ws_url, player }` (see [Session response](#session-response)).
 - `POST /auth/refresh`
-  - Body `{ refreshToken }`. Rotates the refresh token and returns a new access token. A token that was already rotated revokes its whole family (`401 refresh_token_reused`).
+  - Body `{ refreshToken }`. Rotates the refresh token and returns a new access token in the same shape as login (see [Session response](#session-response)). A token that was already rotated revokes its whole family (`401 refresh_token_reused`).
 - `POST /auth/logout`
   - Body `{ refreshToken }`. Ends that login.
 - `POST /auth/link/email` (Protected, guests only)
@@ -363,7 +363,7 @@ All Protected. See [Factions](#factions-1).
 
 ### Gateway address
 
-`/auth/dev-login` returns the gateway WebSocket address as `gateway_ws_url`, and `POST /game/session` defaults `rtseHost` to a gateway host. Both come from configuration, never from the request:
+`/auth/dev-login`, `/auth/guest`, `/auth/login`, `/auth/refresh` and `/auth/google/exchange` return the gateway WebSocket address as `gateway_ws_url`, and `POST /game/session` defaults `rtseHost` to a gateway host. Both come from configuration, never from the request:
 
 1. `GATEWAY_WS_URL`, when set, is returned as is (`rtseHost` is its host). Use it to pin a fixed staging or production host, e.g. `wss://gateway.example.com/session`.
 2. Otherwise it is `ws://localhost:8080/session` (`rtseHost` `localhost:8080`), the local Minikube gateway port.
@@ -825,7 +825,7 @@ https://demo.eotha.com/api/auth/callback/google
 
 1. `POST /api/auth/google/start` with body `{}` (optionally `{ returnTo: "/path?query" }`, a same-origin path, default `/`; anything else is `400 invalid_return_to`). Anonymous: signs in or signs up. With the guest's `Authorization: Bearer <access token>` (or `X-Eotha-Token`): links Google to that guest instead; a player that is not a guest gets `409 already_linked`. Answers `{ url }` and sets Better Auth's state cookie; call it with a same-origin `fetch` (so the cookie is kept) and then set `window.location = url`.
 2. Google sends the browser to `GET /api/auth/callback/google`. This service finishes the sign-in or link and redirects the browser to `<origin><returnTo>#eotha_auth_code=<code>`, or `#eotha_auth_error=<error>` on failure (`access_denied` when the user cancels at Google, `state_mismatch` when the browser lacks the start cookie, `account_already_linked_to_different_user` when that Google account belongs to another player, and so on). Better Auth's own session is never given to the browser.
-3. The client reads the fragment, clears it (`history.replaceState`), and calls `POST /api/auth/google/exchange` with `{ code }`. It gets the same body as guest, login and refresh: `{ token, refreshToken, expiresIn, created, player: { id, callsign, anonymous } }` (`created` is true only for a brand-new account). An unknown, used or expired code is `401 invalid_code`.
+3. The client reads the fragment, clears it (`history.replaceState`), and calls `POST /api/auth/google/exchange` with `{ code }`. It gets the same body as guest, login and refresh: `{ token, refreshToken, expiresIn, gateway_ws_url, created, player: { id, callsign, anonymous, spawn_point } }` (`created` is true only for a brand-new account). An unknown, used or expired code is `401 invalid_code`.
 
 **Why a one-time code in the fragment.** The long-lived refresh token must not sit in a URL, where proxies, access logs, browser history and `Referer` headers keep it. The fragment is never sent to any server, and what it carries is only a 256-bit random code that is valid for 60 seconds, single use (an atomic delete, so concurrent exchanges cannot both win) and stored only as a SHA-256 in `auth_verification`. The access and refresh tokens come back in the exchange response body, which is not cached (`Cache-Control: no-store`). The callback answers with `Referrer-Policy: no-referrer`.
 
@@ -835,16 +835,23 @@ https://demo.eotha.com/api/auth/callback/google
 
 The Google call itself is mocked in `tests/google-signin.test.js`; nothing in the test suite reaches Google.
 
+### Session response
+
+`POST /auth/guest`, `POST /auth/login`, `POST /auth/refresh` and `POST /auth/google/exchange` all return `{ token, refreshToken, expiresIn, gateway_ws_url, player: { id, callsign, anonymous, spawn_point } }` (plus `created` for guest and Google):
+
+- **Home harbor and spawn point.** A player created without a `SpaceHarbor` (a guest or a Google player) is given one the first time a session is issued, at the same default location dev login uses: latitude `37.7749`, longitude `-122.4194`, H3 cell `8828308281fffff`. The token's `home_h3` claim is that cell, and `spawn_point` (`{ latitude, longitude, h3_index }`, the shape dev login returns) is the harbor. Players that already have a harbor, whether registered with one or created earlier, keep it unchanged; a guest created before this existed gets the default on its next login or refresh. Linking an email or Google account keeps the guest's harbor.
+- **`gateway_ws_url`.** The engine WebSocket address, from the same configuration as dev login (`GATEWAY_WS_URL`, else the local default; see [Gateway address](#gateway-address)), never from the request.
+- **Starting credits are unchanged.** Only dev login grants `DEV_STARTING_CREDITS`; new guests and Google players still start with `0` credits.
+- Dev login is unchanged. `POST /auth/link/email` still returns only a fresh token (no `gateway_ws_url`).
+
 ### Running the demo with `NODE_ENV=production`
 
 `NODE_ENV=production` (also the default when unset) switches off exactly two things: `GET /auth/dev-login` and `POST /ship/dev/passengers` (`404`). Also in production, [device attestation](#device-attestation) refuses guest and password sign-in until a verifier is registered, which a browser demo cannot satisfy. For the demo set **`ALLOW_UNATTESTED_SIGNIN=true`**: it lets `POST /auth/guest` and `POST /auth/login` run with no verifier registered, exactly as development does (a registered verifier is still enforced, and startup logs a warning). It is off by default.
 
-What a production guest or Google player still hits, because it was dev-login-only:
+Guests and Google players get a home harbor, a spawn point and the gateway address just as dev login pilots do (see [Session response](#session-response)). What a production guest or Google player still hits:
 
 - **No starting credits.** `DEV_STARTING_CREDITS` is granted only by dev login, so a guest or Google player starts with `0` credits and cannot buy upgrades until it earns credits.
-- **No harbor or spawn point.** Only dev login creates the pilot's `SpaceHarbor`; other players' tokens carry the default `home_h3` (`881f1d4887fffff`).
 - **Guest limits** (apply in every environment): guests cannot upgrade the `HULL` (`403 guest_hull_locked`) or buy a `LANDER` (`403 lander_restricted_guest_or_t1`); linking Google or an email lifts both, keeping the same player. Every upgrade also needs a docked receipt from the engine.
-- **No `gateway_ws_url`.** Only dev login returns it; guest, Google and refresh responses do not, so the client takes the gateway address from its own configuration.
 - **Dev client conveniences** (callsign choice, the 24-hour dev token without refresh) exist only for dev login.
 
 ### Guest hull lock

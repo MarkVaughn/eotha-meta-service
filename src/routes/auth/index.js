@@ -10,6 +10,8 @@ import { factionsClaim } from '../../lib/reputation.js';
 import { activeMissionClaim } from '../../lib/active-mission.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
 import { gatewayWsUrl } from '../../lib/gateway-url.js';
+import { DEFAULT_HARBOR } from '../../config/harbor.js';
+import { ensureHarbor, spawnPointOf } from '../../lib/harbor.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
 import { registerGoogleRoutes } from './google.js';
 import {
@@ -27,6 +29,9 @@ export default async function authRoutes(fastify, opts) {
   // starter here. The claims are exactly what the RTSE validates; `ttlSeconds` only overrides the
   // default token lifetime.
   async function signSession(player, { ttlSeconds } = {}) {
+    // Guests and Google players are created without a harbor; every session gets one, so the token
+    // carries the real home harbor rather than the fallback.
+    if (!player.harbor) player = { ...player, harbor: await ensureHarbor(prisma, player.id) };
     const ship = await prisma.spaceship.findFirst({
       where: { playerId: player.id, active: true },
       orderBy: { createdAt: 'asc' },
@@ -51,17 +56,18 @@ export default async function authRoutes(fastify, opts) {
     const token = ttlSeconds
       ? fastify.signWithExpiry({ ...claims, exp: Math.floor(Date.now() / 1000) + ttlSeconds })
       : fastify.jwt.sign(claims);
-    return { token, components, shipAttributes };
+    return { token, components, shipAttributes, harbor: player.harbor };
   }
 
   // The response of every login: a short-lived access token plus the refresh token that renews it.
   async function issueSession(player, refreshToken) {
-    const { token } = await signSession(player);
+    const { token, harbor } = await signSession(player);
     return {
       token,
       refreshToken,
       expiresIn: env.ACCESS_TOKEN_TTL_SECONDS,
-      player: { id: player.id, callsign: player.callsign, anonymous: player.isAnonymous }
+      gateway_ws_url: gatewayWsUrl(opts.gatewayWsUrl ?? env.GATEWAY_WS_URL),
+      player: { id: player.id, callsign: player.callsign, anonymous: player.isAnonymous, spawn_point: spawnPointOf(harbor) }
     };
   }
 
@@ -217,7 +223,7 @@ export default async function authRoutes(fastify, opts) {
   // dev client and the RTSE exercise the same code paths as production sessions.
   if (devLoginEnabled) {
     fastify.get('/dev-login', { schema: devLoginSchema }, async (request, reply) => {
-      const { callsign = 'DevPilot', latitude = '37.7749', longitude = '-122.4194', h3 = '8828308281fffff' } = request.query;
+      const { callsign = 'DevPilot', latitude = String(DEFAULT_HARBOR.latitude), longitude = String(DEFAULT_HARBOR.longitude), h3 = DEFAULT_HARBOR.h3Index } = request.query;
       const harbor = { latitude: parseFloat(latitude), longitude: parseFloat(longitude), h3Index: h3 };
 
       // The starting credits are granted exactly once per dev pilot: with the pilot's creation, or
