@@ -20,8 +20,16 @@ const envSchema = z.object({
   // Better Auth's own secret. Defaults to a key derived from the Ed25519 signing key, so every
   // replica agrees on it without extra configuration.
   BETTER_AUTH_SECRET: z.string().min(32).optional(),
-  // Public base URL of this service, handed to Better Auth (needed by the social providers added later).
-  BETTER_AUTH_URL: z.string().url().optional(),
+  // Public base URL of this service as browsers reach it, including any path a reverse proxy adds
+  // (https://demo.eotha.com/api when the proxy strips /api). Sign in with Google derives its callback
+  // (<BETTER_AUTH_URL>/auth/callback/google) and the browser's return address (the origin) from it.
+  BETTER_AUTH_URL: optionalString(z.string().url()),
+  // Sign in with Google. Both set turns the provider on; both unset leaves it off and changes nothing else.
+  GOOGLE_CLIENT_ID: optionalString(z.string().min(1)),
+  GOOGLE_CLIENT_SECRET: optionalString(z.string().min(1)),
+  // Lets POST /auth/guest and POST /auth/login run without a registered device-attestation verifier
+  // outside development (a browser demo cannot attest). Off by default; a registered verifier still applies.
+  ALLOW_UNATTESTED_SIGNIN: z.preprocess((value) => (value === '' ? undefined : value), z.enum(['true', 'false']).default('false')).transform((value) => value === 'true'),
   // Raw Ed25519 public key (64 hex characters) that engine-signed claims verify against. This is a
   // dedicated claim key pair, never the login key in KEYS_DIR; the engine holds the private half.
   CLAIM_PUBLIC_KEY: optionalString(z.string().regex(/^[0-9a-fA-F]{64}$/, 'must be 64 hex characters (a raw Ed25519 public key)')),
@@ -51,6 +59,13 @@ const envSchema = z.object({
     }
   })),
   DATABASE_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/eotha_meta?schema=public')
+}).superRefine((value, ctx) => {
+  if (Boolean(value.GOOGLE_CLIENT_ID) !== Boolean(value.GOOGLE_CLIENT_SECRET)) {
+    ctx.addIssue({ code: 'custom', path: ['GOOGLE_CLIENT_SECRET'], message: 'GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set together' });
+  }
+  if (value.GOOGLE_CLIENT_ID && !value.BETTER_AUTH_URL && value.NODE_ENV === 'production') {
+    ctx.addIssue({ code: 'custom', path: ['BETTER_AUTH_URL'], message: 'BETTER_AUTH_URL (the public base URL) is required when Sign in with Google is enabled' });
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -11,6 +11,7 @@ import { activeMissionClaim } from '../../lib/active-mission.js';
 import { hashPassword, verifyPassword, UNUSABLE_PASSWORD_HASH } from '../../lib/password.js';
 import { gatewayWsUrl } from '../../lib/gateway-url.js';
 import { RefreshError } from '../../lib/refresh-tokens.js';
+import { registerGoogleRoutes } from './google.js';
 import {
   registerSchema, loginSchema, devLoginSchema, guestSchema, refreshSchema, logoutSchema, linkEmailSchema
 } from './schema.js';
@@ -208,6 +209,9 @@ export default async function authRoutes(fastify, opts) {
       player: { id: player.id, callsign: player.callsign, anonymous: false }
     };
   });
+
+  // Endpoint 2f: Sign in with Google (only when GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set).
+  if (fastify.googleSignIn) registerGoogleRoutes(fastify, { issueSession, clientMeta });
 
   // Endpoint 3: Dev-Login (development only). Mints a real token for a persisted pilot so the
   // dev client and the RTSE exercise the same code paths as production sessions.
