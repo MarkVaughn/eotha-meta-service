@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import {
   app, attestationHeaders, closeApp, dockedReceipt, json, setCredits, track
 } from './helpers.js';
+import { ACCOUNT_STARTING_CREDITS } from '../src/config/auth.js';
 import { safeReturnTo } from '../src/lib/google-signin.js';
 
 before(async () => { await app.ready(); });
@@ -85,7 +86,7 @@ const newGuest = async () => {
 const bearer = (session) => ({ authorization: `Bearer ${session.token}` });
 
 describe('Sign in with Google: playable session', () => {
-  test('a new Google player gets the default home harbor, the gateway address and 0 credits', async () => {
+  test('a new Google player gets the default home harbor, the gateway address and the starting credits', async () => {
     const session = await signInWithGoogle(newProfile());
     assert.equal(session.created, true);
     assert.equal(session.gateway_ws_url, 'ws://localhost:8080/session');
@@ -94,7 +95,9 @@ describe('Sign in with Google: playable session', () => {
 
     const row = await app.prisma.player.findUnique({ where: { id: session.player.id }, include: { harbor: true } });
     assert.equal(row.harbor.h3Index, '8828308281fffff');
-    assert.equal(row.credits, 0);
+    assert.equal(row.credits, ACCOUNT_STARTING_CREDITS);
+    assert.ok(row.accountCreditsGrantedAt);
+    assert.equal(ACCOUNT_STARTING_CREDITS, 500);
   });
 });
 
@@ -341,7 +344,8 @@ describe('Sign in with Google: linking a guest in place', () => {
 
     const after = await app.prisma.player.findUnique({ where: { id: guest.player.id }, include: { spaceships: { include: { components: true } }, accounts: true } });
     assert.equal(after.isAnonymous, false);
-    assert.equal(after.credits, before.credits);
+    assert.equal(after.credits, before.credits + ACCOUNT_STARTING_CREDITS, 'linking grants the account credits once');
+    assert.ok(after.accountCreditsGrantedAt);
     assert.deepEqual(after.spaceships.map((s) => s.id), before.spaceships.map((s) => s.id));
     assert.deepEqual(after.accounts.map((a) => [a.providerId, a.accountId]), [['google', profile.sub]]);
     assert.equal(await app.prisma.guestDevice.count({ where: { playerId: guest.player.id } }), 1);
@@ -355,6 +359,25 @@ describe('Sign in with Google: linking a guest in place', () => {
     // And the same Google account signs the same player in from another browser.
     const again = await signInWithGoogle(profile);
     assert.equal(again.player.id, guest.player.id);
+  });
+
+  test('a guest has 0 credits until it links, then gets the account credits exactly once', async () => {
+    const guest = await newGuest();
+    const read = () => app.prisma.player.findUnique({ where: { id: guest.player.id } });
+    const asGuest = await read();
+    assert.equal(asGuest.credits, 0);
+    assert.equal(asGuest.accountCreditsGrantedAt, null);
+
+    const startRes = await start({}, bearer(guest));
+    const { callback } = await visitGoogle(startRes, newProfile());
+    const code = fragmentOf(callback).get('eotha_auth_code');
+    assert.equal((await exchange(code)).statusCode, 200);
+    assert.equal((await read()).credits, ACCOUNT_STARTING_CREDITS);
+
+    // A replayed code and a second link attempt grant nothing more.
+    assert.equal((await exchange(code)).statusCode, 401);
+    assert.equal((await start({}, bearer(guest))).statusCode, 409);
+    assert.equal((await read()).credits, ACCOUNT_STARTING_CREDITS);
   });
 
   test('an already-linked player cannot start a link, and a Google account on another player is refused', async () => {

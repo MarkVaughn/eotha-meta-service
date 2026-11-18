@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Fastify from 'fastify';
 import { app, attestationDouble, attestationHeaders, closeApp, dockedReceipt, json, keysDir, newPilot, PASSWORD } from './helpers.js';
+import { ACCOUNT_STARTING_CREDITS } from '../src/config/auth.js';
 import { DEV_STARTING_CREDITS } from '../src/config/dev.js';
 import { upgradeCost } from '../src/config/components.js';
 import prismaPlugin from '../src/plugins/prisma.js';
@@ -208,6 +209,7 @@ describe('dev login starting credits', () => {
     const created = await row(first.player.id);
     assert.equal(created.credits, DEV_STARTING_CREDITS);
     assert.ok(created.devCreditsGrantedAt);
+    assert.equal(created.accountCreditsGrantedAt, null, 'dev login is not an account grant and keeps its own balance');
 
     await devLogin(callsign);
     await devLogin(callsign);
@@ -270,11 +272,11 @@ describe('dev login starting credits', () => {
   });
 
   test('registered, guest and linked accounts never get it', async () => {
-    const registered = await newPilot('Registered');
+    const registered = await newPilot('Registered', { keepStartingCredits: true });
     const res = await server.inject({ method: 'GET', url: `/auth/dev-login?callsign=${registered.callsign}` });
     assert.equal(res.statusCode, 200);
     const reg = await row(registered.id);
-    assert.equal(reg.credits, 0);
+    assert.equal(reg.credits, ACCOUNT_STARTING_CREDITS, 'dev login adds nothing to a registered account');
     assert.equal(reg.devCreditsGrantedAt, null);
 
     const guestRes = json(await app.inject({
@@ -302,7 +304,7 @@ describe('dev login starting credits', () => {
     await devLogin(guestRes.player.callsign);
     const linked = await row(guestRes.player.id);
     assert.equal(linked.isAnonymous, false);
-    assert.equal(linked.credits, 0);
+    assert.equal(linked.credits, ACCOUNT_STARTING_CREDITS, 'only the link grant; dev login adds nothing');
     assert.equal(linked.devCreditsGrantedAt, null);
   });
 

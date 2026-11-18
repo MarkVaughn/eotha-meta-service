@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { betterAuth } from 'better-auth';
 import { prismaAdapter } from 'better-auth/adapters/prisma';
 import { anonymous } from 'better-auth/plugins/anonymous';
+import { ACCOUNT_STARTING_CREDITS } from '../config/auth.js';
 
 /** Better Auth's base URL for a public service base URL: the service's `/auth` routes sit under it. */
 export const authBaseUrl = (publicBaseUrl) => `${publicBaseUrl.replace(/\/+$/, '')}/auth`;
@@ -42,7 +43,12 @@ export function createAuth({ prisma, secret, baseURL, sessionTtlSeconds, onAccou
     },
     user: {
       modelName: 'player',
-      fields: { name: 'callsign' }
+      fields: { name: 'callsign' },
+      // Columns the user-create hook below writes; never accepted from a request body.
+      additionalFields: {
+        credits: { type: 'number', input: false, defaultValue: 0 },
+        accountCreditsGrantedAt: { type: 'date', input: false, required: false }
+      }
     },
     session: {
       modelName: 'authSession',
@@ -72,6 +78,16 @@ export function createAuth({ prisma, secret, baseURL, sessionTtlSeconds, onAccou
       })
     ],
     databaseHooks: {
+      user: {
+        create: {
+          // A new Google player starts with the account credits. A guest (the anonymous plugin's user) starts
+          // with none; it is granted them once, when it links an account (src/lib/identity.js convertGuest).
+          before: async (user) => {
+            if (user.isAnonymous) return;
+            return { data: { ...user, credits: ACCOUNT_STARTING_CREDITS, accountCreditsGrantedAt: new Date() } };
+          }
+        }
+      },
       account: {
         create: {
           after: async (account) => {

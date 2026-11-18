@@ -9,6 +9,7 @@ import {
   app, attestationDouble, attestationHeaders, call, closeApp, dockedReceipt, GOOD_ATTESTATION, json, keysDir, newPilot,
   PASSWORD, setCredits, track
 } from './helpers.js';
+import { ACCOUNT_STARTING_CREDITS } from '../src/config/auth.js';
 import { createPlayIntegrityVerifier } from '../src/lib/attestation/play-integrity.js';
 import attestationPlugin from '../src/plugins/attestation.js';
 
@@ -110,7 +111,7 @@ describe('guest login', () => {
     const guest = await newGuest();
     const res = await call({ headers: { authorization: `Bearer ${guest.token}` } }, 'GET', '/game/credits');
     assert.equal(res.statusCode, 200);
-    assert.equal(json(res).credits, 0);
+    assert.equal(json(res).credits, 0, 'a guest starts with no credits');
   });
 });
 
@@ -204,6 +205,89 @@ describe('linking an email account', () => {
     const row = await app.prisma.player.findUnique({ where: { id: guest.player.id } });
     assert.equal(row.isAnonymous, false);
     assert.equal(row.id, guest.player.id);
+  });
+});
+
+describe('account starting credits', () => {
+  const playerRow = (id) => app.prisma.player.findUnique({ where: { id } });
+
+  test('the starting balance is 500 by default', () => {
+    assert.equal(ACCOUNT_STARTING_CREDITS, 500);
+  });
+
+  test('a new email account starts with the starting credits, recorded', async () => {
+    const pilot = await newPilot('Fresh', { keepStartingCredits: true });
+    const row = await playerRow(pilot.id);
+    assert.equal(row.credits, ACCOUNT_STARTING_CREDITS);
+    assert.ok(row.accountCreditsGrantedAt);
+    assert.equal(row.devCreditsGrantedAt, null);
+  });
+
+  test('a guest starts with none', async () => {
+    const guest = await newGuest();
+    const row = await playerRow(guest.player.id);
+    assert.equal(row.credits, 0);
+    assert.equal(row.accountCreditsGrantedAt, null);
+  });
+
+  test('linking an email grants them once, with the conversion', async () => {
+    const guest = await newGuest();
+    const res = await linkEmail(guest, { email: uniqueEmail('grant'), password: PASSWORD });
+    assert.equal(res.statusCode, 200, res.body);
+    const row = await playerRow(guest.player.id);
+    assert.equal(row.isAnonymous, false);
+    assert.equal(row.credits, ACCOUNT_STARTING_CREDITS);
+    assert.ok(row.accountCreditsGrantedAt);
+
+    // A retry or a double click is refused and grants nothing more.
+    const retry = await linkEmail(guest, { email: uniqueEmail('grant2'), password: PASSWORD });
+    assert.equal(retry.statusCode, 409);
+    assert.equal((await playerRow(guest.player.id)).credits, ACCOUNT_STARTING_CREDITS);
+  });
+
+  test('credits earned as a guest are kept; the grant is added to them', async () => {
+    const guest = await newGuest();
+    await setCredits({ id: guest.player.id }, 70);
+    assert.equal((await linkEmail(guest, { email: uniqueEmail('keep'), password: PASSWORD })).statusCode, 200);
+    assert.equal((await playerRow(guest.player.id)).credits, 70 + ACCOUNT_STARTING_CREDITS);
+  });
+
+  test('concurrent links grant exactly once', async () => {
+    const guest = await newGuest();
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => linkEmail(guest, { email: uniqueEmail('grace'), password: PASSWORD }))
+    );
+    assert.equal(results.filter((r) => r.statusCode === 200).length, 1);
+    assert.equal((await playerRow(guest.player.id)).credits, ACCOUNT_STARTING_CREDITS);
+  });
+
+  test('a rejected link grants nothing', async () => {
+    const taken = await newPilot('Held');
+    const guest = await newGuest();
+    const res = await linkEmail(guest, { email: taken.email, password: PASSWORD });
+    assert.equal(res.statusCode, 409);
+    const row = await playerRow(guest.player.id);
+    assert.equal(row.isAnonymous, true);
+    assert.equal(row.credits, 0);
+    assert.equal(row.accountCreditsGrantedAt, null);
+
+    // The guest can still link later and then receives the grant.
+    assert.equal((await linkEmail(guest, { email: uniqueEmail('later'), password: PASSWORD })).statusCode, 200);
+    assert.equal((await playerRow(guest.player.id)).credits, ACCOUNT_STARTING_CREDITS);
+  });
+
+  test('a registered pilot refused a link keeps its balance', async () => {
+    const pilot = await newPilot('Kept', { keepStartingCredits: true });
+    assert.equal((await linkEmail(pilot, { email: uniqueEmail('nope'), password: PASSWORD })).statusCode, 409);
+    assert.equal((await playerRow(pilot.id)).credits, ACCOUNT_STARTING_CREDITS);
+  });
+
+  test('an external provider link grants once; a repeat grants nothing', async () => {
+    const guest = await newGuest();
+    const { internalAdapter } = await app.betterAuth.$context;
+    await internalAdapter.linkAccount({ userId: guest.player.id, providerId: 'test-provider', accountId: randomUUID() });
+    await internalAdapter.linkAccount({ userId: guest.player.id, providerId: 'test-provider-2', accountId: randomUUID() });
+    assert.equal((await playerRow(guest.player.id)).credits, ACCOUNT_STARTING_CREDITS);
   });
 });
 

@@ -33,6 +33,9 @@ model Player {
   authorityNotBeforeMs BigInt @default(0)
   // Set when development login grants the pilot its one-time starting credits; never granted twice.
   devCreditsGrantedAt DateTime?
+  // Set when the pilot's ACCOUNT_STARTING_CREDITS were granted: at creation of an email or Google account, or in the
+  // same statement that converted a guest by linking an account. Null for guests and dev-login pilots; never granted twice.
+  accountCreditsGrantedAt DateTime?
   trades       TradeTransaction[]
   activeMissions   PlayerMission[]
   missionCooldowns MissionCooldown[]
