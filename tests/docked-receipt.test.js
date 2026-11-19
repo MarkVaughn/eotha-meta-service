@@ -10,10 +10,10 @@ import {
   verifyDockedReceipt
 } from '../src/lib/docked-receipt.js';
 
-// The fixed vectors from eotha-contracts `scripts/check-docked-receipt-vector.js` (V2: the V1 layout plus
-// the signed governing faction): Ed25519 seed [7; 32], the seed the RTSE verifier tests use.
+// The fixed vectors from eotha-contracts `scripts/check-docked-receipt-vector.js` (V3: the V2 layout plus the signed
+// outfitting catalog): Ed25519 seed [7; 32], the seed the RTSE verifier tests use.
 const COMMON_HEX =
-  '454f5448415f444f434b45445f524543454950545f563207000000' +
+  '454f5448415f444f434b45445f524543454950545f563307000000' +
   '70696c6f742d31' +
   '07070707-0707-4707-8707-070707070707'.replaceAll('-', '') +
   '0f000000' +
@@ -21,14 +21,20 @@ const COMMON_HEX =
   'c0164230a1010000' +
   'f9464230a1010000' +
   'ab'.repeat(16);
-// A receipt at a station governed by `beta`, and one in an independent system, whose empty faction id
-// signs as a zero length prefix.
-const VECTOR_HEX = COMMON_HEX + '04000000' + '62657461';
+// A receipt at a station governed by `beta` whose catalog is HULL 3, CARGO 3, ENGINES 5 in BASIC and ARTISAN (mask
+// 0b1100, no Artisan cap); one in an independent system, whose empty faction id signs as a zero length prefix, with
+// HULL 3 and ENGINES 4 and Artisan work capped at tier 3; and one at a station that stocks nothing.
+const BETA_STOCK = [{ componentType: 1, maxTier: 3 }, { componentType: 3, maxTier: 3 }, { componentType: 9, maxTier: 5 }];
+const INDEPENDENT_STOCK = [{ componentType: 1, maxTier: 3 }, { componentType: 9, maxTier: 4 }];
+const VECTOR_HEX = COMMON_HEX + '04000000' + '62657461' + '03000000' + '0100000003000000' + '0300000003000000' + '0900000005000000' + '0c000000' + '00000000';
 const VECTOR_SIGNATURE =
-  'zAX+lH5Sn6qFnydBRb61HVZNFhW9pQQvgOSxyIheWkQBHG9nE53w0r27x6kt0UcHVxaZpQCzwESHP1e+9DS+Dg==';
-const INDEPENDENT_VECTOR_HEX = COMMON_HEX + '00000000';
+  'U3iPJWXZrYw1Rq83Aryoe+xjfOO7j+arD4uQIxE2VTg7daEg90XNC3JMdgbEv+mXI4DY9q9JXm1OgfCGVo3aDw==';
+const INDEPENDENT_VECTOR_HEX = COMMON_HEX + '00000000' + '02000000' + '0100000003000000' + '0900000004000000' + '0c000000' + '03000000';
 const INDEPENDENT_SIGNATURE =
-  'V045UVf+bEShEp93eXJm6/Le4BnaBp0iVKOPpPtNLpRwMrR2YLZsKFmxmEs9B/3599RuDGw2/Nq1V7rTikoYBw==';
+  'g0ql3zzooOSc/X859oLeLIeC7Yq8BQBEDKIZLqZYFYK+h0h3Od8ISihuT9Y3ZfwquyZfrWC5WjIz2P1kPtAXAg==';
+const EMPTY_VECTOR_HEX = COMMON_HEX + '04000000' + '62657461' + '00000000' + '00000000' + '00000000';
+const EMPTY_SIGNATURE =
+  'ean/jy1tu2wO9UBlpIHBVX50yYOkeXgWOdh3fbCKbRQBq3WsJt3lZrpVmVVcZtZlEmYjYZ720/jPanbVigaZCQ==';
 const vectorReceipt = (overrides = {}) => ({
   pilotId: 'pilot-1',
   dockedEntityId: '07070707-0707-4707-8707-070707070707',
@@ -37,6 +43,9 @@ const vectorReceipt = (overrides = {}) => ({
   issuedAtMs: 1791811012345,
   nonce: Buffer.alloc(16, 0xab).toString('base64'),
   controllingFactionId: 'beta',
+  outfittingStock: BETA_STOCK,
+  stockedQualityMask: 0b1100,
+  artisanMaxTier: 0,
   signature: VECTOR_SIGNATURE,
   ...overrides
 });
@@ -48,18 +57,60 @@ const vectorKey = createPrivateKey({
 
 describe('docked receipt verifier', () => {
   test('canonical payload and signature match the eotha-contracts vectors', () => {
-    const payload = canonicalDockedReceiptPayload(vectorReceipt());
-    assert.equal(payload.length, 109);
-    assert.equal(payload.toString('hex'), VECTOR_HEX);
-    assert.equal(sign(null, payload, vectorKey).toString('base64'), VECTOR_SIGNATURE);
-    assert.equal(verifyDockedReceipt(vectorReceipt(), createPublicKey(vectorKey)), true);
+    const publicKey = createPublicKey(vectorKey);
+    const cases = [
+      [vectorReceipt(), VECTOR_HEX, VECTOR_SIGNATURE, 145],
+      [
+        vectorReceipt({ controllingFactionId: '', outfittingStock: INDEPENDENT_STOCK, artisanMaxTier: 3, signature: INDEPENDENT_SIGNATURE }),
+        INDEPENDENT_VECTOR_HEX, INDEPENDENT_SIGNATURE, 133
+      ],
+      [
+        vectorReceipt({ outfittingStock: [], stockedQualityMask: 0, signature: EMPTY_SIGNATURE }),
+        EMPTY_VECTOR_HEX, EMPTY_SIGNATURE, 121
+      ]
+    ];
+    for (const [receipt, hex, signature, length] of cases) {
+      const payload = canonicalDockedReceiptPayload(receipt);
+      assert.equal(payload.length, length);
+      assert.equal(payload.toString('hex'), hex);
+      assert.equal(sign(null, payload, vectorKey).toString('base64'), signature);
+      assert.equal(verifyDockedReceipt(receipt, publicKey), true);
+    }
+  });
 
-    const independent = vectorReceipt({ controllingFactionId: '', signature: INDEPENDENT_SIGNATURE });
-    const independentPayload = canonicalDockedReceiptPayload(independent);
-    assert.equal(independentPayload.length, 105);
-    assert.equal(independentPayload.toString('hex'), INDEPENDENT_VECTOR_HEX);
-    assert.equal(sign(null, independentPayload, vectorKey).toString('base64'), INDEPENDENT_SIGNATURE);
-    assert.equal(verifyDockedReceipt(independent, createPublicKey(vectorKey)), true);
+  test('the catalog is signed: changing or dropping any part of it breaks the signature', () => {
+    const publicKey = createPublicKey(vectorKey);
+    const changes = {
+      outfittingStock: [{ componentType: 1, maxTier: 4 }, ...BETA_STOCK.slice(1)],
+      stockedQualityMask: 0b1110,
+      artisanMaxTier: 3
+    };
+    for (const [field, value] of Object.entries(changes)) {
+      assert.equal(verifyDockedReceipt(vectorReceipt({ [field]: value }), publicKey), false, field);
+    }
+    assert.equal(verifyDockedReceipt(vectorReceipt({ outfittingStock: BETA_STOCK.slice(0, 2) }), publicKey), false, 'entry dropped');
+    assert.equal(verifyDockedReceipt(vectorReceipt({ outfittingStock: [...BETA_STOCK, { componentType: 10, maxTier: 1 }] }), publicKey), false, 'entry added');
+    for (const field of ['outfittingStock', 'stockedQualityMask', 'artisanMaxTier']) {
+      assert.equal(verifyDockedReceipt(vectorReceipt({ [field]: undefined }), publicKey), false, `${field} missing`);
+    }
+  });
+
+  test('a catalog not in the one canonical form is rejected, even under a valid signature', () => {
+    const [hull, cargo] = BETA_STOCK;
+    const catalogs = {
+      'out of order': { outfittingStock: [cargo, hull] },
+      'duplicate type': { outfittingStock: [hull, { ...hull, maxTier: 2 }] },
+      'UNSPECIFIED type': { outfittingStock: [{ componentType: 0, maxTier: 1 }, hull] },
+      'tier 0': { outfittingStock: [{ componentType: 1, maxTier: 0 }] },
+      'UNSPECIFIED quality bit': { stockedQualityMask: 0b1101 }
+    };
+    for (const [name, overrides] of Object.entries(catalogs)) {
+      assert.equal(verifyDockedReceipt(dockedReceipt('pilot-1', overrides), app.claimKey.key), false, name);
+    }
+    for (const overrides of [{ stockedQualityMask: 2 ** 32 }, { artisanMaxTier: -1 }, { outfittingStock: [{ componentType: 1, maxTier: 1.5 }] }]) {
+      assert.throws(() => canonicalDockedReceiptPayload(vectorReceipt(overrides)), /catalog/);
+      assert.equal(verifyDockedReceipt(vectorReceipt(overrides), createPublicKey(vectorKey)), false);
+    }
   });
 
   test('the governing faction is signed: swapping it, or dropping it to independent, breaks the signature', () => {
@@ -77,15 +128,18 @@ describe('docked receipt verifier', () => {
     }
   });
 
-  test('a V1 receipt (no faction, old domain) is rejected, never read as independent', () => {
-    const v2 = dockedReceipt('pilot-1');
-    const v1Payload = Buffer.concat([
-      Buffer.from('EOTHA_DOCKED_RECEIPT_V1', 'ascii'),
-      canonicalDockedReceiptPayload(v2).subarray(23, -4)
-    ]);
-    const v1 = { ...v2, signature: sign(null, v1Payload, rtseKey).toString('base64') };
-    assert.equal(verifyDockedReceipt(v1, app.claimKey.key), false);
-    assert.equal(verifyDockedReceipt({ ...v1, controllingFactionId: undefined }, app.claimKey.key), false);
+  test('a V1 or V2 receipt (older domain, no catalog) is rejected, never read as a dock that stocks everything', () => {
+    const v3 = dockedReceipt('pilot-1');
+    const v3Payload = canonicalDockedReceiptPayload(v3);
+    const faction = v3.controllingFactionId.length;
+    const v2Body = v3Payload.subarray(23, v3Payload.length - (4 + 8 * v3.outfittingStock.length + 8));
+    const v1Body = v2Body.subarray(0, v2Body.length - 4 - faction);
+    for (const [domain, body] of [['V2', v2Body], ['V1', v1Body]]) {
+      const payload = Buffer.concat([Buffer.from(`EOTHA_DOCKED_RECEIPT_${domain}`, 'ascii'), body]);
+      const older = { ...v3, signature: sign(null, payload, rtseKey).toString('base64') };
+      assert.equal(verifyDockedReceipt(older, app.claimKey.key), false, domain);
+      assert.equal(verifyDockedReceipt({ ...older, outfittingStock: [], stockedQualityMask: 0, artisanMaxTier: 0 }, app.claimKey.key), false, `${domain} as empty catalog`);
+    }
   });
 
   test('flipping any signed field breaks verification', () => {

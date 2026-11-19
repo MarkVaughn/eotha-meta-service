@@ -1,8 +1,9 @@
 import { DockableKind, Wealth } from './contracts/penalty/eotha/common/v1/sector.js';
+import { ComponentType, QualityGrade } from './contracts/penalty/eotha/common/v1/ship.js';
 
-// What the meta-service knows about the dock a pilot outfits at. The docked receipt signs only the station id,
-// its system cell and its governing faction, so anything richer (kind, wealth, the stocked catalog, security)
-// comes from the station capability profile, which is the next ticket (M1-2). Until then this is its seam:
+// What the meta-service knows about the dock a pilot outfits at. The docked receipt signs the station id, its
+// system cell, its governing faction and its outfitting catalog (see `upgradeStockRefusal`), so anything
+// richer (kind, wealth, security) comes from the station capability profile, which is the next ticket (M1-2). Until then this is its seam:
 // the route asks `stationServices` and the defaults assume nothing about the dock, so tests (and M1-2)
 // replace a method here rather than the route.
 export const stationServices = {
@@ -85,6 +86,46 @@ export function landerStockRefusal(receipt, { targetTier, qualityGrade }) {
   }
   if (qualityGrade === 'ARTISAN' && !stock.artisan) {
     return { error: 'This dock does not stock Artisan planetary landers.', code: 'lander_quality_not_stocked', qualityGrade };
+  }
+  return null;
+}
+
+// --- Hull and component stock (the receipt's signed outfitting catalog) -----------------------------------
+
+/**
+ * The coded 403 body when the dock the docked `receipt` vouches for does not stock a `componentType` (a
+ * COMPONENT_TYPES name) of `targetTier` and `qualityGrade` (a QUALITY_GRADES name), or null when it does. Reads
+ * only the engine-signed catalog: `outfittingStock` (the highest tier per component type, the hull included; a
+ * type with no entry is not stocked), `stockedQualityMask` (bit n for QualityGrade n) and `artisanMaxTier` (the
+ * tier Artisan work stops at, 0 for no cap of its own). The engine's catalog has no lander entry (landers have
+ * their own stock, see `landerStockRefusal`), and tier 0 removes a part rather than buying one, so neither is
+ * checked here.
+ */
+export function upgradeStockRefusal(receipt, { componentType, targetTier, qualityGrade }) {
+  if (componentType === 'LANDER' || targetTier === 0) return null;
+  const entry = receipt.outfittingStock.find((e) => e.componentType === ComponentType[`COMPONENT_TYPE_${componentType}`]);
+  if (!entry) {
+    return { error: `This dock does not stock ${componentType} components.`, code: 'component_not_stocked', componentType, maxTier: 0 };
+  }
+  if (targetTier > entry.maxTier) {
+    return {
+      error: `This dock stocks ${componentType} components up to tier ${entry.maxTier}.`,
+      code: 'tier_not_stocked',
+      componentType,
+      maxTier: entry.maxTier
+    };
+  }
+  if (!(receipt.stockedQualityMask & (1 << QualityGrade[`QUALITY_GRADE_${qualityGrade}`]))) {
+    return { error: `This dock does not stock ${qualityGrade} grade components.`, code: 'quality_not_stocked', componentType, qualityGrade };
+  }
+  if (qualityGrade === 'ARTISAN' && receipt.artisanMaxTier > 0 && targetTier > receipt.artisanMaxTier) {
+    return {
+      error: `This dock stocks Artisan components up to tier ${receipt.artisanMaxTier}.`,
+      code: 'quality_not_stocked',
+      componentType,
+      qualityGrade,
+      artisanMaxTier: receipt.artisanMaxTier
+    };
   }
   return null;
 }

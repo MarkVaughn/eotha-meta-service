@@ -105,11 +105,22 @@ export async function newPilot(prefix = 'Pilot', { keepStartingCredits = false }
   return { id, email, callsign, token, headers: { authorization: `Bearer ${token}` } };
 }
 
+/** ComponentType enum numbers (eotha-contracts ship.proto) the engine catalogs: HULL (1) through SENSORS (11). */
+export const CATALOGED_COMPONENT_TYPES = Object.freeze(Array.from({ length: 11 }, (_, i) => i + 1));
+/** A catalog stocking every cataloged component type up to tier 5. */
+const FULL_STOCK = CATALOGED_COMPONENT_TYPES.map((componentType) => ({ componentType, maxTier: 5 }));
+/** The QualityGrade bitmask of CHEAP (1), BASIC (2) and ARTISAN (3): bits 1 to 3. */
+export const ALL_GRADES_MASK = 0b1110;
+
 /**
  * A docked receipt signed the way the engine signs it (eotha-contracts `DockedReceipt`): Ed25519 over
  * the domain, then the length-prefixed pilot id, the 16 raw bytes of the station id, the
- * length-prefixed system cell, both times as u64 LE, the 16-byte nonce and the length-prefixed governing
- * faction (V2; `''`, the default, is an independent station). The bytes are assembled
+ * length-prefixed system cell, both times as u64 LE, the 16-byte nonce, the length-prefixed governing
+ * faction (`''`, the default, is an independent station) and the outfitting catalog (V3: a u32 entry count,
+ * each entry's u32 component type and u32 max tier, the u32 quality mask and the u32 Artisan cap). The default
+ * catalog is a dock that stocks every component type the engine catalogs (the lander is not one) up to tier 5, in
+ * every grade, with no Artisan cap, so a test that is not about stock buys anything; override `outfittingStock`
+ * (ascending by `componentType`, as the engine signs it), `stockedQualityMask` or `artisanMaxTier` to narrow it. The bytes are assembled
  * here, not with src/lib/docked-receipt.js, so the verifier is checked against an independent
  * encoder. `overrides` replace any field before signing; pass `signer` to sign with another key.
  * `pilot` is a newPilot() result, a guest session, or a bare player id.
@@ -124,7 +135,15 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
     issuedAtMs: nowMs,
     nonce: randomBytes(16).toString('base64'),
     controllingFactionId: '',
+    outfittingStock: FULL_STOCK.map((entry) => ({ ...entry })),
+    stockedQualityMask: ALL_GRADES_MASK,
+    artisanMaxTier: 0,
     ...overrides
+  };
+  const u32 = (value) => {
+    const buf = Buffer.alloc(4);
+    buf.writeUInt32LE(value);
+    return buf;
   };
   const str = (value) => {
     const bytes = Buffer.from(value, 'utf8');
@@ -138,14 +157,18 @@ export function dockedReceipt(pilot, overrides = {}, signer = rtseKey) {
     return buf;
   };
   const payload = Buffer.concat([
-    Buffer.from('EOTHA_DOCKED_RECEIPT_V2', 'ascii'),
+    Buffer.from('EOTHA_DOCKED_RECEIPT_V3', 'ascii'),
     str(receipt.pilotId),
     Buffer.from(receipt.dockedEntityId.replaceAll('-', ''), 'hex'),
     str(receipt.systemH3),
     u64(receipt.dockedAtMs),
     u64(receipt.issuedAtMs),
     Buffer.from(receipt.nonce, 'base64'),
-    str(receipt.controllingFactionId)
+    str(receipt.controllingFactionId),
+    u32(receipt.outfittingStock.length),
+    ...receipt.outfittingStock.map((entry) => Buffer.concat([u32(entry.componentType), u32(entry.maxTier)])),
+    u32(receipt.stockedQualityMask),
+    u32(receipt.artisanMaxTier)
   ]);
   return { ...receipt, signature: overrides.signature ?? sign(null, payload, signer).toString('base64') };
 }
@@ -166,7 +189,15 @@ export function undockReceipt(pilot, overrides = {}, signer = rtseKey) {
     undockedAtMs: nowMs - 2_000,
     nonce: randomBytes(16).toString('base64'),
     controllingFactionId: '',
+    outfittingStock: FULL_STOCK.map((entry) => ({ ...entry })),
+    stockedQualityMask: ALL_GRADES_MASK,
+    artisanMaxTier: 0,
     ...overrides
+  };
+  const u32 = (value) => {
+    const buf = Buffer.alloc(4);
+    buf.writeUInt32LE(value);
+    return buf;
   };
   const str = (value) => {
     const bytes = Buffer.from(value, 'utf8');
