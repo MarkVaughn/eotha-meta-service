@@ -25,7 +25,7 @@ import {
 import { devPassengersEnabled } from '../../config/dev.js';
 import { stationLockoutRefusal } from '../../lib/customs.js';
 import { dockedReceiptRefusal, dockedReceiptSchema } from '../../lib/docked-receipt.js';
-import { landerStockRefusal, stationServices } from '../../lib/outfitting-station.js';
+import { landerStockRefusal, stationServices, upgradeStockRefusal } from '../../lib/outfitting-station.js';
 import { standingsOf } from '../../lib/reputation.js';
 import { lockActiveShip, reissueToken, toLoadout } from '../../lib/ship.js';
 
@@ -147,11 +147,13 @@ export default async function shipRoutes(fastify, opts) {
       });
     }
 
-    // A dock fits landers only up to its own tier ceiling, and only a wealthy free port stocks Artisan ones.
-    if (componentType === 'LANDER') {
-      const stocked = landerStockRefusal(dockedReceipt, { targetTier, qualityGrade });
-      if (stocked) return reply.code(403).send(stocked);
-    }
+    // A dock sells only what its signed catalog stocks: the component type, up to its tier, in a grade it carries.
+    // Landers are outside the engine's catalog: a dock fits them only up to its own tier ceiling, and only a
+    // wealthy free port stocks Artisan ones.
+    const stocked = componentType === 'LANDER'
+      ? landerStockRefusal(dockedReceipt, { targetTier, qualityGrade })
+      : upgradeStockRefusal(dockedReceipt, { componentType, targetTier, qualityGrade });
+    if (stocked) return reply.code(403).send(stocked);
 
     // Every check, the credit deduction and the tier change commit or roll back together.
     const outcome = await withActiveShip(request, async (tx, ship) => {

@@ -2,11 +2,12 @@ import { verify } from 'node:crypto';
 import { DOCKED_RECEIPT_MAX_SKEW_MS, DOCKED_RECEIPT_TTL_MS } from '../config/docking.js';
 import { H3_PATTERN } from '../config/patterns.js';
 
-export const DOCKED_RECEIPT_DOMAIN = Buffer.from('EOTHA_DOCKED_RECEIPT_V2', 'utf8'); // 23 bytes
+export const DOCKED_RECEIPT_DOMAIN = Buffer.from('EOTHA_DOCKED_RECEIPT_V3', 'utf8'); // 23 bytes
 
 // The governing faction a receipt may sign: a faction key, or '' for an independent system. `independent`
-// is never a value, and a V1 receipt (no faction) is rejected rather than read as independent: its
-// domain differs, so its signature never verifies here.
+// is never a value. There is one signing layout, V3, and no fallback: a V1 receipt (no faction) or a V2 receipt
+// (no outfitting catalog, which could otherwise read as "stocks everything") has a different domain, so its
+// signature never verifies here.
 export const CONTROLLING_FACTION_IDS = Object.freeze(['', 'alpha', 'beta', 'gamma']);
 
 // The wire form of a UUID: lowercase and hyphenated. The signed bytes are the raw 16, so no other
@@ -29,16 +30,41 @@ function u64(value) {
   return buf;
 }
 
+function u32(value) {
+  const buf = Buffer.alloc(4);
+  buf.writeUInt32LE(value);
+  return buf;
+}
+
+// Whether `receipt`'s catalog is in the one form the engine signs: entries strictly ascending by component type
+// (so none repeats), none UNSPECIFIED (0) or of tier 0, and bit 0 (UNSPECIFIED) of the quality mask clear. Every
+// number is a u32. A catalog in any other form has no valid signature, so refusing it also keeps the signed
+// bytes from depending on how the client ordered the list.
+function hasCanonicalCatalog({ outfittingStock, stockedQualityMask, artisanMaxTier }) {
+  const isU32 = (n) => Number.isInteger(n) && n >= 0 && n <= 0xffffffff;
+  if (!Array.isArray(outfittingStock) || !isU32(stockedQualityMask) || !isU32(artisanMaxTier)) return false;
+  if (stockedQualityMask & 1) return false;
+  let previous = 0;
+  for (const entry of outfittingStock) {
+    if (!entry || !isU32(entry.componentType) || !isU32(entry.maxTier)) return false;
+    if (entry.componentType <= previous || entry.maxTier < 1) return false;
+    previous = entry.componentType;
+  }
+  return true;
+}
+
 // Mirrors eotha-rtse `docked_receipt_signing_payload` and the vector in eotha-contracts
 // `scripts/check-docked-receipt-vector.js`. `receipt` carries { pilotId, dockedEntityId (lowercase
 // hyphenated UUID), systemH3, dockedAtMs, issuedAtMs, nonce (base64, 16 bytes),
-// controllingFactionId ('' or a faction key) }. Throws on a
-// malformed id or nonce; `verifyDockedReceipt` is the caller that never does.
+// controllingFactionId ('' or a faction key), outfittingStock ([{ componentType, maxTier }] as enum numbers,
+// strictly ascending), stockedQualityMask, artisanMaxTier }. Throws on a malformed id, nonce or catalog;
+// `verifyDockedReceipt` is the caller that never does.
 export function canonicalDockedReceiptPayload(receipt) {
   const entityId = Buffer.from(receipt.dockedEntityId.replaceAll('-', ''), 'hex');
   const nonce = Buffer.from(receipt.nonce, 'base64');
   if (entityId.length !== 16) throw new Error('dockedEntityId must be a 16-byte UUID.');
   if (nonce.length !== 16) throw new Error('nonce must be 16 bytes.');
+  if (!hasCanonicalCatalog(receipt)) throw new Error('outfitting catalog must be strictly ascending by component type, tiers of at least 1, quality bit 0 clear.');
   return Buffer.concat([
     DOCKED_RECEIPT_DOMAIN,
     lenPrefixed(receipt.pilotId),
@@ -47,7 +73,11 @@ export function canonicalDockedReceiptPayload(receipt) {
     u64(receipt.dockedAtMs),
     u64(receipt.issuedAtMs),
     nonce,
-    lenPrefixed(receipt.controllingFactionId)
+    lenPrefixed(receipt.controllingFactionId),
+    u32(receipt.outfittingStock.length),
+    ...receipt.outfittingStock.map((entry) => Buffer.concat([u32(entry.componentType), u32(entry.maxTier)])),
+    u32(receipt.stockedQualityMask),
+    u32(receipt.artisanMaxTier)
   ]);
 }
 
@@ -77,11 +107,17 @@ export function isDockedReceiptFresh(
 }
 
 const uint = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
+const u32Schema = { type: 'integer', minimum: 0, maximum: 0xffffffff };
+// The most entries a catalog can hold is one per component type, so a larger list is never a real receipt.
+const MAX_OUTFITTING_STOCK_ENTRIES = 32;
 
 // The `dockedReceipt` of a request body.
 export const dockedReceiptSchema = {
   type: 'object',
-  required: ['pilotId', 'dockedEntityId', 'systemH3', 'dockedAtMs', 'issuedAtMs', 'nonce', 'controllingFactionId', 'signature'],
+  required: [
+    'pilotId', 'dockedEntityId', 'systemH3', 'dockedAtMs', 'issuedAtMs', 'nonce', 'controllingFactionId',
+    'outfittingStock', 'stockedQualityMask', 'artisanMaxTier', 'signature'
+  ],
   properties: {
     pilotId: { type: 'string', minLength: 1, maxLength: 256 },
     dockedEntityId: { type: 'string', pattern: DOCKED_ENTITY_ID_PATTERN },
@@ -90,6 +126,19 @@ export const dockedReceiptSchema = {
     issuedAtMs: uint,
     nonce: { type: 'string', pattern: NONCE_B64_PATTERN },
     controllingFactionId: { type: 'string', enum: CONTROLLING_FACTION_IDS },
+    // The station's outfitting catalog: the highest tier stocked per ComponentType (enum number, hull included),
+    // the stocked QualityGrades as a bitmask (bit n for grade n) and the tier Artisan work stops at (0 = no cap).
+    outfittingStock: {
+      type: 'array',
+      maxItems: MAX_OUTFITTING_STOCK_ENTRIES,
+      items: {
+        type: 'object',
+        required: ['componentType', 'maxTier'],
+        properties: { componentType: u32Schema, maxTier: u32Schema }
+      }
+    },
+    stockedQualityMask: u32Schema,
+    artisanMaxTier: u32Schema,
     signature: { type: 'string', pattern: SIGNATURE_B64_PATTERN }
   }
 };
