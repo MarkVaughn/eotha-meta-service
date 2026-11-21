@@ -5,6 +5,7 @@ import { computeShipAttributes, defaultComponents } from '../../config/component
 import { normalizeQuality } from '../../config/outfitting.js';
 import { activeDoctrineIdsOf, effectIdsFor, ensureCaptain } from '../../lib/captain.js';
 import { activeCrewOf } from '../../lib/crew.js';
+import { applyDevSeed } from '../../lib/dev-seed.js';
 import { convertGuest } from '../../lib/identity.js';
 import { factionsClaim } from '../../lib/reputation.js';
 import { activeMissionClaim } from '../../lib/active-mission.js';
@@ -258,6 +259,8 @@ export default async function authRoutes(fastify, opts) {
           },
           data: { credits: { increment: DEV_STARTING_CREDITS }, devCreditsGrantedAt: now }
         });
+        // Pilot-2 to Pilot-5 of the dev client start outfitted and with set standings (DEV_SEED_PILOTS), once.
+        await applyDevSeed(tx, pilot, now);
         return pilot;
       });
 

@@ -22,7 +22,8 @@ export const LEDGER_REASONS = Object.freeze({
   RENOUNCE_PARAGON: 'RENOUNCE_PARAGON',
   DOMESTIC_ORE_SALE: 'DOMESTIC_ORE_SALE',
   MINING_VIOLATION: 'MINING_VIOLATION',
-  EXPEDITION_SETTLED: 'EXPEDITION_SETTLED'
+  EXPEDITION_SETTLED: 'EXPEDITION_SETTLED',
+  DEV_SEED: 'DEV_SEED'
 });
 
 // The faction a mission's reputation goes to: its signed sponsor, else DEFAULT_FACTION_ID.
@@ -72,7 +73,7 @@ async function rewriteFactionStandings(tx, playerId, change, entry) {
   for (const id of changed) await upsertStanding(tx, playerId, id, next[id]);
   const deltas = Object.fromEntries(changed.map((id) => [DELTA_COLUMNS[id], next[id] - previous[id]]));
   await tx.reputationLedger.create({
-    data: { playerId, ...entry, factionDelta: next[entry.factionId] - previous[entry.factionId], ...deltas }
+    data: { playerId, ...entry, factionDelta: entry.factionId ? next[entry.factionId] - previous[entry.factionId] : 0, ...deltas }
   });
   const player = await tx.player.findUnique({ where: { id: playerId }, select: { activeColorsFactionId: true } });
   const colors = player?.activeColorsFactionId;
@@ -102,6 +103,13 @@ export async function adjustReputation(tx, playerId, factionId, delta, { reason,
   await upsertStanding(tx, playerId, factionId, standing);
   if (standing !== current) await tx.reputationLedger.create({ data: { ...entry, playerId, factionDelta: standing - current } });
   return standing;
+}
+
+// Inside `tx`, holding the pilot's lock: sets the pilot's standings with the three factions to `standings`
+// (`{ alpha, beta, gamma }`, a missing one kept) through clampStandingsWithCaps, ledgered under `reason` with no
+// primary faction. Returns the standings written. Only the development seed (src/lib/dev-seed.js) sets them outright.
+export async function setFactionStandings(tx, playerId, standings, { reason }) {
+  return rewriteFactionStandings(tx, playerId, (previous) => ({ ...previous, ...standings }), { reason, missionId: null, factionId: null });
 }
 
 // A completion can change sponsor and rival together. Apply both before the faction caps so
