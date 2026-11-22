@@ -56,6 +56,15 @@ const sessionResponse = {
   }
 };
 
+// Where the browser reports the player is (WGS84 degrees), sent on the sign-ins that may create a
+// player. It only places a new player's home harbor (see harborAt in src/lib/harbor.js): a value
+// that is missing, not a number or out of range is ignored rather than refused, and the player then
+// gets the default harbor. The schema deliberately declares no type, so nothing here is ever a 400.
+const reportedLocation = {
+  latitude: { description: 'Latitude in degrees, -90 to 90. Optional; anything else is ignored.' },
+  longitude: { description: 'Longitude in degrees, -180 to 180. Optional; anything else is ignored.' }
+};
+
 export const loginSchema = {
   body: {
     type: 'object',
@@ -74,7 +83,8 @@ export const guestSchema = {
     type: 'object',
     required: ['deviceId'],
     properties: {
-      deviceId: { type: 'string', minLength: DEVICE_ID_MIN_LENGTH, maxLength: DEVICE_ID_MAX_LENGTH }
+      deviceId: { type: 'string', minLength: DEVICE_ID_MIN_LENGTH, maxLength: DEVICE_ID_MAX_LENGTH },
+      ...reportedLocation
     }
   },
   response: { 200: sessionResponse }
@@ -94,7 +104,7 @@ export const googleExchangeSchema = {
   body: {
     type: 'object',
     required: ['code'],
-    properties: { code: { type: 'string', minLength: 1, maxLength: 128 } }
+    properties: { code: { type: 'string', minLength: 1, maxLength: 128 }, ...reportedLocation }
   },
   response: { 200: sessionResponse }
 };

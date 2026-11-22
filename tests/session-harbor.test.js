@@ -1,12 +1,14 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import Fastify from 'fastify';
 import {
   app, attestationDouble, attestationHeaders, closeApp, json, keysDir, newPilot, PASSWORD, track
 } from './helpers.js';
-import { DEFAULT_HARBOR } from '../src/config/harbor.js';
-import { ensureHarbor } from '../src/lib/harbor.js';
+import { DEFAULT_HARBOR, HARBOR_H3_RESOLUTION } from '../src/config/harbor.js';
+import { cellToLatLng, getResolution, latLngToCell } from 'h3-js';
+import { ensureHarbor, harborAt } from '../src/lib/harbor.js';
 import prismaPlugin from '../src/plugins/prisma.js';
 import securityPlugin from '../src/plugins/security.js';
 import attestationPlugin from '../src/plugins/attestation.js';
@@ -22,12 +24,12 @@ after(async () => { await closeApp(); });
 const DEFAULT_SPAWN = { latitude: 37.7749, longitude: -122.4194, h3_index: '8828308281fffff' };
 const LOCAL_GATEWAY = 'ws://localhost:8080/session';
 
-const guestLogin = (server, deviceId = randomUUID()) =>
-  server.inject({ method: 'POST', url: '/auth/guest', headers: attestationHeaders, payload: { deviceId } });
+const guestLogin = (server, deviceId = randomUUID(), location = {}) =>
+  server.inject({ method: 'POST', url: '/auth/guest', headers: attestationHeaders, payload: { deviceId, ...location } });
 const refresh = (server, refreshToken) => server.inject({ method: 'POST', url: '/auth/refresh', payload: { refreshToken } });
 
-async function newGuest(server = app) {
-  const res = await guestLogin(server);
+async function newGuest(server = app, location = {}) {
+  const res = await guestLogin(server, randomUUID(), location);
   assert.equal(res.statusCode, 200, res.body);
   const session = json(res);
   track(session.player.id);
@@ -106,6 +108,116 @@ describe('guest sessions', () => {
   });
 });
 
+// Hamburg, as a browser reports it, and the resolution 8 cell (and its center) it falls in.
+const HAMBURG = { latitude: 53.5511, longitude: 9.9937 };
+const HAMBURG_CELL = '881f15ad3dfffff';
+const HAMBURG_SPAWN = { latitude: 53.55182558904559, longitude: 9.99281878388885, h3_index: HAMBURG_CELL };
+
+const harborFields = ({ latitude, longitude, h3Index }) => ({ latitude, longitude, h3Index });
+
+describe('harborAt', () => {
+  test('the default harbor names the resolution 8 cell its coordinates fall in', () => {
+    assert.equal(HARBOR_H3_RESOLUTION, 8);
+    assert.equal(latLngToCell(DEFAULT_HARBOR.latitude, DEFAULT_HARBOR.longitude, HARBOR_H3_RESOLUTION), DEFAULT_HARBOR.h3Index);
+  });
+
+  test('snaps a reported position to the center of its resolution 8 cell', () => {
+    const harbor = harborAt(HAMBURG);
+    assert.equal(harbor.h3Index, HAMBURG_CELL);
+    assert.equal(getResolution(harbor.h3Index), 8);
+    assert.equal(harbor.h3Index, latLngToCell(HAMBURG.latitude, HAMBURG.longitude, 8));
+    assert.deepEqual([harbor.latitude, harbor.longitude], cellToLatLng(harbor.h3Index));
+    // The stored point is the cell's, not the player's: it names the same cell and differs from the input.
+    assert.equal(latLngToCell(harbor.latitude, harbor.longitude, 8), harbor.h3Index);
+    assert.notDeepEqual([harbor.latitude, harbor.longitude], [HAMBURG.latitude, HAMBURG.longitude]);
+  });
+
+  test('two positions in the same cell give the same harbor', () => {
+    const nearby = { latitude: HAMBURG.latitude + 0.0005, longitude: HAMBURG.longitude - 0.0005 };
+    assert.deepEqual(harborAt(nearby), harborAt(HAMBURG));
+  });
+
+  test('accepts the edges of the valid range', () => {
+    for (const location of [{ latitude: 90, longitude: 180 }, { latitude: -90, longitude: -180 }, { latitude: 0, longitude: 0 }]) {
+      const harbor = harborAt(location);
+      assert.ok(harbor, JSON.stringify(location));
+      assert.equal(getResolution(harbor.h3Index), 8);
+    }
+  });
+
+  test('is null for a missing, non-numeric, non-finite or out-of-range position', () => {
+    const unusable = [
+      undefined, null, {}, 'here',
+      { latitude: 53.5 }, { longitude: 9.9 },
+      { latitude: '53.5511', longitude: '9.9937' },
+      { latitude: null, longitude: null },
+      { latitude: true, longitude: 9.9 },
+      { latitude: [53.5], longitude: [9.9] },
+      { latitude: Number.NaN, longitude: 9.9 },
+      { latitude: 53.5, longitude: Number.POSITIVE_INFINITY },
+      { latitude: 90.0001, longitude: 0 }, { latitude: -91, longitude: 0 },
+      { latitude: 0, longitude: 180.5 }, { latitude: 0, longitude: -181 }
+    ];
+    for (const location of unusable) assert.equal(harborAt(location), null, JSON.stringify(location));
+  });
+});
+
+describe('guest sessions with a browser location', () => {
+  test('a new guest with a valid location gets its harbor at the snapped cell center', async () => {
+    const guest = await newGuest(app, HAMBURG);
+    assert.equal(guest.created, true);
+    assert.deepEqual(guest.player.spawn_point, HAMBURG_SPAWN);
+    assert.equal(app.jwt.verify(guest.token).home_h3, HAMBURG_CELL);
+    assert.deepEqual(harborFields(await harborOf(guest.player.id)), harborFields(harborAt(HAMBURG)));
+  });
+
+  test('a missing, out-of-range or non-numeric location is not refused and falls back to the default harbor', async () => {
+    const fallbacks = [
+      {},
+      { latitude: 53.5511 },
+      { latitude: 91, longitude: 9.9937 },
+      { latitude: 53.5511, longitude: -180.01 },
+      { latitude: 'north', longitude: 'east' },
+      { latitude: '53.5511', longitude: '9.9937' },
+      { latitude: null, longitude: null },
+      { latitude: { lat: 1 }, longitude: [2] },
+      { latitude: true, longitude: false }
+    ];
+    for (const location of fallbacks) {
+      const res = await guestLogin(app, randomUUID(), location);
+      assert.equal(res.statusCode, 200, `${JSON.stringify(location)}: ${res.body}`);
+      const guest = json(res);
+      track(guest.player.id);
+      assert.deepEqual(guest.player.spawn_point, DEFAULT_SPAWN, JSON.stringify(location));
+      assert.equal(app.jwt.verify(guest.token).home_h3, DEFAULT_HARBOR.h3Index);
+      assert.deepEqual(harborFields(await harborOf(guest.player.id)), DEFAULT_HARBOR);
+    }
+  });
+
+  test('a later sign-in from somewhere else never moves an existing harbor', async () => {
+    const deviceId = randomUUID();
+    const first = json(await guestLogin(app, deviceId, HAMBURG));
+    track(first.player.id);
+    assert.deepEqual(first.player.spawn_point, HAMBURG_SPAWN);
+
+    const again = json(await guestLogin(app, deviceId, { latitude: -33.8688, longitude: 151.2093 }));
+    assert.equal(again.created, false);
+    assert.equal(again.player.id, first.player.id);
+    assert.deepEqual(again.player.spawn_point, HAMBURG_SPAWN);
+    assert.equal(app.jwt.verify(again.token).home_h3, HAMBURG_CELL);
+    assert.equal(await app.prisma.spaceHarbor.count({ where: { playerId: first.player.id } }), 1);
+  });
+
+  test('a guest that already has the default harbor keeps it when it later reports a location', async () => {
+    const deviceId = randomUUID();
+    const first = json(await guestLogin(app, deviceId));
+    track(first.player.id);
+    const again = json(await guestLogin(app, deviceId, HAMBURG));
+    assert.deepEqual(again.player.spawn_point, DEFAULT_SPAWN);
+    assert.deepEqual(harborFields(await harborOf(first.player.id)), DEFAULT_HARBOR);
+  });
+});
+
 describe('ensureHarbor', () => {
   test('concurrent first sessions create exactly one harbor', async () => {
     const guest = await newGuest();
@@ -113,6 +225,38 @@ describe('ensureHarbor', () => {
     const harbors = await Promise.all(Array.from({ length: 6 }, () => ensureHarbor(app.prisma, guest.player.id)));
     assert.equal(new Set(harbors.map(({ id }) => id)).size, 1);
     assert.equal(await app.prisma.spaceHarbor.count({ where: { playerId: guest.player.id } }), 1);
+  });
+
+  test('concurrent first sessions from different locations still create exactly one harbor', async () => {
+    const guest = await newGuest();
+    await app.prisma.spaceHarbor.delete({ where: { playerId: guest.player.id } });
+    const locations = [HAMBURG, { latitude: -33.8688, longitude: 151.2093 }, undefined, { latitude: 'x' }, HAMBURG, undefined];
+    const harbors = await Promise.all(locations.map((location) => ensureHarbor(app.prisma, guest.player.id, location)));
+    assert.equal(new Set(harbors.map(({ id }) => id)).size, 1);
+    assert.equal(await app.prisma.spaceHarbor.count({ where: { playerId: guest.player.id } }), 1);
+    // Whichever insert won, the harbor is one of the candidates, whole: never a mix of two of them.
+    const candidates = [harborAt(HAMBURG), harborAt(locations[1]), DEFAULT_HARBOR].map(harborFields);
+    assert.ok(candidates.some((candidate) => isDeepStrictEqual(candidate, harborFields(harbors[0]))), JSON.stringify(harbors[0]));
+  });
+
+  test('an existing harbor is returned unchanged whatever location is passed', async () => {
+    const guest = await newGuest(app, HAMBURG);
+    const before = await harborOf(guest.player.id);
+    const after = await ensureHarbor(app.prisma, guest.player.id, { latitude: -33.8688, longitude: 151.2093 });
+    assert.deepEqual(after, before);
+  });
+
+  test('concurrent first guest sign-ins from one device with a location yield one player and one harbor there', async () => {
+    const deviceId = randomUUID();
+    const sessions = (await Promise.all(Array.from({ length: 4 }, () => guestLogin(app, deviceId, HAMBURG)))).map((res) => {
+      assert.equal(res.statusCode, 200, res.body);
+      return json(res);
+    });
+    const ids = new Set(sessions.map(({ player }) => player.id));
+    for (const id of ids) track(id);
+    assert.equal(ids.size, 1);
+    for (const session of sessions) assert.deepEqual(session.player.spawn_point, HAMBURG_SPAWN);
+    assert.equal(await app.prisma.spaceHarbor.count({ where: { playerId: [...ids][0] } }), 1);
   });
 });
 

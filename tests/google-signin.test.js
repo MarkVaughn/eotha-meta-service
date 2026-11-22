@@ -44,7 +44,7 @@ const newProfile = (overrides = {}) => {
 };
 
 const start = (body = {}, headers = {}) => app.inject({ method: 'POST', url: '/auth/google/start', headers, payload: body });
-const exchange = (code) => app.inject({ method: 'POST', url: '/auth/google/exchange', payload: { code } });
+const exchange = (code, location = {}) => app.inject({ method: 'POST', url: '/auth/google/exchange', payload: { code, ...location } });
 const cookieHeader = (res) => res.cookies.map(({ name, value }) => `${name}=${value}`).join('; ');
 
 /** What a browser does after /start: go to Google, consent, come back to the callback with the same cookies. */
@@ -62,14 +62,14 @@ async function visitGoogle(startRes, profile, extraQuery = {}) {
 const fragmentOf = (res) => new URLSearchParams(new URL(res.headers.location).hash.slice(1));
 
 /** Runs the whole flow for an anonymous browser and returns the exchanged session. */
-async function signInWithGoogle(profile, body = {}) {
+async function signInWithGoogle(profile, body = {}, location = {}) {
   const startRes = await start(body);
   assert.equal(startRes.statusCode, 200, startRes.body);
   const { callback } = await visitGoogle(startRes, profile);
   assert.equal(callback.statusCode, 302, callback.body);
   const code = fragmentOf(callback).get('eotha_auth_code');
   assert.ok(code, callback.headers.location);
-  const res = await exchange(code);
+  const res = await exchange(code, location);
   assert.equal(res.statusCode, 200, res.body);
   const session = json(res);
   track(session.player.id);
@@ -98,6 +98,40 @@ describe('Sign in with Google: playable session', () => {
     assert.equal(row.credits, ACCOUNT_STARTING_CREDITS);
     assert.ok(row.accountCreditsGrantedAt);
     assert.equal(ACCOUNT_STARTING_CREDITS, 500);
+  });
+});
+
+describe('Sign in with Google: browser location', () => {
+  const HAMBURG = { latitude: 53.5511, longitude: 9.9937 };
+  const HAMBURG_SPAWN = { latitude: 53.55182558904559, longitude: 9.99281878388885, h3_index: '881f15ad3dfffff' };
+  const DEFAULT_SPAWN = { latitude: 37.7749, longitude: -122.4194, h3_index: '8828308281fffff' };
+
+  test('a new Google player with a location gets its harbor at the snapped cell center', async () => {
+    const session = await signInWithGoogle(newProfile(), {}, HAMBURG);
+    assert.equal(session.created, true);
+    assert.deepEqual(session.player.spawn_point, HAMBURG_SPAWN);
+    assert.equal(app.jwt.verify(session.token).home_h3, '881f15ad3dfffff');
+    const harbor = await app.prisma.spaceHarbor.findUnique({ where: { playerId: session.player.id } });
+    assert.deepEqual(
+      { latitude: harbor.latitude, longitude: harbor.longitude, h3_index: harbor.h3Index },
+      HAMBURG_SPAWN
+    );
+  });
+
+  test('an unusable location is not refused and the new player gets the default harbor', async () => {
+    for (const location of [{ latitude: 'north', longitude: 9.9937 }, { latitude: 53.5511, longitude: 999 }, { latitude: 53.5511 }]) {
+      const session = await signInWithGoogle(newProfile(), {}, location);
+      assert.deepEqual(session.player.spawn_point, DEFAULT_SPAWN, JSON.stringify(location));
+    }
+  });
+
+  test('a returning Google player keeps its harbor wherever it signs in from', async () => {
+    const profile = newProfile();
+    const first = await signInWithGoogle(profile, {}, HAMBURG);
+    const again = await signInWithGoogle(profile, {}, { latitude: -33.8688, longitude: 151.2093 });
+    assert.equal(again.created, false);
+    assert.equal(again.player.id, first.player.id);
+    assert.deepEqual(again.player.spawn_point, HAMBURG_SPAWN);
   });
 });
 
