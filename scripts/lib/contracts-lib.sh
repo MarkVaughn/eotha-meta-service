@@ -3,9 +3,11 @@
 
 # Vendored layout (relative to src/lib/contracts):
 #   exploration.js                       standalone copy of eotha/rtse/v1/exploration
+#   territory.js                         standalone copy of eotha/internal/v1/territory
 #   penalty/<generated tree>             relative-import closure of eotha/internal/v1/penalty_delivery
 CONTRACTS_EXPLORATION_ENTRY="eotha/rtse/v1/exploration.js"
 CONTRACTS_PENALTY_ENTRY="eotha/internal/v1/penalty_delivery.js"
+CONTRACTS_TERRITORY_ENTRY="eotha/internal/v1/territory.js"
 
 # contracts_compile <contracts-src-dir> <out-dir>: compile every gen/ts/eotha binding to ESM with ".js"
 # import specifiers. --noCheck: the generated code has Node-typing errors under bare tsc

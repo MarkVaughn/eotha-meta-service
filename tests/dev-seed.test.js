@@ -65,6 +65,10 @@ describe('DEV_SEED_PILOTS', () => {
 
 describe('dev login seeds the dev pilots', () => {
   let server;
+  // A territory lookup that would grant every new harbor spawn standing: dev login creates its pilots' harbors
+  // itself, so it must never be asked, and the seeded standings are exactly what the seed lists.
+  const territoryCalls = [];
+  const territory = { configured: true, lookup: async (h3Index) => { territoryCalls.push(h3Index); return { controllingFactionId: 'alpha', neighborFactionIds: [] }; } };
   const forget = () => server.prisma.player.deleteMany({ where: { callsign: { in: CALLSIGNS } } });
 
   before(async () => {
@@ -73,7 +77,7 @@ describe('dev login seeds the dev pilots', () => {
     await server.register(securityPlugin, { keysDir });
     await server.register(attestationPlugin, { verifiers: [attestationDouble] });
     await server.register(identityPlugin);
-    await server.register(authRoutes, { prefix: '/auth', devLogin: true });
+    await server.register(authRoutes, { prefix: '/auth', devLogin: true, territory });
     await server.ready();
     await forget();
   });
@@ -119,6 +123,16 @@ describe('dev login seeds the dev pilots', () => {
         callsign
       );
     }
+  });
+
+  test('dev pilots never get spawn standing on top of their seed', async () => {
+    for (const callsign of CALLSIGNS) await devLogin(callsign);
+    assert.deepEqual(territoryCalls, []);
+    for (const [callsign, want] of Object.entries(EXPECTED)) {
+      const { standings } = await stored(callsign);
+      for (const id of ['alpha', 'beta', 'gamma']) assert.equal(standings[id] ?? 0, want.standings[id], `${callsign} ${id}`);
+    }
+    assert.deepEqual((await stored('Pilot-1-NY')).standings, {});
   });
 
   test('Pilot-1 keeps the plain dev-login start', async () => {

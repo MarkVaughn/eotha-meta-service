@@ -8,6 +8,7 @@ import intelPlugin from './plugins/intel.js';
 import attestationPlugin from './plugins/attestation.js';
 import identityPlugin from './plugins/identity.js';
 import internalWorkloadPlugin from './plugins/internal-workload.js';
+import territoryPlugin from './plugins/territory.js';
 import authRoutes from './routes/auth/index.js';
 import jwksRoutes from './routes/jwks.js';
 import gameRoutes from './routes/game/index.js';
@@ -47,6 +48,7 @@ await fastify.register(internalWorkloadPlugin);
 await fastify.register(intelPlugin);
 await fastify.register(attestationPlugin);
 await fastify.register(identityPlugin);
+await fastify.register(territoryPlugin);
 
 // Register Routes
 await fastify.register(authRoutes, { prefix: '/auth' });
