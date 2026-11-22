@@ -29,11 +29,12 @@ export default async function authRoutes(fastify, opts) {
   // Embed current ship attributes (Tier 1 defaults if the pilot has no ship yet), with the captain's
   // traits, the pilot's Legacy Doctrines and the crew aboard folded in, and the pilot's factions claim; a pilot without a captain gets its Level 1
   // starter here. The claims are exactly what the RTSE validates; `ttlSeconds` only overrides the
-  // default token lifetime.
-  async function signSession(player, { ttlSeconds } = {}) {
+  // default token lifetime, and `location` (where the client reports it is) only places a harbor
+  // the player does not have yet.
+  async function signSession(player, { ttlSeconds, location } = {}) {
     // Guests and Google players are created without a harbor; every session gets one, so the token
     // carries the real home harbor rather than the fallback.
-    if (!player.harbor) player = { ...player, harbor: await ensureHarbor(prisma, player.id) };
+    if (!player.harbor) player = { ...player, harbor: await ensureHarbor(prisma, player.id, location) };
     const ship = await prisma.spaceship.findFirst({
       where: { playerId: player.id, active: true },
       orderBy: { createdAt: 'asc' },
@@ -62,8 +63,9 @@ export default async function authRoutes(fastify, opts) {
   }
 
   // The response of every login: a short-lived access token plus the refresh token that renews it.
-  async function issueSession(player, refreshToken) {
-    const { token, harbor } = await signSession(player);
+  // `location` is the `{ latitude, longitude }` a sign-in reported, for a player without a harbor.
+  async function issueSession(player, refreshToken, location) {
+    const { token, harbor } = await signSession(player, { location });
     return {
       token,
       refreshToken,
@@ -170,7 +172,8 @@ export default async function authRoutes(fastify, opts) {
     } else {
       ({ refreshToken } = await fastify.refreshTokens.start(player.id, clientMeta(request)));
     }
-    return { ...(await issueSession(player, refreshToken)), created };
+    const { latitude, longitude } = request.body;
+    return { ...(await issueSession(player, refreshToken, { latitude, longitude })), created };
   });
 
   // Endpoint 2c: Exchange a refresh token for a new access token and a replacement refresh token.

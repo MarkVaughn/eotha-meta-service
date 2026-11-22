@@ -9,7 +9,7 @@ const hasCredentials = (request) => Boolean(request.headers.authorization || req
  *
  * @param {import('fastify').FastifyInstance} fastify
  * @param {object} deps
- * @param {(player: object, refreshToken: string) => Promise<object>} deps.issueSession
+ * @param {(player: object, refreshToken: string, location?: object) => Promise<object>} deps.issueSession
  * @param {(request: import('fastify').FastifyRequest) => object} deps.clientMeta
  */
 export function registerGoogleRoutes(fastify, { issueSession, clientMeta }) {
@@ -51,7 +51,8 @@ export function registerGoogleRoutes(fastify, { issueSession, clientMeta }) {
     return reply.redirect(location, 302);
   });
 
-  // Step 3. Trades the one-time code for the game's own session, shaped like the guest and login responses.
+  // Step 3. Trades the one-time code for the game's own session, shaped like the guest and login
+  // responses. A new Google player's harbor is placed at the optional `latitude`/`longitude`.
   fastify.post('/google/exchange', { schema: googleExchangeSchema }, async (request, reply) => {
     let redeemed;
     try {
@@ -64,6 +65,7 @@ export function registerGoogleRoutes(fastify, { issueSession, clientMeta }) {
     if (!player) return reply.code(401).send({ error: 'invalid_code' });
     const { refreshToken } = await fastify.refreshTokens.start(player.id, clientMeta(request));
     reply.header('cache-control', 'no-store');
-    return { ...(await issueSession(player, refreshToken)), created: redeemed.created };
+    const { latitude, longitude } = request.body;
+    return { ...(await issueSession(player, refreshToken, { latitude, longitude })), created: redeemed.created };
   });
 }
