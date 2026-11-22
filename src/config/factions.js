@@ -24,6 +24,27 @@ export const FLYING_COLORS_REP_GROWTH_MULT = 1.2;
 
 export const isFactionId = (factionId) => FACTION_IDS.includes(factionId);
 
+// The standing a new player starts with from where their home harbor is (src/lib/harbor.js): the faction controlling
+// the harbor's cell gives SPAWN_CONTROLLED_STANDING; in an uncontrolled cell, each faction gives
+// SPAWN_NEIGHBOR_STANDING for every ring-1 neighbor cell it controls.
+export const SPAWN_CONTROLLED_STANDING = 35;
+export const SPAWN_NEIGHBOR_STANDING = 5;
+
+/**
+ * The standing gains `{ alpha?, beta?, gamma? }` a new player gets for a harbor whose territory is `territory`
+ * (`{ controllingFactionId, neighborFactionIds }` as src/lib/territory.js returns it: '' for an uncontrolled
+ * cell). Two gamma neighbors and one alpha neighbor of an uncontrolled cell give `{ gamma: 10, alpha: 5 }`; a
+ * controlled cell gives its controller SPAWN_CONTROLLED_STANDING and nothing for its neighbors.
+ */
+export function spawnStandingGains({ controllingFactionId, neighborFactionIds }) {
+  if (isFactionId(controllingFactionId)) return { [controllingFactionId]: SPAWN_CONTROLLED_STANDING };
+  const gains = {};
+  for (const id of neighborFactionIds) {
+    if (isFactionId(id)) gains[id] = (gains[id] ?? 0) + SPAWN_NEIGHBOR_STANDING;
+  }
+  return gains;
+}
+
 export const boundedStanding = (standing) => Math.max(MIN_STANDING, Math.min(MAX_STANDING, standing));
 
 // Which of `ids` keeps the status of standing at `threshold` or above in `next`, or null if none

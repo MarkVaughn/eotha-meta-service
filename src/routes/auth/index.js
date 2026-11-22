@@ -34,7 +34,11 @@ export default async function authRoutes(fastify, opts) {
   async function signSession(player, { ttlSeconds, location } = {}) {
     // Guests and Google players are created without a harbor; every session gets one, so the token
     // carries the real home harbor rather than the fallback.
-    if (!player.harbor) player = { ...player, harbor: await ensureHarbor(prisma, player.id, location) };
+    // A harbor created here also grants the spawn faction standing, before the factions claim below is read.
+    if (!player.harbor) {
+      const territory = opts.territory ?? fastify.territory;
+      player = { ...player, harbor: await ensureHarbor(prisma, player.id, location, { territory, log: fastify.log }) };
+    }
     const ship = await prisma.spaceship.findFirst({
       where: { playerId: player.id, active: true },
       orderBy: { createdAt: 'asc' },

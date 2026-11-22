@@ -2,6 +2,7 @@
 # Re-vendor the contract bindings from a sibling eotha-contracts checkout into src/lib/contracts/ (compiled
 # to ESM with ".js" import specifiers, the same pipeline scripts/check-contract-drift.sh verifies):
 #   exploration.js   standalone copy of eotha/rtse/v1/exploration
+#   territory.js     standalone copy of eotha/internal/v1/territory
 #   penalty/         relative-import closure of eotha/internal/v1/penalty_delivery (stale files are removed)
 # Skips quietly if the checkout is absent.
 set -euo pipefail
@@ -25,7 +26,7 @@ OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 contracts_compile "$CONTRACTS" "$OUT"
 
-for entry in "$CONTRACTS_EXPLORATION_ENTRY" "$CONTRACTS_PENALTY_ENTRY"; do
+for entry in "$CONTRACTS_EXPLORATION_ENTRY" "$CONTRACTS_TERRITORY_ENTRY" "$CONTRACTS_PENALTY_ENTRY"; do
   if [ ! -f "$OUT/$entry" ]; then
     echo "sync-contracts: compilation produced no $entry." >&2
     exit 1
@@ -51,6 +52,16 @@ vendor "$OUT/$CONTRACTS_EXPLORATION_ENTRY" "$VENDOR/exploration.js" \
   "// Vendored from eotha-contracts commit $SHA (gen/ts/eotha/rtse/v1/exploration.ts, compiled to ESM). DO NOT EDIT;" \
   "// regenerate with scripts/sync-contracts.sh when exploration.proto changes."
 echo "sync-contracts: wrote $VENDOR/exploration.js"
+
+territory_files="$(node "$TOOLS" closure "$OUT" "$CONTRACTS_TERRITORY_ENTRY")"
+if [ "$territory_files" != "$CONTRACTS_TERRITORY_ENTRY" ]; then
+  echo "sync-contracts: $CONTRACTS_TERRITORY_ENTRY imports other generated files; the standalone territory.js cannot hold them." >&2
+  exit 1
+fi
+vendor "$OUT/$CONTRACTS_TERRITORY_ENTRY" "$VENDOR/territory.js" \
+  "// Vendored from eotha-contracts commit $SHA (gen/ts/eotha/internal/v1/territory.ts, compiled to ESM). DO NOT EDIT;" \
+  "// regenerate with scripts/sync-contracts.sh when territory.proto changes."
+echo "sync-contracts: wrote $VENDOR/territory.js"
 
 # Replace the penalty tree wholesale so files dropped from the import closure do not linger.
 expected="$(node "$TOOLS" closure "$OUT" "$CONTRACTS_PENALTY_ENTRY")"

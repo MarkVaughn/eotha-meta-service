@@ -41,6 +41,10 @@ const envSchema = z.object({
   // Comma-separated SHA-256 client-certificate fingerprints. mTLS is checked from the verified
   // TLS socket rather than a forwarded header, so it is safe to enable at the service boundary.
   INTERNAL_RTSE_MTLS_FINGERPRINTS: optionalString(z.string().min(1)),
+  // Base URL of the engine's private internal listener (its RTSE_INTERNAL_PORT, never the public gateway), such as
+  // http://eotha-rtse:9090. A new player's harbor asks it which factions control the spawn cell and its neighbors,
+  // presenting INTERNAL_RTSE_CREDENTIAL. Unset (or the credential unset), new players start with no spawn standing.
+  RTSE_INTERNAL_URL: optionalString(z.string().url().refine((value) => /^https?:$/.test(new URL(value).protocol), 'must be an http or https URL')),
   // Identifies the public key RTSE has provisioned to verify signed enforcement projections.
   ENFORCEMENT_ISSUER_KEY_ID: z.string().min(1).default('eotha-meta-service-v1'),
   // This service's own Ed25519 key (PEM file) for MissionUnlockVoucher signatures, and the id the engine knows its public

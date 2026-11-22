@@ -23,7 +23,8 @@ export const LEDGER_REASONS = Object.freeze({
   DOMESTIC_ORE_SALE: 'DOMESTIC_ORE_SALE',
   MINING_VIOLATION: 'MINING_VIOLATION',
   EXPEDITION_SETTLED: 'EXPEDITION_SETTLED',
-  DEV_SEED: 'DEV_SEED'
+  DEV_SEED: 'DEV_SEED',
+  SPAWN_TERRITORY: 'SPAWN_TERRITORY'
 });
 
 // The faction a mission's reputation goes to: its signed sponsor, else DEFAULT_FACTION_ID.
@@ -110,6 +111,19 @@ export async function adjustReputation(tx, playerId, factionId, delta, { reason,
 // primary faction. Returns the standings written. Only the development seed (src/lib/dev-seed.js) sets them outright.
 export async function setFactionStandings(tx, playerId, standings, { reason }) {
   return rewriteFactionStandings(tx, playerId, (previous) => ({ ...previous, ...standings }), { reason, missionId: null, factionId: null });
+}
+
+// Adds `gains` (`{ alpha?, beta?, gamma? }`, see spawnStandingGains) to the pilot's standings with the three factions
+// through clampStandingsWithCaps, ledgered as SPAWN_TERRITORY with `factionId` (the faction controlling the spawn
+// cell, or null) as its primary faction, in a transaction of its own holding the pilot's lock. Only a new player's
+// harbor (src/lib/harbor.js) grants them, once. Returns the standings written.
+export async function grantSpawnStandings(prisma, playerId, gains, { factionId = null } = {}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${playerId}))`;
+    return rewriteFactionStandings(tx, playerId, (previous) => Object.fromEntries(
+      FACTION_IDS.map((id) => [id, previous[id] + (gains[id] ?? 0)])
+    ), { reason: LEDGER_REASONS.SPAWN_TERRITORY, missionId: null, factionId });
+  });
 }
 
 // A completion can change sponsor and rival together. Apply both before the faction caps so
