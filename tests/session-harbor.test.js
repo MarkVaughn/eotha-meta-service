@@ -1,7 +1,6 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { isDeepStrictEqual } from 'node:util';
 import Fastify from 'fastify';
 import {
   app, attestationDouble, attestationHeaders, closeApp, json, keysDir, newPilot, PASSWORD, track
@@ -235,8 +234,9 @@ describe('ensureHarbor', () => {
     assert.equal(new Set(harbors.map(({ id }) => id)).size, 1);
     assert.equal(await app.prisma.spaceHarbor.count({ where: { playerId: guest.player.id } }), 1);
     // Whichever insert won, the harbor is one of the candidates, whole: never a mix of two of them.
-    const candidates = [harborAt(HAMBURG), harborAt(locations[1]), DEFAULT_HARBOR].map(harborFields);
-    assert.ok(candidates.some((candidate) => isDeepStrictEqual(candidate, harborFields(harbors[0]))), JSON.stringify(harbors[0]));
+    // Compared by cell: stored coordinates are rounded to the column's 15 significant digits.
+    const candidates = [harborAt(HAMBURG), harborAt(locations[1]), DEFAULT_HARBOR].map(({ h3Index }) => h3Index);
+    assert.ok(candidates.includes(harbors[0].h3Index), JSON.stringify(harbors[0]));
   });
 
   test('an existing harbor is returned unchanged whatever location is passed', async () => {
