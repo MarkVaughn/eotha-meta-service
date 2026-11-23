@@ -4,6 +4,7 @@
 #   exploration.js   standalone copy of eotha/rtse/v1/exploration
 #   territory.js     standalone copy of eotha/internal/v1/territory
 #   penalty/         relative-import closure of eotha/internal/v1/penalty_delivery (stale files are removed)
+# and copies the DockedReceipt golden fixtures from testdata/ to tests/fixtures/contracts/ unchanged.
 # Skips quietly if the checkout is absent.
 set -euo pipefail
 
@@ -71,3 +72,9 @@ while IFS= read -r rel; do
     "// Vendored from eotha-contracts commit $SHA (PenaltyDelivery contracts). DO NOT EDIT; regenerate with scripts/sync-contracts.sh."
 done <<< "$expected"
 echo "sync-contracts: wrote $(printf '%s\n' "$expected" | wc -l | tr -d ' ') files under $VENDOR/penalty"
+
+mkdir -p "$ROOT/tests/fixtures/contracts"
+for fixture in $CONTRACTS_GOLDEN_FIXTURES; do
+  cp "$CONTRACTS/testdata/$fixture" "$ROOT/tests/fixtures/contracts/$fixture"
+  echo "sync-contracts: wrote tests/fixtures/contracts/$fixture"
+done
