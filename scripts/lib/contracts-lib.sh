@@ -8,6 +8,8 @@
 CONTRACTS_EXPLORATION_ENTRY="eotha/rtse/v1/exploration.js"
 CONTRACTS_PENALTY_ENTRY="eotha/internal/v1/penalty_delivery.js"
 CONTRACTS_TERRITORY_ENTRY="eotha/internal/v1/territory.js"
+# DockedReceipt golden fixtures in eotha-contracts testdata/, vendored byte for byte under tests/fixtures/contracts/.
+CONTRACTS_GOLDEN_FIXTURES="docked_receipt_v3_golden.json docked_receipt_body.schema.json"
 
 # contracts_compile <contracts-src-dir> <out-dir>: compile every gen/ts/eotha binding to ESM with ".js"
 # import specifiers. --noCheck: the generated code has Node-typing errors under bare tsc
