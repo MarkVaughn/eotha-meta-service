@@ -25,6 +25,7 @@ import expeditionRoutes from './routes/game/expeditions.js';
 import intelRoutes from './routes/game/intel.js';
 import shipRoutes from './routes/ship/index.js';
 import rtseInternalRoutes from './routes/internal/rtse.js';
+import { dockedReceiptTypeViolation } from './lib/docked-receipt.js';
 
 const fastify = Fastify({
   logger: {
@@ -49,6 +50,15 @@ await fastify.register(intelPlugin);
 await fastify.register(attestationPlugin);
 await fastify.register(identityPlugin);
 await fastify.register(territoryPlugin);
+
+// A `dockedReceipt` in any request body keeps the JSON types the contract fixes: the validator below would otherwise
+// coerce a numeric string timestamp to a number. Runs before validation, so a mismatch is the same 400 an invalid body gets.
+fastify.addHook('preValidation', async (request, reply) => {
+  const violation = dockedReceiptTypeViolation(request.body);
+  if (violation) {
+    return reply.code(400).send({ statusCode: 400, code: 'FST_ERR_VALIDATION', error: 'Bad Request', message: violation });
+  }
+});
 
 // Register Routes
 await fastify.register(authRoutes, { prefix: '/auth' });

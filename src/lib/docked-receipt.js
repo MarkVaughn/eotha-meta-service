@@ -143,6 +143,41 @@ export const dockedReceiptSchema = {
   }
 };
 
+// Fastify's validator coerces types by default ("1700000000000" becomes 1700000000000, null becomes 0, true becomes 1),
+// which would let a receipt whose JSON types differ from the contract's pass validation. The contract fixes them (the
+// `invalid_bodies` in eotha-contracts' golden fixtures), so this checks `value` against `dockedReceiptSchema`'s
+// types on the raw body, before the validator can coerce anything. Returns the first mismatch as a Fastify-style
+// validation message, or null. It checks types only; required fields, patterns and ranges stay with the validator.
+const JSON_TYPE_OF = {
+  object: (v) => v !== null && typeof v === 'object' && !Array.isArray(v),
+  array: (v) => Array.isArray(v),
+  string: (v) => typeof v === 'string',
+  integer: (v) => typeof v === 'number'
+};
+
+function typeViolation(value, schema, path) {
+  if (value === undefined) return null; // a missing field is the validator's `required`, not a type
+  if (!JSON_TYPE_OF[schema.type](value)) return `${path} must be ${schema.type}`;
+  if (schema.type === 'object') {
+    for (const [name, property] of Object.entries(schema.properties ?? {})) {
+      const violation = typeViolation(value[name], property, `${path}/${name}`);
+      if (violation) return violation;
+    }
+  } else if (schema.type === 'array') {
+    for (const [i, item] of value.entries()) {
+      const violation = typeViolation(item, schema.items, `${path}/${i}`);
+      if (violation) return violation;
+    }
+  }
+  return null;
+}
+
+// `body` is a request's raw parsed body; only its `dockedReceipt`, the one the schema above describes, is checked.
+export function dockedReceiptTypeViolation(body) {
+  if (body === null || typeof body !== 'object' || Buffer.isBuffer(body)) return null;
+  return typeViolation(body.dockedReceipt, dockedReceiptSchema, 'body/dockedReceipt');
+}
+
 // Why a present `receipt` does not prove that `pilotId` is docked at `nowMs`, as the `{ error, code }`
 // body of a 403, or null when it does.
 export function dockedReceiptRefusal(receipt, { pilotId, publicKey, nowMs, log }) {

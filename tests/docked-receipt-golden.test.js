@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createPublicKey } from 'node:crypto';
-import { app, call, closeApp, json, newPilot, setCredits } from './helpers.js';
+import { app, call, closeApp, dockedReceipt, json, newPilot, setCredits } from './helpers.js';
 import {
   canonicalDockedReceiptPayload,
   dockedReceiptSchema,
@@ -131,6 +131,7 @@ describe('verifyDockedReceipt on the golden signed receipts', () => {
 // since a schema object that matches on paper can still be refused or coerced by the route. POST /ship/upgrade
 // validates `dockedReceipt` before it looks at the receipt: a body that passes validation is then refused 403
 // because the golden receipt names `pilot-1`, not this pilot, while a body that fails validation is a 400.
+// A numeric-string timestamp is such a body, as the contract says.
 describe('POST /ship/upgrade request validation of the golden bodies', () => {
   before(async () => { await app.ready(); });
   after(async () => { await closeApp(); });
@@ -148,26 +149,45 @@ describe('POST /ship/upgrade request validation of the golden bodies', () => {
     }
   });
 
-  // Known divergence from the contracts README, which says the meta-service answers 400 to every invalid body:
-  // Fastify's default validator coerces a numeric string to a number, so the route accepts the timestamps sent as
-  // decimal strings (the coerced receipt is the same one, so it still verifies). Pinned here so a change either way
-  // is noticed; every other invalid body must be refused.
-  const COERCED_BY_ROUTE = new Set(['timestamps-as-strings']);
-
-  test('every golden invalid body is a 400, except the ones the route coerces', async () => {
+  test('every golden invalid body is a 400', async () => {
     const pilot = await newPilot('GoldenReject');
     await setCredits(pilot, 10_000);
     for (const invalid of golden.invalid_bodies) {
       const res = await upgrade(pilot, clone(invalid.body));
-      if (COERCED_BY_ROUTE.has(invalid.name)) {
-        assert.equal(res.statusCode, 403, `${invalid.name}: ${res.body}`);
-        assert.equal(json(res).code, 'docked_receipt_invalid', invalid.name);
-      } else {
-        assert.equal(res.statusCode, 400, `${invalid.name}: ${res.body}`);
-      }
+      assert.equal(res.statusCode, 400, `${invalid.name}: ${res.body}`);
     }
-    for (const name of COERCED_BY_ROUTE) {
-      assert.ok(golden.invalid_bodies.some((invalid) => invalid.name === name), `${name} is no longer a golden invalid body`);
+  });
+
+  // The contract sends the timestamps as JSON numbers; Fastify's default validator would coerce a numeric string, so
+  // the app rejects a `dockedReceipt` whose JSON types differ from the schema's before validation.
+  test('a numeric-string timestamp is a 400 while the same receipt with numeric timestamps is accepted', async () => {
+    const pilot = await newPilot('StringTimestamps');
+    await setCredits(pilot, 10_000);
+    const receipt = dockedReceipt(pilot);
+    const accepted = await upgrade(pilot, receipt);
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    for (const field of ['dockedAtMs', 'issuedAtMs']) {
+      const res = await upgrade(pilot, { ...receipt, [field]: String(receipt[field]) });
+      assert.equal(res.statusCode, 400, `${field}: ${res.body}`);
+      assert.match(json(res).message, new RegExp(`dockedReceipt/${field} must be integer`), field);
+    }
+  });
+
+  test('other JSON types the validator would coerce are a 400 too', async () => {
+    const pilot = await newPilot('CoercedTypes');
+    await setCredits(pilot, 10_000);
+    const receipt = dockedReceipt(pilot);
+    const retyped = [
+      ['a boolean timestamp', { dockedAtMs: true }],
+      ['a null timestamp', { issuedAtMs: null }],
+      ['an array timestamp', { issuedAtMs: [receipt.issuedAtMs] }],
+      ['a numeric-string quality mask', { stockedQualityMask: String(receipt.stockedQualityMask) }],
+      ['a numeric-string catalog tier', { outfittingStock: receipt.outfittingStock.map((entry) => ({ ...entry, maxTier: String(entry.maxTier) })) }],
+      ['a numeric pilot id', { pilotId: 7 }]
+    ];
+    for (const [what, overrides] of retyped) {
+      const res = await upgrade(pilot, { ...receipt, ...overrides });
+      assert.equal(res.statusCode, 400, `${what}: ${res.body}`);
     }
   });
 
